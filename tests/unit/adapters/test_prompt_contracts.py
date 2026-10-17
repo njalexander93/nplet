@@ -156,25 +156,34 @@ def test_prompt_rejects_malformed_or_ambiguous_task_without_write(
         assert result["decision"] == "block"
 
 
-def test_prompt_records_exact_lookup_marker_for_codex(
+@pytest.mark.parametrize("host", ["codex", "claude-code", "cursor"])
+def test_prompt_records_exact_lookup_marker_with_effect_scoped_guidance(
     monkeypatch: pytest.MonkeyPatch,
+    host: str,
 ) -> None:
-    """Require a direct provider issue read after explicit Task selection.
+    """Preserve selected-ticket markers while limiting readiness guidance to implementation.
 
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
+        host: Explicit native adapter identity.
     """
     data = setup_prompt(monkeypatch)
     event = {"cwd": str(ROOT), "session_id": "session", "prompt": "Task: TEST-30"}
-    result = common.prompt(event, "codex")
-    key = core.participant_key({"host": "codex", "session_id": "session"})
+    result = common.prompt(event, host)
+    key = core.participant_key({"host": host, "session_id": "session"})
     bindings = data[BINDINGS]
     assert bindings[key + ".assignment.json"] == {"issue_id": "TEST-30"}
     assert bindings[key + ".lookup-required.json"] == {"issue_id": "TEST-30"}
+    context = result["hookSpecificOutput"]["additionalContext"]
     assert (
-        "Read the requested Linear ticket first"
-        in result["hookSpecificOutput"]["additionalContext"]
+        "Research, inspection, search, administration and ordinary notes remain available"
+        in context
     )
+    assert "while this ticket lookup is pending" in context
+    assert "Before implementation changes, read the exact requested Linear ticket" in context
+    assert "then complete scoped workspace setup and verify readiness" in context
+    assert "existing approval requirements" in context
+    assert "Read the requested Linear ticket first" not in context
 
 
 def test_prompt_refuses_switch_from_existing_assignment(
@@ -219,7 +228,7 @@ def test_prompt_records_pending_switch_for_bound_session_without_touching_bindin
         key + ".lookup-required.json": {"issue_id": "TEST-31"},
     }
     context = result["hookSpecificOutput"]["additionalContext"]
-    assert "Read the requested Linear ticket first" in context
+    assert "Before implementation changes, read the exact requested Linear ticket" in context
     assert "rebinds this session from TEST-30" in context
 
 

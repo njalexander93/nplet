@@ -17,6 +17,8 @@
 - **Existing progress:** <Verified prior outputs, approvals and unresolved work>
 - **Blockers:** <Affected work, responsible owner and next action>
 
+Research and ordinary planning notes may precede task setup. This workspace records
+the transition to task-scoped implementation; it does not gate all tool use.
 Follow the canonical contributor procedure at `docs/runtime/contributor-workflow.md`
 in the selected checkout for proposal approval, dispatch, verification and delivery.
 The coordinator owns this roadmap. Preserve existing bytes and progress on attach

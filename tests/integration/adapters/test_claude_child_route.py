@@ -111,6 +111,29 @@ def read_call(case: Fixture, name: str, tool_id: str, **fields: JsonValue) -> Js
     )
 
 
+def edit_call(case: Fixture, name: str, tool_id: str, **fields: JsonValue) -> JsonObject:
+    """Build a protected child edit for native settlement assertions.
+
+    Args:
+        case: Disposable repository fixture.
+        name: PreToolUse or PostToolUse.
+        tool_id: Native tool-use identity.
+        **fields: Explicit result or child identity overrides.
+
+    Returns:
+        A child Write event targeting implementation.
+    """
+    return event(
+        case,
+        name,
+        child=True,
+        tool_name="Write",
+        tool_use_id=tool_id,
+        tool_input={"file_path": str(case.root / "src/example.py"), "content": "pass\n"},
+        **fields,
+    )
+
+
 def denied(response: JsonObject) -> bool:
     """Report whether a PreToolUse response denies the native call.
 
@@ -220,13 +243,28 @@ def test_ready_parent_agent_child_joins_works_and_stops(case: Fixture) -> None:
     assert [ref["locator"] for ref in member["packet"]] == ["roadmap.md"]
     assert member["packet"][0]["reason"] == "issue-resume"
     assert state["coordinator"] == case.base["coordinator"]
-    # A child Read is admitted and settled under the child participant only.
+    # A child read remains task-free under its own joined identity.
     assert not denied(claude.handle(read_call(case, "PreToolUse", "child-read")))
-    assert "child-read" in case.state()["participants"][key(CHILD)]["pending"]
+    assert case.state()["participants"][key(CHILD)]["pending"] == {}
     claude.handle(read_call(case, "PostToolUse", "child-read", tool_response={"ok": True}))
     state = case.state()
     assert state["participants"][key(CHILD)]["pending"] == {}
     assert "child-read" not in state["participants"][case.base["coordinator"]]["pending"]
+    # Task-free prose mutations do not inherit this child's managed-note ownership.
+    before = case.state()
+    note = edit_call(case, "PreToolUse", "child-note")
+    note["tool_input"] = {"file_path": str(case.root / "outside.md"), "content": "note"}
+    response = claude.handle(note)
+    assert denied(response)
+    assert "HOST_UNSUPPORTED_TOOL" in str(response)
+    assert case.state() == before
+    # Protected child work still needs its own pending identity and correlated completion.
+    assert not denied(claude.handle(edit_call(case, "PreToolUse", "child-edit")))
+    state = case.state()
+    assert "child-edit" in state["participants"][key(CHILD)]["pending"]
+    assert "child-edit" not in state["participants"][case.base["coordinator"]]["pending"]
+    claude.handle(edit_call(case, "PostToolUse", "child-edit", tool_response={"ok": True}))
+    assert case.state()["participants"][key(CHILD)]["pending"] == {}
     # SubagentStop is an observation: no detach and no settlement of the parent call.
     stopped = claude.handle(
         event(case, "SubagentStop", child=True, stop_hook_active=False, last_assistant_message="")
@@ -478,16 +516,16 @@ def provider_call(case: Fixture, operation: str, tool_id: str, **fields: JsonVal
 
 
 def test_child_provider_read_is_admitted_and_settled(case: Fixture) -> None:
-    """Admit a ready child's Linear read as its own pending work.
+    """Admit a ready child's Linear read without adding task pending work.
 
     Args:
         case: Disposable repository fixture.
     """
-    # Join the child, then admit its read as pending work under the child key only.
+    # Join the child, then admit its read without recording task work.
     start_child(case)
     assert not denied(claude.handle(provider_call(case, "get_issue", "child-get")))
-    assert "child-get" in case.state()["participants"][key(CHILD)]["pending"]
-    # Settle the read through the child's own PostToolUse completion.
+    assert case.state()["participants"][key(CHILD)]["pending"] == {}
+    # A task-free completion also leaves the child pending map unchanged.
     claude.handle(provider_call(case, "get_issue", "child-get", tool_response=[{"type": "text"}]))
     assert case.state()["participants"][key(CHILD)]["pending"] == {}
 
@@ -508,11 +546,11 @@ def test_child_provider_writes_are_denied(case: Fixture, operation: str) -> None
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
     assert "HOST_UNSUPPORTED_PROVIDER" in reason
     assert case.state() == before
-    # The same write from the ready parent remains admitted as pending work.
+    # The parent's known administrative write is task-free.
     parent = provider_call(case, operation, "parent-write")
     del parent["agent_id"], parent["agent_type"]
     assert not denied(claude.handle(parent))
-    assert "parent-write" in case.state()["participants"][case.base["coordinator"]]["pending"]
+    assert case.state() == before
 
 
 @pytest.mark.parametrize("operation", ["get_status", "set_monitor"])
@@ -537,9 +575,11 @@ def test_child_app_pr_monitor_is_denied(case: Fixture, operation: str) -> None:
     assert denied(response)
     assert "HOST_UNSUPPORTED_PROVIDER" in response["hookSpecificOutput"]["permissionDecisionReason"]
     assert case.state() == before
-    # The same call from the ready parent remains admitted as pending work.
+    # The parent status read is task-free; automatic fixes still require tracked work.
     assert not denied(claude.handle(event(case, "PreToolUse", tool_use_id="parent-pr", **fields)))
-    assert "parent-pr" in case.state()["participants"][case.base["coordinator"]]["pending"]
+    assert ("parent-pr" in case.state()["participants"][case.base["coordinator"]]["pending"]) is (
+        operation == "set_monitor"
+    )
 
 
 def test_child_handback_and_parent_message_record_no_pending_work(case: Fixture) -> None:
@@ -601,22 +641,22 @@ def test_cursor_subagent_start_is_unchanged(case: Fixture) -> None:
     assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in response["user_message"]
 
 
-def parent_read(case: Fixture, tool_id: str) -> JsonObject:
-    """Build a parent Read PreToolUse envelope whose tool-start advances the revision.
+def parent_edit(case: Fixture, tool_id: str) -> JsonObject:
+    """Build a protected parent edit whose tool-start advances the revision.
 
     Args:
         case: Disposable repository fixture.
         tool_id: Native tool-use ID of the parent's call.
 
     Returns:
-        A parent Read tool event for the issue roadmap.
+        A parent Write event for a protected source file.
     """
     return event(
         case,
         "PreToolUse",
-        tool_name="Read",
+        tool_name="Write",
         tool_use_id=tool_id,
-        tool_input={"file_path": str(case.root / ".task/TEST-1/roadmap.md")},
+        tool_input={"file_path": str(case.root / "src/example.py"), "content": "pass\n"},
     )
 
 
@@ -653,7 +693,7 @@ def drift_before(
             return original(request)
         # The first matching call sees a revision another hook has just advanced.
         if not results:
-            assert not denied(claude.handle(parent_read(case, "parent-drift")))
+            assert not denied(claude.handle(parent_edit(case, "parent-drift")))
         result = original(request)
         results.append(result)
         return result
@@ -813,12 +853,12 @@ def test_sequential_children_each_end_ready_under_their_own_keys(case: Fixture) 
     state = case.state()
     assert state["participants"][key(CHILD)]["status"] == "ready"
     assert state["participants"][key(second)]["status"] == "ready"
-    # Each child's Read is pending and settled only under that child's participant.
-    for agent, session, tool_id in ((AGENT, CHILD, "read-1"), ("agent-2", second, "read-2")):
-        assert not denied(claude.handle(read_call(case, "PreToolUse", tool_id, agent_id=agent)))
+    # Each child's protected edit settles only under that child's participant.
+    for agent, session, tool_id in ((AGENT, CHILD, "edit-1"), ("agent-2", second, "edit-2")):
+        assert not denied(claude.handle(edit_call(case, "PreToolUse", tool_id, agent_id=agent)))
         members = case.state()["participants"]
         assert list(members[key(session)]["pending"]) == [tool_id]
         assert tool_id not in members[case.base["coordinator"]]["pending"]
-        done = read_call(case, "PostToolUse", tool_id, agent_id=agent, tool_response={"ok": 1})
+        done = edit_call(case, "PostToolUse", tool_id, agent_id=agent, tool_response={"ok": 1})
         claude.handle(done)
         assert case.state()["participants"][key(session)]["pending"] == {}

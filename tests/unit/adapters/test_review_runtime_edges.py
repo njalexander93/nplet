@@ -15,6 +15,7 @@ from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
 
+
 ISSUE = "TEST-30"
 UUID = "0920cdcc-1644-4fa1-bf71-eb8370134c70"
 ROOT = Path("/ticket-unit-repository")
@@ -951,6 +952,7 @@ def test_cursor_startup_failure_requires_a_fresh_native_read(
         (cursor, "preToolUse", "postToolUse", "postToolUseFailure"),
     ],
 )
+@pytest.mark.usefixtures("recorded_operation", "protected_effect", "selected_ticket_dispatch")
 def test_native_handlers_gate_ticket_first_and_route_completion(
     monkeypatch: pytest.MonkeyPatch, adapter: Any, pre: str, post: str, failed: str
 ) -> None:
@@ -1019,6 +1021,7 @@ def test_native_handlers_gate_ticket_first_and_route_completion(
         assert denied["permission"] == "deny"
 
 
+@pytest.mark.usefixtures("selected_ticket_dispatch")
 def test_cursor_mcp_specific_admission_requires_ticket_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1057,6 +1060,7 @@ def test_cursor_mcp_specific_admission_requires_ticket_server(
     assert denied["permission"] == "deny"
 
 
+@pytest.mark.usefixtures("recorded_operation", "selected_ticket_dispatch")
 def test_native_completion_without_verified_ticket_stays_unready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1104,7 +1108,7 @@ def test_cursor_unselected_mcp_callbacks_cannot_complete_ticket(
         "native_post",
         lambda _event, _host, failed: settled.append(failed),
     )
-    assert cursor.handle({"hook_event_name": "beforeMCPExecution"}) == {}
+    assert cursor.handle({"hook_event_name": "beforeMCPExecution"})["permission"] == "deny"
     assert cursor.handle({"hook_event_name": "afterMCPExecution"}) == {}
     # Without a pending Task, the generic posthook enters ordinary settlement.
     assert cursor.handle({"hook_event_name": "postToolUse", "tool_name": "MCP:get_issue"}) == {}

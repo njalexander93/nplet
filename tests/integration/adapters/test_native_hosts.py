@@ -56,7 +56,7 @@ def native(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> I
 
 
 def native_event(host: NativeHost, case: Fixture, name: str, **fields: JsonValue) -> JsonObject:
-    """Build native event shapes without adding Codex-only shell/login parameters.
+    """Build lifecycle work envelopes without Codex-only shell/login parameters.
 
     Args:
         host: Native wire protocol to use.
@@ -67,14 +67,14 @@ def native_event(host: NativeHost, case: Fixture, name: str, **fields: JsonValue
     Returns:
         Native envelope with stable session identity and real disposable cwd.
     """
-    # Populate common tool identity without granting any issue binding.
+    # Default to task-scoped work so lifecycle tests exercise readiness and settlement.
     event: JsonObject = {
         "hook_event_name": name,
         "cwd": str(case.root),
         "tool_use_id": "actual-tool",
-        "tool_name": "Read" if host == "claude" else "Shell",
+        "tool_name": "Write" if host == "claude" else "Shell",
         "tool_input": (
-            {"file_path": str(case.root / ".task/TEST-1/roadmap.md")}
+            {"file_path": str(case.root / "src/example.py"), "content": "pass\n"}
             if host == "claude"
             else {"command": "true"}
         ),
@@ -271,7 +271,10 @@ def test_cursor_ticket_callbacks_require_both_pre_events_and_native_call_id(
     before, after = ticket_callbacks(host, case, issue)
     # Admit the server-specific callback first, then reject completion without call ID.
     assert_decision(host, dispatch(host, before[1]), True)
-    assert "BINDING_CONFLICT" in str(dispatch(host, after))
+    marker = case.root / ".task/.bindings" / (case.base["coordinator"] + ".lookup.json")
+    reserved = marker.read_bytes()
+    assert dispatch(host, after) == {}
+    assert marker.read_bytes() == reserved
     assert not (case.root / ".task/TEST-1").exists()
     # Correlate generic pre with the same single call and reject overlapping calls.
     assert_decision(host, dispatch(host, before[0]), True)
@@ -331,7 +334,10 @@ def test_cursor_failed_local_setup_retries_with_new_call_id(
     # Begin a fresh call with server-specific callback first; old completion is stale.
     retry_before, retry_after = ticket_callbacks(host, case, issue, "second-read")
     assert_decision(host, dispatch(host, retry_before[1]), True)
-    assert "BINDING_CONFLICT" in str(dispatch(host, after))
+    marker = case.root / ".task/.bindings" / (case.base["coordinator"] + ".lookup.json")
+    reserved = marker.read_bytes()
+    assert dispatch(host, after) == {}
+    assert marker.read_bytes() == reserved
     assert_decision(host, dispatch(host, retry_before[0]), True)
     assert "TASK_WORKSPACE_READY" in str(dispatch(host, retry_after))
 
@@ -557,15 +563,15 @@ def test_native_wrong_tool_completion_cannot_settle_original(native: NativeCase)
     host, case = native
     case.create()
     case.ready()
-    inputs: JsonObject = {"file_path": str(case.root / ".task/TEST-1/roadmap.md")}
-    dispatch(host, native_event(host, case, "PreToolUse", tool_name="Read", tool_input=inputs))
+    inputs: JsonObject = {"file_path": str(case.root / "src/example.py"), "content": "pass\n"}
+    dispatch(host, native_event(host, case, "PreToolUse", tool_name="Write", tool_input=inputs))
     failure = native_event(
         host,
         case,
         "PostToolUseFailure",
         tool_use_id="unrelated-tool",
         is_interrupt=False,
-        tool_name="Read",
+        tool_name="Write",
         tool_input=inputs,
     )
     # Use each host's documented failure-description field.
@@ -873,11 +879,18 @@ def test_native_config_quotes_checkout_and_reports_missing_environment(
         command = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     # Cursor additionally requires fail-closed configuration at the permission boundary.
     else:
-        # Cursor reads its native hook registration from hooks.json.
+        # Require both blocking boundaries: generic identity and server-specific provenance.
         config = json.loads((ROOT / ".cursor/hooks.json").read_text())
-        entry = config["hooks"]["preToolUse"][0]
-        command = entry["command"]
-        assert entry["failClosed"] is True
+        command = (
+            "git -c alias.task-workspace-hook=!./src/nplet/adapters/launch.sh "
+            "task-workspace-hook cursor"
+        )
+        for event_name in ("preToolUse", "beforeMCPExecution"):
+            # Both registrations must invoke the reviewed adapter and fail closed.
+            entries = config["hooks"][event_name]
+            assert entries
+            assert all(entry["command"] == command for entry in entries)
+            assert all(entry.get("failClosed") is True for entry in entries)
     # Make a quoted checkout containing only the real entry script and local interpreter link.
     root = tmp_path / "checkout with 'quotes'"
     root.mkdir()
@@ -893,8 +906,8 @@ def test_native_config_quotes_checkout_and_reports_missing_environment(
         "conversation_id": "isolated",
         "workspace_roots": [str(root)],
         "cwd": str(nested),
-        "tool_name": "Read",
-        "tool_input": {"file_path": str(root / "unregistered.md")},
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(root / "src/unregistered.py"), "content": "pass\n"},
         "tool_use_id": "isolated-tool",
     }
     environment = os.environ.copy()
@@ -1158,6 +1171,18 @@ def test_native_coordinator_self_refresh_recovers_stale_governing_source(
     denied = dispatch(host, native_event(host, case, "PreToolUse"))
     assert_decision(host, denied, False)
     assert "SOURCE_STALE" in str(denied) and "self-refresh scope" in str(denied)
+    # Stale readiness blocks implementation but does not block inspection or settle work.
+    state_before_read = case.state()
+    inspection = native_event(
+        host,
+        case,
+        "PreToolUse",
+        tool_name="Read",
+        tool_use_id="stale-inspection",
+        tool_input={"file_path": str(case.root / "AGENTS.md")},
+    )
+    assert_decision(host, dispatch(host, inspection), True)
+    assert case.state() == state_before_read
     # Obtain the current packet through the admitted issue-level diagnose, not state.json.
     diagnosis = lifecycle_call(
         host, case, shell, {**base, "operation": "diagnose", "request_id": "d"}

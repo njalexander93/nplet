@@ -144,10 +144,27 @@ class ChildTests(Fixture):
                 "HOST_UNSUPPORTED_TOOL",
             ),
         ):
+            # Supply native call identity so each case isolates its intended authority failure.
+            event.setdefault("tool_use_id", str(uuid.uuid4()))
             with pytest.raises(core.WorkspaceError, match=code):
                 children.child_pre(event)
             assert self.state() == before
             assert not (self.root / "sentinel").exists()
+        # Generic notes cannot acquire managed-output authority through the free effect policy.
+        for tool, arguments in [
+            ("Write", {"file_path": str(self.root / "outside.md"), "content": "note"}),
+            ("Bash", {"command": "touch -- outside.md"}),
+        ]:
+            with pytest.raises(core.WorkspaceError, match="HOST_UNSUPPORTED_TOOL"):
+                children.child_pre(
+                    {
+                        **peer,
+                        "tool_name": tool,
+                        "tool_use_id": str(uuid.uuid4()),
+                        "tool_input": arguments,
+                    }
+                )
+            assert self.state() == before
         # Explicit coordinator ownership is necessary, and re-scoping invalidates readiness.
         self.call(
             "scope",

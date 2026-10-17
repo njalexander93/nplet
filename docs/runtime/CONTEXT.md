@@ -11,7 +11,7 @@ Working inputs are the selected checkout, host/event or lifecycle operation and 
 
 ### Contributor workflow
 
-When starting or resuming an issue, follow the [canonical contributor procedure](contributor-workflow.md). An assigned child uses its [step-thread route](contributor-workflow.md#step-thread-route). This procedure owns contributor sequencing and approval; the lifecycle references below own storage and readiness mechanics.
+Research, inspection, planning, administration and ordinary notes use the [effect boundary](task-workspace.md#task-free-work-and-implementation-effects) without task setup. Before implementation, or when starting or resuming an issue, follow the [canonical contributor procedure](contributor-workflow.md). An assigned child uses its [step-thread route](contributor-workflow.md#step-thread-route). This procedure owns contributor sequencing and approval; the lifecycle references below own storage and readiness mechanics.
 
 ### Setup
 

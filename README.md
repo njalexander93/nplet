@@ -25,6 +25,8 @@ Contributor setup supports **macOS, Linux and native Windows**. The setup guides
 2. **[Configure your agent's task-workspace integration](docs/runtime/host-hooks.md#setup-and-bootstrap)**
 3. **[Use the shared task workspace](docs/runtime/task-workspace-usage.md#usage)**
 
+Research, inspection, planning, administration and ordinary notes can proceed without task setup. Before implementation, use the [contributor procedure](docs/runtime/contributor-workflow.md) and its human roadmap approval gate.
+
 For contributions, follow the [local checks](docs/runtime/development.md#checks) and submit a pull request for human review.
 
 ## Explore the framework

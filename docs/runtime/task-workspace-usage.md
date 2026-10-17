@@ -3,6 +3,9 @@
 For issue start/resume and assigned steps, follow the [canonical contributor
 procedure](contributor-workflow.md). This guide describes lifecycle mechanics;
 `active` disposition, present storage and readiness do not approve implementation.
+Research, inspection, planning, administration and ordinary notes need no task setup.
+Use the [effect boundary](task-workspace.md#task-free-work-and-implementation-effects)
+and enter the contributor procedure before implementation changes.
 New roadmap templates start **Proposed / awaiting explicit approval**. Attach and
 resume preserve existing roadmap bytes, including recorded progress and approval.
 
@@ -124,8 +127,9 @@ The startup prompt accepts exactly one standalone `Task: <issue-id>` line, for e
 `Task: ISSUE-1`. Each supported runtime adapter records that identifier before
 requiring local registration. Its exact Linear issue read is admitted before
 readiness through the [host-specific ticket-read protocol](host-hooks.md#ticket-read-protocols).
-Only the bounded preparation reads in
-[setup step 3](host-hooks.md#setup-and-bootstrap) may precede it. Codex and Claude Code
+Supported task-free operations remain available while the selected ticket read is
+pending. The transition itself keeps the selected read as its first issue-provider
+operation; [setup step 3](host-hooks.md#setup-and-bootstrap) describes bounded preparation. Codex and Claude Code
 implement their documented preparation routes; Cursor has no preparation phase.
 The adapter verifies the response's identifier and immutable issue UUID, then
 invokes the shared startup orchestrator with the actual runtime/session identity.
@@ -324,8 +328,8 @@ results establish the tested Linux environment, not native Windows support.
 Codex SessionStart, PreCompact and PostCompact retain precise readiness/error codes in
 bounded recovery context. They do not terminate the session merely because it
 needs registration, resume, scope repair or acknowledgment. No readiness is granted:
-ordinary PreToolUse calls remain denied, and the existing exact bootstrap and
-provider exceptions still apply.
+implementation and unknown mutation-capable PreToolUse calls remain gated, while
+known task-free work and exact startup/recovery routes remain available.
 
 Codex's observed native `Bash` and `apply_patch` final text, `webrun` content lists,
 MCP content objects and supported collaboration controls settle their exact native

@@ -372,7 +372,15 @@ def child_pre(event: core.JSONObject) -> None:
     key = core.participant_key({"host": "codex", "session_id": event["session_id"]})
     with registry(parent) as (_bindings, _name, state):
         core.require(state["children"].get(key, {}).get("status") == "joined", "BINDING_MISSING")
-    # Limit child execution to a single native shell command with no extra transport fields.
+    # Generic provider authority is not part of the restricted native child route.
+    core.require(
+        not str(event.get("tool_name", "")).startswith(("mcp__", "MCP:")), "HOST_UNSUPPORTED_TOOL"
+    )
+    # Task-free native reads retain this child's verified cohort identity.
+    decision = common.effect_decision(event, "codex")
+    if event.get("tool_name") != "Bash" and decision.effect == "read":
+        return
+    # Limit protected child execution to canonical lifecycle operations under its own scope.
     core.require(event.get("tool_name") == "Bash", "HOST_UNSUPPORTED_TOOL")
     args = event.get("tool_input")
     core.require(isinstance(args, dict) and set(args) == {"command"}, "INVALID_REQUEST")
@@ -388,6 +396,10 @@ def child_pre(event: core.JSONObject) -> None:
     # Source delivery before acknowledgment is restricted to exact assigned source paths.
     child = common.request_for(event, "read", "codex")
     packet = core.execute(child)
+    # Stale packet bytes cannot prove delivery, but they cannot block ordinary inspection.
+    if not packet["ok"] and decision.effect == "read":
+        core.require(packet["code"] in {"SOURCE_STALE", "NOT_READY"}, packet["code"])
+        return
     core.require(packet["ok"], packet["code"])
     paths = source_paths(child, packet)
     # Match exact source commands before considering lifecycle operations.
@@ -446,7 +458,10 @@ def child_pre(event: core.JSONObject) -> None:
                 )
                 bindings.put(name, state)
             return
-    # Every mutation is a canonical core transaction under this child's observed identity.
+    # Other understood inspection calls create no lifecycle pending work.
+    if decision.effect == "read":
+        return
+    # Every protected mutation is a canonical core transaction under this child's identity.
     core.require(common.canonical_bootstrap(event, command, "codex", True), "HOST_UNSUPPORTED_TOOL")
     request = common.bootstrap_request(command, "codex", common.PYTHON, common.LIFECYCLE)
     operation = request.get("operation")

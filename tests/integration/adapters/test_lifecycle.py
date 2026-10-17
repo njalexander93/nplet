@@ -181,7 +181,7 @@ class LifecycleTests(Fixture):
         )
 
     def test_native_preparation_preserves_ticket_gate_and_denies_shell_variants(self) -> None:
-        """Allow exact governing reads without admitting ordinary work or losing lookup state.
+        """Allow inspection while keeping protected work behind the ticket gate.
 
         Raises:
             AssertionError: Preparation changes readiness or a broader shell command passes.
@@ -200,12 +200,14 @@ class LifecycleTests(Fixture):
                 == {}
             )
             assert hook.startup_lookup_state(event, ".lookup-required.json")
-        # Shell composition, redirected paths and ordinary tools cannot use the exception.
+        # Additional supported inspection is task-free without consuming ticket state.
+        for command in ("cat " + shlex.quote((self.root / "pyproject.toml").as_posix()), "pwd"):
+            event["tool_input"] = {"command": command}
+            assert hook.handle(event) == {}
+        # Opaque composition and writes still require the selected ticket.
         for command in (
-            "cat " + str(self.root / "pyproject.toml"),
             "cat -- " + str(self.root / "AGENTS.md") + "; true",
             "cat -- " + str(self.root / "AGENTS.md") + " > copied",
-            "pwd",
         ):
             event["tool_input"] = {"command": command}
             assert hook.handle(event) == hook.denial("TICKET_READ_REQUIRED")

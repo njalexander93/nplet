@@ -13,6 +13,7 @@ from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
 
+
 HOST = "claude-code"
 PARENT = "parent"
 CHILD = PARENT + "/agent/agent-1"
@@ -145,6 +146,7 @@ def test_record_agent_call_keeps_bounded_unique_recent_ids(
     assert recorded_calls(tmp_path) == ["call-1", "call-3", "call-4"]
 
 
+@pytest.mark.usefixtures("protected_effect")
 def test_native_pre_records_agent_call_before_tool_start(monkeypatch: pytest.MonkeyPatch) -> None:
     """Record the parent's Agent call marker before the core tool-start.
 
@@ -178,9 +180,19 @@ def test_native_pre_records_agent_call_before_tool_start(monkeypatch: pytest.Mon
     }
     assert common.native_pre(event, HOST) is None
     assert order == ["ready", "record", "tool-start"]
-    # An ordinary tool records no Agent marker.
+    # A protected source edit records pending work without an Agent launch marker.
     order.clear()
-    assert common.native_pre({**event, "tool_name": "Read", "tool_input": {}}, HOST) is None
+    assert (
+        common.native_pre(
+            {
+                **event,
+                "tool_name": "Write",
+                "tool_input": {"file_path": "src/main.py", "content": "source"},
+            },
+            HOST,
+        )
+        is None
+    )
     assert order == ["ready", "tool-start"]
 
 

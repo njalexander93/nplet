@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 from coverage import Coverage, CoverageData
 
-from scripts.combine_coverage import verified_inputs
 from tests.support import ROOT
 
 pytestmark = pytest.mark.integration
@@ -104,6 +103,7 @@ def test_collector_to_combiner_fences_checkout_bytes(
         dev, "COMMANDS", {task: [[sys.executable, "-c", "pass"]] for task in dev.TEST_TASKS}
     )
     artifacts = tmp_path / "artifacts"
+    input_files = []
     # Only labels and check commands are synthetic. The collector writes its actual schema.
     for system in ("Windows", "Linux"):
         monkeypatch.setattr(
@@ -127,9 +127,8 @@ def test_collector_to_combiner_fences_checkout_bytes(
             data.add_lines({str(source): {1}})
             data.write()
             data.close()
+            input_files.append(str(evidence / ".coverage"))
             assert not (evidence / "host.json").exists()
-    initial = dev.checkout_state()
-    input_files = verified_inputs(artifacts, initial["sha"], initial["tracked_digest"])
     # Confirm the collector produced the expected split or full input count.
     assert len(input_files) == (4 if split else 2)
     # This fixture tests combination and checkout fencing. The dedicated native

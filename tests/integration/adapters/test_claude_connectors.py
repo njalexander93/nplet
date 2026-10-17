@@ -50,15 +50,18 @@ def test_desktop_connector_requires_mapping_and_exact_correlated_read(
                 mcp_server={"name": CONNECTOR, "source": source},
             )
         # A UUID alone grants no exception, even when the host reports a known source.
-        assert "TICKET_READ_REQUIRED" in str(claude.handle(before[0]))
+        assert _denied(claude.handle(before[0]), "TICKET_READ_REQUIRED")
         monkeypatch.setenv("NPLET_CLAUDE_LINEAR_CONNECTOR_ID", CONNECTOR)
-        # Wrong issues remain denied and must not create a workspace.
+        # Unrelated research reads do not consume the selected-ticket transition.
         wrong = {**before[0], "tool_input": {"id": "TEST-2"}}
-        assert "BINDING_CONFLICT" in str(claude.handle(wrong))
+        assert claude.handle(wrong) == {}
         assert not (case.root / ".task/TEST-1").exists()
         # Admit the real read, reject a mismatched completion, then settle the right call.
         assert claude.handle(before[0]) == {}
-        assert "BINDING_CONFLICT" in str(claude.handle({**after, "tool_use_id": "different-call"}))
+        marker = case.root / ".task/.bindings" / (case.base["coordinator"] + ".lookup.json")
+        reserved = marker.read_bytes()
+        assert claude.handle({**after, "tool_use_id": "different-call"}) == {}
+        assert marker.read_bytes() == reserved
         assert not (case.root / ".task/TEST-1").exists()
         # Multiple content blocks remain invalid and cannot create workspace state.
         if content_blocks:
@@ -116,6 +119,7 @@ def _desktop_case(monkeypatch: pytest.MonkeyPatch) -> Fixture:
     # Remove imported-hook markers and map one verified connector.
     monkeypatch.delenv("CURSOR_VERSION", raising=False)
     monkeypatch.setenv("NPLET_CLAUDE_LINEAR_CONNECTOR_ID", CONNECTOR)
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
     case = Fixture()
     case.setUp()
     case.base["host"] = claude.HOST
@@ -142,7 +146,7 @@ def _denied(response: core.JSONObject, code: str) -> bool:
 def test_preparation_reads_precede_ticket_without_lifecycle_effect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admit the schema load and procedure reads only, then keep the exact read first.
+    """Admit task-free inspection and administration without consuming the exact ticket read.
 
     Args:
         monkeypatch: Scoped environment configuration for the connector binding.
@@ -155,6 +159,11 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
         agents = str(case.root / "AGENTS.md")
         # Quote shell arguments so native Windows separators survive POSIX parsing.
         quoted_procedure, quoted_agents = shlex.quote(procedure), shlex.quote(agents)
+        # The shared shell grammar uses POSIX path spelling, including Git Bash on Windows.
+        shell_procedure = shlex.quote(
+            (case.root / "docs/runtime/contributor-workflow.md").as_posix()
+        )
+        shell_agents = shlex.quote((case.root / "AGENTS.md").as_posix())
         marker = (
             case.root / ".task/.bindings" / (case.base["coordinator"] + ".lookup-required.json")
         )
@@ -172,32 +181,64 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
         for tool, args in admitted:
             fields: dict[str, object] = {"tool_name": tool, "tool_input": args}
             assert claude.handle(native_event("claude", case, "PreToolUse", **fields)) == {}
-            completed = native_event("claude", case, "PostToolUse", tool_response="ok", **fields)
+            # Keep native Windows literal paths in the regression and supply valid
+            # foreground Bash completion facts instead of the old untyped fixture string.
+            output: object = (
+                {"stdout": "governing source", "stderr": "", "interrupted": False}
+                if tool == "Bash"
+                else "ok"
+            )
+            completed = native_event("claude", case, "PostToolUse", tool_response=output, **fields)
+            before_completion = {
+                path.name: path.read_bytes() for path in marker.parent.glob("*.json")
+            }
             assert claude.handle(completed) == {}
-        # Wrong paths, shell composition, other selections and providers stay denied.
-        denied = [
+            assert {
+                path.name: path.read_bytes() for path in marker.parent.glob("*.json")
+            } == before_completion
+        # Task-free reads and schema loading stay available during the ticket transition.
+        free = [
             ("Read", {"file_path": str(case.root / "README.md")}),
             ("Read", {"file_path": str(case.root / "docs/../AGENTS.md")}),
             ("Read", {"file_path": "docs/runtime/contributor-workflow.md"}),
-            ("Bash", {"command": f"cat {quoted_procedure} | head"}),
-            ("Bash", {"command": f"cat {quoted_procedure} {quoted_agents}"}),
-            ("Bash", {"command": f"cat {quoted_procedure}; true"}),
-            ("Bash", {"command": f"cat -n {quoted_procedure}"}),
-            ("Bash", {"command": "cat " + shlex.quote(str(case.root) + "//AGENTS.md")}),
-            ("Bash", {"command": f"cat {quoted_agents}", "run_in_background": True}),
+            ("Bash", {"command": f"cat {shell_agents}"}),
+            ("Bash", {"command": f"cat {shell_procedure} | head"}),
+            ("Bash", {"command": f"cat {shell_procedure} {shell_agents}"}),
+            ("Bash", {"command": f"cat -n {shell_procedure}"}),
             ("ToolSearch", {"query": f"select:mcp__{CONNECTOR}__save_issue"}),
+            ("ToolSearch", {"query": "linear save_issue"}),
             ("ToolSearch", {"query": f"select:mcp__{CONNECTOR}__get_issue,Agent"}),
             ("ToolSearch", {"query": "select:mcp__other__get_issue"}),
-            ("ToolSearch", {"query": "linear save_issue"}),
+            ("Bash", {"command": "cat " + shlex.quote(case.root.as_posix() + "//AGENTS.md")}),
             ("Glob", {"pattern": "**/*.md"}),
         ]
-        # Each rejected call is denied with the ticket-read diagnostic.
-        for tool, args in denied:
+        for tool, args in free:
+            assert (
+                claude.handle(
+                    native_event("claude", case, "PreToolUse", tool_name=tool, tool_input=args)
+                )
+                == {}
+            ), (tool, args)
+        # Protected writes and opaque execution still require the selected ticket.
+        for tool, args in (
+            ("Write", {"file_path": str(case.root / "AGENTS.md"), "content": "changed"}),
+            ("Bash", {"command": f"cat {quoted_procedure} > src/copied.py"}),
+            ("Bash", {"command": f"cat {quoted_procedure}; true"}),
+        ):
             response = claude.handle(
                 native_event("claude", case, "PreToolUse", tool_name=tool, tool_input=args)
             )
             assert _denied(response, "TICKET_READ_REQUIRED"), (tool, args)
-        # A provider write before the ticket read is denied like any other call.
+        # Isolate unsupported background execution from the portable recognized read command.
+        background = native_event(
+            "claude",
+            case,
+            "PreToolUse",
+            tool_name="Bash",
+            tool_input={"command": f"cat {shell_agents}", "run_in_background": True},
+        )
+        assert _denied(claude.handle(background), "HOST_UNSUPPORTED_ASYNC")
+        # Known issue administration stays task-free before the ticket read.
         save = native_event(
             "claude",
             case,
@@ -206,20 +247,20 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
             tool_input={"id": "TEST-1", "state": "In Progress"},
             mcp_server={"name": CONNECTOR, "source": "sdk"},
         )
-        assert _denied(claude.handle(save), "TICKET_READ_REQUIRED")
-        # A linked governing directory cannot stand in for the checkout's own file.
+        assert claude.handle(save) == {}
+        # A linked read is inspection; it cannot supply task-startup authority.
         (case.root / "elsewhere/runtime").mkdir(parents=True)
         (case.root / "elsewhere/runtime/contributor-workflow.md").write_text("redirected")
         assert not (case.root / "docs").exists()
         link_directory(case.root / "docs", case.root / "elsewhere")
         try:
-            # Both the file tool and the shell read reject the linked path.
+            # Both read routes are task-free and preserve the lookup marker.
             for tool, args in (
                 ("Read", {"file_path": procedure}),
-                ("Bash", {"command": f"cat {quoted_procedure}"}),
+                ("Bash", {"command": f"cat {shell_procedure}"}),
             ):
                 event = native_event("claude", case, "PreToolUse", tool_name=tool, tool_input=args)
-                assert _denied(claude.handle(event), "TICKET_READ_REQUIRED")
+                assert claude.handle(event) == {}
         finally:
             # Remove only the fixture link, never its target.
             unlink_directory(case.root / "docs")
@@ -234,10 +275,10 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
         case.doCleanups()
 
 
-def test_ready_session_tracks_configured_provider_operations(
+def test_ready_session_keeps_configured_provider_administration_taskfree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admit allowlisted connector operations as pending work and settle them natively.
+    """Admit known provider research/admin without adding task pending work.
 
     Args:
         monkeypatch: Scoped environment configuration for the connector binding.
@@ -281,27 +322,38 @@ def test_ready_session_tracks_configured_provider_operations(
             """
             return case.state()["participants"][case.base["coordinator"]]["pending"]
 
-        # Another issue's read is ordinary pending work settled by Desktop's content list.
+        # Another issue's read remains task-free with the native content-list result.
         assert claude.handle(provider("PreToolUse", "get_issue", "read-other")) == {}
-        assert "read-other" in pending()
+        assert pending() == {}
         blocks = [{"type": "text", "text": json.dumps({"id": "OTHER-2"})}]
         assert (
             claude.handle(provider("PostToolUse", "get_issue", "read-other", tool_response=blocks))
             == {}
         )
         assert pending() == {}
-        # A procedure write is admitted the same way and settled by its failure event.
+        # Known issue administration is also task-free, including failure callbacks.
         assert claude.handle(provider("PreToolUse", "save_issue", "write-state")) == {}
-        assert "write-state" in pending()
+        assert pending() == {}
         failure = provider(
             "PostToolUseFailure", "save_issue", "write-state", error="denied", is_interrupt=False
         )
         assert claude.handle(failure) == {}
         assert pending() == {}
-        # Unconfigured servers, other operations and wrong provenance stay denied.
+        # Shared document research and administration use the same configured provenance.
+        before = case.state()
+        for operation in ("get_document", "save_document"):
+            assert claude.handle(provider("PreToolUse", operation, operation)) == {}
+            assert (
+                claude.handle(
+                    provider("PostToolUse", operation, operation, tool_response={"ok": True})
+                )
+                == {}
+            )
+            assert case.state() == before
+        # Unconfigured servers, unknown operations and wrong provenance stay denied.
         before = case.state()
         for event in (
-            {**provider("PreToolUse", "save_document", "doc"), "tool_input": {}},
+            {**provider("PreToolUse", "execute_code", "opaque"), "tool_input": {}},
             {**provider("PreToolUse", "get_issue", "other"), "tool_name": "mcp__other__get_issue"},
             {
                 **provider("PreToolUse", "get_issue", "local"),
@@ -325,7 +377,7 @@ def test_ready_session_tracks_configured_provider_operations(
 
 
 def test_ready_parent_tracks_app_pr_monitor_operations(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Admit the desktop app's PR-monitor read and arming as pending work after readiness.
+    """Keep monitor reads task-free and track automatic-fix arming after readiness.
 
     Args:
         monkeypatch: Scoped environment configuration for the connector binding.
@@ -364,16 +416,16 @@ def test_ready_parent_tracks_app_pr_monitor_operations(monkeypatch: pytest.Monke
             """
             return case.state()["participants"][case.base["coordinator"]]["pending"]
 
-        # Before readiness the PR-monitor read is denied like any other call.
+        # Missing provider provenance stays denied independently of task readiness.
         _start_desktop_task(case)
         early = monitor("PreToolUse", "mcp__ccd_pr__get_status", "early")
         assert _denied(claude.handle(early), "TICKET_READ_REQUIRED")
         _ready_desktop(case)
         server = {"name": "ccd_pr", "source": "sdk"}
-        # The status read is pending work settled by its native result.
+        # The status read is task-free; its result adds no pending work.
         read = monitor("PreToolUse", "mcp__ccd_pr__get_status", "status", mcp_server=server)
         assert claude.handle(read) == {}
-        assert "status" in pending()
+        assert pending() == {}
         done = monitor(
             "PostToolUse",
             "mcp__ccd_pr__get_status",

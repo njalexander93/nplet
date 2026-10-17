@@ -50,6 +50,7 @@ def test_codex_pretool_denies_unsupported_child_control_before_request_or_core_c
     )
 
 
+@pytest.mark.usefixtures("recorded_operation")
 def test_codex_pretool_records_exact_poll_handle_only_after_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -58,6 +59,8 @@ def test_codex_pretool_records_exact_poll_handle_only_after_ready(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    # A real read-only poll follows its previously admitted protected process.
+    monkeypatch.setattr(codex.core, "repository", lambda _path: (codex.ROOT, None, []))
     operations: list[dict[str, object]] = []
     monkeypatch.setattr(codex, "startup_lookup_state", lambda _event, _suffix: False)
     monkeypatch.setattr(codex, "bootstrap", lambda _event, ready=False: False)
@@ -82,6 +85,8 @@ def test_codex_pretool_records_exact_poll_handle_only_after_ready(
 
     monkeypatch.setattr(codex.core, "execute", execute)
     event = {
+        "session_id": "session",
+        "cwd": str(codex.ROOT),
         "hook_event_name": "PreToolUse",
         "tool_name": "write_stdin",
         "tool_use_id": "tool-1",
@@ -93,6 +98,7 @@ def test_codex_pretool_records_exact_poll_handle_only_after_ready(
     assert operations[-1]["tool_id"] == "tool-1"
 
 
+@pytest.mark.usefixtures("protected_effect")
 def test_codex_pretool_invalid_poll_handle_has_no_tool_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -132,6 +138,7 @@ def test_codex_pretool_invalid_poll_handle_has_no_tool_start(
     assert "ASYNC_HANDLE_CONFLICT" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+@pytest.mark.usefixtures("recorded_operation")
 def test_codex_posttool_keeps_unproven_completion_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -152,6 +159,7 @@ def test_codex_posttool_keeps_unproven_completion_pending(
     assert codex.handle(event) == {}
 
 
+@pytest.mark.usefixtures("recorded_operation")
 def test_codex_posttool_records_typed_completion_and_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -190,6 +198,7 @@ def test_codex_posttool_records_typed_completion_and_handle(
     assert calls[0]["tool_id"] == "tool-1"
 
 
+@pytest.mark.usefixtures("recorded_operation")
 def test_codex_posttool_rejects_conflicting_poll_handle_without_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -557,10 +566,15 @@ def test_claude_preparation_reads_pass_through_a_pending_ticket_lookup(
         claude.common, "native_ticket_lookup", lambda *_args, **_kwargs: pytest.fail("lookup")
     )
     monkeypatch.setattr(claude.common, "native_pre", lambda *_args: pytest.fail("pre"))
-    monkeypatch.setattr(claude.common, "native_post", lambda *_args, **_kwargs: pytest.fail("post"))
+    monkeypatch.setattr(claude.common, "ticket_callback", lambda *_args: False)
+    posts: list[object] = []
+    monkeypatch.setattr(
+        claude.common, "native_post", lambda value, *_args, **_kwargs: posts.append(value)
+    )
     # Neither the start nor the completion of a preparation read is recorded or settled.
     assert claude.handle({"hook_event_name": "PreToolUse", "tool_name": "Read"}) == {}
     assert claude.handle({"hook_event_name": "PostToolUse", "tool_name": "Read"}) == {}
+    assert posts == [{"hook_event_name": "PostToolUse", "tool_name": "Read"}]
 
 
 def test_claude_subagent_start_reports_the_child_join_as_context(

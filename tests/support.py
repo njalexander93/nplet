@@ -4,16 +4,93 @@ These fixtures call the canonical production modules without claiming live host 
 """
 
 import json
+import os
 import subprocess
+import sys
 import tempfile
+import threading
+import traceback
 import unittest
 import uuid
+from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from types import CodeType
 
 from nplet.lifecycle import task_workspace as w
 from tests.types import JsonObject, JsonValue
 
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_SOURCE_PREFIX = os.path.normcase(str(Path(w.__file__).resolve().parents[1]) + os.sep)
+
+
+@contextmanager
+def fixture_diagnostics() -> Iterator[deque[JsonObject]]:
+    """Observe recent errors handled by this thread's package source code.
+
+    Yields:
+        Scalar exception metadata for failed reports, never frame locals or requests.
+        An unavailable marker when all monitoring slots already belong to other tools.
+    """
+    # Reserve a free slot without replacing coverage, debuggers or concurrent observers.
+    diagnostics: deque[JsonObject] = deque(maxlen=16)
+    tool = None
+    for candidate in range(5, -1, -1):
+        try:
+            sys.monitoring.use_tool_id(candidate, "fixture-diagnostics")
+        except ValueError:
+            continue
+        tool = candidate
+        break
+    # Continue with the original dispatch behavior when instrumentation is unavailable.
+    if tool is None:
+        diagnostics.append({"unavailable": "All sys.monitoring tool slots are occupied"})
+        yield diagnostics
+        return
+    owner_thread = threading.get_ident()
+
+    def handled(code: CodeType, offset: int, error: BaseException) -> None:
+        """Retain only selected errors handled inside the package source boundary.
+
+        Args:
+            code: Code object handling the exception.
+            offset: Bytecode offset supplied by the monitoring API.
+            error: Handled exception, inspected without retaining frames or locals.
+        """
+        # Filter lexical source paths without filesystem work inside the callback.
+        if (
+            not os.path.normcase(code.co_filename).startswith(PACKAGE_SOURCE_PREFIX)
+            or threading.get_ident() != owner_thread
+            or not isinstance(error, (OSError, subprocess.SubprocessError))
+        ):
+            return
+        # Bound text and traceback locations; never inspect process output or frame locals.
+        record: JsonObject = {"type": type(error).__name__, "message": str(error)[:512]}
+        for name in ("errno", "winerror", "filename", "filename2"):
+            value = getattr(error, name, None)
+            if value is not None:
+                record[name] = value if isinstance(value, int) else str(value)[:512]
+        # Expose the timed-out command and configured limit without stdout or stderr.
+        if isinstance(error, subprocess.TimeoutExpired):
+            record["command"] = str(error.cmd)[:512]
+            record["timeout"] = error.timeout
+        record["traceback"] = [
+            f"{frame.f_code.co_filename}:{line}:{frame.f_code.co_name}"[:512]
+            for frame, line in traceback.walk_tb(error.__traceback__)
+        ][-8:]
+        diagnostics.append(record)
+
+    # Enable the global event: EXCEPTION_HANDLED does not support local events.
+    try:
+        sys.monitoring.register_callback(tool, sys.monitoring.events.EXCEPTION_HANDLED, handled)
+        sys.monitoring.set_events(tool, sys.monitoring.events.EXCEPTION_HANDLED)
+        yield diagnostics
+    # Release only this observer's events, callback and slot on every dispatch exit.
+    finally:
+        sys.monitoring.set_events(tool, 0)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.EXCEPTION_HANDLED, None)
+        sys.monitoring.free_tool_id(tool)
 
 
 def call_process(request: JsonObject) -> JsonObject:

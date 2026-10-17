@@ -62,6 +62,13 @@ def handle(event: core.JSONObject) -> core.JSONObject:
             # Correlate Cursor's native tool ID. The MCP-specific callback must
             # also validate the configured server before startup can settle.
             if common.lookup_required(observed, HOST):
+                # Ordinary task-free work leaves the selected-ticket handshake intact.
+                if (
+                    not common.selected_ticket(observed, HOST)
+                    and not common.effect_decision(observed, HOST).requires_task
+                ):
+                    common.native_pre(observed, HOST)
+                    return {"permission": "allow"}
                 core.require(
                     common.native_ticket_lookup(observed, HOST) is not None, "TICKET_READ_REQUIRED"
                 )
@@ -71,13 +78,18 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         # Verify the configured Linear server through the MCP-specific callback.
         if name == "beforeMCPExecution":
             # Ticket bootstrap requires both generic and specific prehook facts.
-            if common.lookup_required(observed, HOST):
+            if common.lookup_required(observed, HOST) and common.selected_ticket(
+                observed, HOST, specific=True
+            ):
                 core.require(
                     common.native_ticket_lookup(observed, HOST, specific=True) is not None,
                     "TICKET_READ_REQUIRED",
                 )
                 return {"permission": "allow"}
-            return {}  # Ordinary MCP remains subject to generic preToolUse admission.
+            # This second blocking gate establishes provider provenance independently
+            # of the operation-only generic gate. Both hooks are configured fail-closed.
+            common.cursor_provider(observed)
+            return {"permission": "allow"}
         # The MCP-specific posthook has no native call ID, so it cannot settle a read.
         if name == "afterMCPExecution":
             return {}  # No native call ID; generic postToolUse owns completion.
@@ -86,7 +98,9 @@ def handle(event: core.JSONObject) -> core.JSONObject:
             # A ticket read must settle against the pending Task marker.
             if observed.get("tool_name") == "MCP:get_issue":
                 # Ignore unrelated completions when no ticket lookup is pending.
-                if common.lookup_required(observed, HOST):
+                if common.lookup_required(observed, HOST) and common.ticket_callback(
+                    observed, HOST
+                ):
                     # A failed read releases this call ID for a fresh attempt.
                     if name == "postToolUseFailure":
                         common.native_ticket_failed(observed, HOST)

@@ -7,6 +7,7 @@ Contributor framework notes, authoring references, examples, fixtures and runtim
 
 | Task | Start here | Scope to select |
 | --- | --- | --- |
+| Research, inspect, plan or write ordinary notes | [Effect boundary](runtime/task-workspace.md#task-free-work-and-implementation-effects) | Supported task-free work, implementation transition and unknown-effect recovery. |
 | Start or resume an issue, or execute an assigned step | [Contributor procedure](runtime/contributor-workflow.md) | Master planning, approval, step threads, handoffs and delivery; assigned children use the bounded step-thread route. |
 | Create or update a pull request | [PR preparation and verification](runtime/contributor-workflow.md#pr-preparation-and-verification) | Title, exact repository template, evidence, current required checks and published read-back. |
 | Set up a contributor checkout or local commit checks | [Runtime contract](runtime/CONTEXT.md#setup) | Environment setup, editor and check commands. |

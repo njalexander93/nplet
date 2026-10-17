@@ -60,12 +60,19 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         # Never reuse a coordinator binding for a child or fabricate a missing identity;
         # a Claude subagent is keyed by its own normalized child session.
         observed = common.native_identity(event, HOST)
-        # The first issue-provider call after Task selection must read the selected ticket.
+        # The exact selected-ticket read establishes the issue transition.
         if name == "PreToolUse":
-            # An explicit Task permits its exact native Linear issue read first.
+            # A pending Task retains exact startup and separate task-free routes.
             if common.lookup_required(observed, HOST):
-                # Preparation reads keep the marker and leave Claude's permission flow.
+                # Exact preparation reads retain their existing native delivery contract.
                 if common.preparation_tool(observed, HOST):
+                    return {}
+                # Unrelated task-free research cannot consume the selected-ticket marker.
+                if (
+                    not common.selected_ticket(observed, HOST)
+                    and not common.effect_decision(observed, HOST).requires_task
+                ):
+                    common.native_pre(observed, HOST)
                     return {}
                 core.require(
                     common.native_ticket_lookup(observed, HOST) is not None, "TICKET_READ_REQUIRED"
@@ -77,8 +84,9 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         if name in {"PostToolUse", "PostToolUseFailure"}:
             # A pending ticket read settles only through its native tool result.
             if common.lookup_required(observed, HOST):
-                # Completed preparation reads were never recorded and settle nothing.
-                if common.preparation_tool(observed, HOST):
+                # Only the exact reserved native call may complete or fail startup.
+                if not common.ticket_callback(observed, HOST):
+                    common.native_post(observed, HOST, failed=name == "PostToolUseFailure")
                     return {}
                 # Failed provider calls release correlation for a later read.
                 if name == "PostToolUseFailure":

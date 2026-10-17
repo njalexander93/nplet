@@ -165,12 +165,15 @@ def test_native_ticket_name_preserves_exact_startup_correlation(
     root = repository(tmp_path)
     codex.handle(event(root, "UserPromptSubmit", prompt="Task: TEST-1"))
     fields = {"tool_name": tool_name, "tool_input": {"id": "TEST-1"}, "tool_use_id": "native-1"}
-    # Wrong issues and broadened queries must not reserve a lookup.
+    # Unrelated research reads must not reserve the selected-ticket lookup.
     for arguments in ({"id": "OTHER-2"}, {"id": "TEST-1", "includeRelations": True}):
         rejected = codex.handle(event(root, "PreToolUse", **{**fields, "tool_input": arguments}))
-        assert "BINDING_CONFLICT" in str(rejected)
+        assert rejected == {}
+        assert not list((root / ".task/.bindings").glob("*.lookup.json"))
     assert codex.handle(event(root, "PreToolUse", **fields)) == {}
     # A foreign completion must leave the actual reserved lookup and task gate intact.
+    marker = next((root / ".task/.bindings").glob("*.lookup.json"))
+    reserved = marker.read_bytes()
     rejected = codex.handle(
         event(
             root,
@@ -179,7 +182,8 @@ def test_native_ticket_name_preserves_exact_startup_correlation(
             **{**fields, "tool_use_id": "foreign"},
         )
     )
-    assert "BINDING_CONFLICT" in str(rejected)
+    assert rejected == {}
+    assert marker.read_bytes() == reserved
     assert not (root / ".task" / "TEST-1").exists()
     # Only the correlated provider result establishes readiness and creates task sources.
     completed = codex.handle(event(root, "PostToolUse", tool_response=ticket_response(), **fields))
@@ -250,7 +254,17 @@ def test_native_missing_error_flag_does_not_validate_bad_issue_payload(
     result = codex.handle(event(root, "PostToolUse", tool_response={"content": content}, **fields))
     assert "TASK_WORKSPACE_NOT_READY" in result["systemMessage"]
     assert not (root / ".task" / "TEST-1").exists()
-    assert "TICKET_READ_REQUIRED" in str(codex.handle(event(root, "PreToolUse", tool_name="Read")))
+    assert "TICKET_READ_REQUIRED" in str(
+        codex.handle(
+            event(
+                root,
+                "PreToolUse",
+                tool_name="Write",
+                tool_input={"file_path": str(root / "src/example.py"), "content": "pass\n"},
+                tool_use_id="protected",
+            )
+        )
+    )
 
 
 def test_pending_ticket_allows_only_scoped_read_only_diagnosis(tmp_path: Path) -> None:
@@ -299,7 +313,17 @@ def test_pending_ticket_allows_only_scoped_read_only_diagnosis(tmp_path: Path) -
     # Admission performs no bootstrap mutations or marker consumption.
     assert {path.name: path.read_bytes() for path in bindings.glob("*.json")} == before
     assert not (root / ".task" / "TEST-1").exists()
-    assert "TICKET_READ_REQUIRED" in str(codex.handle(event(root, "PreToolUse", tool_name="Read")))
+    assert "TICKET_READ_REQUIRED" in str(
+        codex.handle(
+            event(
+                root,
+                "PreToolUse",
+                tool_name="Write",
+                tool_input={"file_path": str(root / "src/example.py"), "content": "pass\n"},
+                tool_use_id="protected",
+            )
+        )
+    )
 
 
 def lookup(root: Path, session: str, response: object) -> dict[str, object]:
@@ -723,13 +747,20 @@ def test_new_lookup_after_partial_setup_failure_preserves_ticket_gate(
         ]
     )
     wrong_issue = {**first, "tool_input": {"id": "OTHER-2"}, "tool_use_id": "other-issue"}
-    assert "BINDING_CONFLICT" in str(codex.handle(event(root, "PreToolUse", **wrong_issue)))
-    # An unassigned session must not inherit another participant’s binding.
+    assert codex.handle(event(root, "PreToolUse", **wrong_issue)) == {}
+    # Another session may research but must not inherit the task binding.
+    assert codex.handle(event(root, "PreToolUse", session_id="other", **first)) == {}
     with pytest.raises(core.WorkspaceError, match="BINDING_MISSING"):
-        codex.handle(event(root, "PreToolUse", session_id="other", **first))
+        common.request_for(event(root, "SessionStart", session_id="other"), "ready", "codex")
 
     blocked = codex.handle(
-        event(root, "PreToolUse", tool_name="Read", tool_input={}, tool_use_id="ordinary")
+        event(
+            root,
+            "PreToolUse",
+            tool_name="Write",
+            tool_input={"file_path": str(root / "src/example.py"), "content": "pass\n"},
+            tool_use_id="ordinary",
+        )
     )
     assert "TICKET_READ_REQUIRED" in str(blocked)
     second = {**first, "tool_use_id": "lookup-2"}
@@ -819,13 +850,16 @@ def test_lookup_requires_exact_ticket_and_tool_correlation(tmp_path: Path) -> No
             tool_use_id="lookup-1",
         )
     )
-    assert "BINDING_CONFLICT" in str(wrong)
+    assert wrong == {}
+    assert not list((root / ".task/.bindings").glob("*.lookup.json"))
     fields = {
         "tool_name": "mcp__codex_apps__linear_get_issue",
         "tool_input": {"id": "TEST-1"},
         "tool_use_id": "lookup-1",
     }
     assert codex.handle(event(root, "PreToolUse", **fields)) == {}
+    marker = next((root / ".task/.bindings").glob("*.lookup.json"))
+    reserved = marker.read_bytes()
     mismatched = codex.handle(
         event(
             root,
@@ -834,7 +868,8 @@ def test_lookup_requires_exact_ticket_and_tool_correlation(tmp_path: Path) -> No
             **{**fields, "tool_use_id": "lookup-2"},
         )
     )
-    assert "BINDING_CONFLICT" in mismatched["systemMessage"]
+    assert mismatched == {}
+    assert marker.read_bytes() == reserved
     assert not (root / ".task" / "TEST-1").exists()
 
 
@@ -900,7 +935,7 @@ def test_malformed_completed_result_allows_new_lookup_id(tmp_path: Path) -> None
 
 
 def test_new_task_line_fences_previous_ready_session_until_ticket_read(tmp_path: Path) -> None:
-    """A ready binding cannot admit ordinary tools for a newly requested Task.
+    """A new Task fences implementation while preserving supported research.
 
     Args:
         tmp_path: Disposable directory for repository or file fixtures.
@@ -909,10 +944,10 @@ def test_new_task_line_fences_previous_ready_session_until_ticket_read(tmp_path:
     codex.handle(event(root, "UserPromptSubmit", prompt="Task: TEST-1"))
     lookup(root, "master", ticket_response())
     codex.handle(event(root, "UserPromptSubmit", prompt="Task: TEST-1"))
-    # Neither interactive request tool can bypass ticket-first startup.
+    # Protected file and shell writes cannot use the old ready binding.
     for tool_name, tool_input in (
-        ("Read", {"file_path": str(root / "AGENTS.md")}),
-        ("exec_command", {"cmd": "pwd", "login": False, "shell": "/bin/sh"}),
+        ("Write", {"file_path": str(root / "AGENTS.md"), "content": "changed"}),
+        ("exec_command", {"cmd": "touch src/example.py", "login": False, "shell": "/bin/sh"}),
     ):
         denied = codex.handle(
             event(
