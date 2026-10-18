@@ -64,11 +64,10 @@
         "timeout": 10
       }
     ],
-    "subagentStart": [
+    "beforeReadFile": [
       {
-        "command": "git -c alias.task-workspace-hook=!./src/nplet/adapters/launch.sh task-workspace-hook cursor",
-        "timeout": 10,
-        "failClosed": true
+        "command": "git -c alias.task-workspace-hook=!./src/nplet/adapters/launch.sh task-workspace-hook cursor --observe-read-content",
+        "timeout": 10
       }
     ]
   }

@@ -483,3 +483,210 @@ def test_worker_main_bounds_oversized_handler_output(
     # Replace oversized content with the bounded host failure shape.
     assert runner.main() == 2
     assert json.loads(output.getvalue()) == {"name": "preToolUse", "code": "SIZE_LIMIT"}
+
+
+def cursor_content_handler(_event: dict) -> dict:
+    """Select the fixed Cursor worker in tests without invoking host behavior.
+
+    Args:
+        _event: Unused supervisor routing input.
+
+    Returns:
+        Empty synthetic result.
+    """
+    return {}
+
+
+cursor_content_handler.__module__ = "nplet.adapters.cursor"
+
+
+@pytest.mark.parametrize("observer", [False, True])
+def test_content_input_budget_requires_fixed_entry_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], observer: bool
+) -> None:
+    """Only the fixed content observer accepts an input above the ordinary hook cap.
+
+    Args:
+        monkeypatch: Bounded input and worker process replacements.
+        capsys: Public response capture.
+        observer: Fixed entry point selection, never taken from JSON.
+    """
+    monkeypatch.setattr(runner, "INPUT_LIMIT", 128)
+    monkeypatch.setattr(runner, "CONTENT_INPUT_LIMIT", 1024)
+    raw = json.dumps(
+        {
+            "hook_event_name": "beforeReadFile",
+            "content": "x" * 200,
+            "_cursor_deadline": 999999999999,
+        }
+    ).encode()
+    input_bytes(monkeypatch, raw)
+    worker = Worker(output=b'{"permission":"deny"}', returncode=2)
+    starts = install_worker(monkeypatch, worker)
+    # Exact handler denial still wins; the observer never converts it into permission.
+    assert runner.run(cursor_content_handler, failure, content_observer=observer) == 2
+    result = json.loads(capsys.readouterr().out)
+    if observer:
+        assert result == {"permission": "deny"}
+        assert starts[0][-3:] == ["--worker", "cursor", "--observe-read-content"]
+        forwarded = json.loads(worker.calls[0])
+        assert forwarded["content"] == "x" * 200
+        assert forwarded["_cursor_deadline"] != 999999999999
+    else:
+        assert result["code"] == "SIZE_LIMIT"
+        assert starts == []
+
+
+def test_content_overflow_drains_without_starting_mutation_worker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Discard an oversized observation and return no source verification metadata.
+
+    Args:
+        monkeypatch: Input cap, pipe and process boundary replacements.
+        capsys: Public response capture.
+    """
+    monkeypatch.setattr(runner, "CONTENT_INPUT_LIMIT", 128)
+    chunks = iter([b"x" * 129, b"rest", b""])
+    reads = []
+
+    def read(_fd: int, size: int) -> bytes:
+        """Supply bounded pipe segments and record drain requests.
+
+        Args:
+            _fd: Ignored pipe descriptor.
+            size: Maximum requested chunk size.
+
+        Returns:
+            Next segment or EOF.
+        """
+        reads.append(size)
+        return next(chunks)
+
+    monkeypatch.setattr(runner.os, "read", read)
+    monkeypatch.setattr(runner.sys.stdin, "fileno", lambda: 0)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kw: pytest.fail("worker"))
+    assert runner.run(cursor_content_handler, failure, content_observer=True) == 0
+    assert json.loads(capsys.readouterr().out) == {"permission": "allow"}
+    assert reads == [129, 65536, 65536]
+
+
+def test_content_worker_timeout_reaps_before_observational_allow(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A timeout alone grants no proof and leaves no mutation worker alive.
+
+    Args:
+        monkeypatch: Input and process boundaries.
+        capsys: Public response capture.
+    """
+    input_bytes(monkeypatch, b'{"hook_event_name":"beforeReadFile"}')
+    worker = Worker(timeout=True)
+    install_worker(monkeypatch, worker)
+    assert runner.run(cursor_content_handler, failure, content_observer=True) == 0
+    assert worker.killed and worker.calls[-1] is None
+    assert json.loads(capsys.readouterr().out) == {"permission": "allow"}
+
+
+def test_fixed_content_mode_rejects_an_authorizing_event(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The observational invocation cannot be reused to allow generic tool admission.
+
+    Args:
+        monkeypatch: Input and process boundaries.
+        capsys: Public response capture.
+    """
+    input_bytes(monkeypatch, b'{"hook_event_name":"preToolUse"}')
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kw: pytest.fail("worker"))
+    assert runner.run(cursor_content_handler, failure, content_observer=True) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("observer", [False, True])
+def test_worker_content_mode_uses_its_own_input_cap(
+    monkeypatch: pytest.MonkeyPatch, observer: bool
+) -> None:
+    """The worker independently validates the selected mode and its input budget.
+
+    Args:
+        monkeypatch: Process streams, input caps and adapter import boundary.
+        observer: Exact fixed worker mode versus ordinary worker.
+    """
+    monkeypatch.setattr(runner, "INPUT_LIMIT", 128)
+    monkeypatch.setattr(runner, "CONTENT_INPUT_LIMIT", 1024)
+    argv = ["runner", "--worker", "cursor"] + (["--observe-read-content"] if observer else [])
+    monkeypatch.setattr(runner.sys, "argv", argv)
+    raw = json.dumps({"hook_event_name": "beforeReadFile", "content": "x" * 400}).encode()
+    output = io.BytesIO()
+    monkeypatch.setattr(runner.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
+    monkeypatch.setattr(runner.sys, "stdout", SimpleNamespace(buffer=output))
+    received = []
+
+    def content(event: dict) -> dict:
+        """Record the actual parsed input without creating lifecycle evidence.
+
+        Args:
+            event: Worker-decoded event.
+
+        Returns:
+            Non-authorizing observation result.
+        """
+        received.append(event)
+        return {"permission": "allow"}
+
+    monkeypatch.setattr(
+        runner.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(handle=content, failure=failure),
+    )
+    assert runner.main() == (0 if observer else 2)
+    result = json.loads(output.getvalue())
+    if observer:
+        assert result == {"permission": "allow"}
+        assert received[0]["content"] == "x" * 400
+    else:
+        assert result["code"] == "SIZE_LIMIT"
+        assert received == []
+
+
+@pytest.mark.parametrize("observer", [False, True])
+def test_runner_does_not_spawn_after_serialization_deadline(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], observer: bool
+) -> None:
+    """Do not grant a worker a new time budget after synchronous input processing.
+
+    Args:
+        monkeypatch: Input, clock, serialization and process boundaries.
+        capsys: Public response capture.
+        observer: Fixed observer fallback or ordinary authorizing hook.
+    """
+    # Simulate expensive canonicalization without a slow or large timing test.
+    clock = [0.0]
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
+    original = runner.core.canonical
+
+    def serialize(event: object) -> bytes:
+        """Serialize exactly while advancing the modeled shared deadline.
+
+        Args:
+            event: Parsed event with supervisor-owned deadline.
+
+        Returns:
+            Canonical bytes after the simulated processing time.
+        """
+        result = original(event)
+        clock[0] = runner.DEADLINE_SECONDS + 1
+        return result
+
+    monkeypatch.setattr(runner.core, "canonical", serialize)
+    event = "beforeReadFile" if observer else "preToolUse"
+    input_bytes(monkeypatch, json.dumps({"hook_event_name": event}).encode())
+    monkeypatch.setattr(
+        runner.subprocess, "Popen", lambda *_args, **_kw: pytest.fail("late worker")
+    )
+    assert runner.run(cursor_content_handler, failure, content_observer=observer) == (
+        0 if observer else 2
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result == ({"permission": "allow"} if observer else {"name": event, "code": "BUSY"})

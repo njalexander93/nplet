@@ -27,6 +27,21 @@ type NativeHost = Literal["claude", "cursor"]
 type NativeCase = tuple[NativeHost, Fixture]
 
 
+def actual_tool_key(case: Fixture) -> str:
+    """Return the independently fixed stored identity for the native fixture call.
+
+    Args:
+        case: Fixture with the selected host identity.
+
+    Returns:
+        Cursor's exact domain-separated digest or Claude's unchanged raw token.
+    """
+    return {
+        "cursor": "cursor-call-v1:7bd5920b46fd05346e9927bb04b385e02f08bfec93919fe66a6703320fd91cd4",
+        "claude-code": "actual-tool",
+    }[case.base["host"]]
+
+
 @pytest.fixture(params=["claude", "cursor"])
 def native(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[NativeCase]:
     """Create a disposable repository with a host-specific coordinator identity.
@@ -353,7 +368,7 @@ def test_native_admission_records_actual_tool_before_continuation(native: Native
     response = dispatch(host, native_event(host, case, "PreToolUse"))
     assert_decision(host, response, True)
     state = case.state()
-    assert "actual-tool" in state["participants"][case.base["coordinator"]]["pending"]
+    assert actual_tool_key(case) in state["participants"][case.base["coordinator"]]["pending"]
     # Identical session text must never collide across any of the three hosts.
     keys = {
         core.participant_key({**case.base, "host": name})
@@ -392,7 +407,7 @@ def test_claude_compaction_preserves_authority_and_pending_work(
             packet=[],
         )
     before = case.state()["participants"][case.base["coordinator"]]
-    assert "actual-tool" in before["pending"]
+    assert actual_tool_key(case) in before["pending"]
     assert bool(before["ack"]) is acknowledged
     # Use compaction wire fields without a tool result or completion identifier.
     event: JsonObject = {
@@ -429,7 +444,7 @@ def test_claude_compaction_preserves_authority_and_pending_work(
     response = dispatch(host, native_event(host, case, "PreToolUse", tool_use_id="later-tool"))
     assert_decision(host, response, acknowledged)
     pending = case.state()["participants"][case.base["coordinator"]]["pending"]
-    assert pending["actual-tool"] == before["pending"]["actual-tool"]
+    assert pending[actual_tool_key(case)] == before["pending"][actual_tool_key(case)]
     assert ("later-tool" in pending) is acknowledged
 
 
@@ -541,7 +556,7 @@ def test_native_uncertain_completion_and_stop_retain_pending_work(native: Native
         dispatch(host, native_event(host, case, name))
         state = case.state()
         assert state["disposition"] == "active"
-        assert "actual-tool" in state["participants"][case.base["coordinator"]]["pending"]
+        assert actual_tool_key(case) in state["participants"][case.base["coordinator"]]["pending"]
 
 
 def test_native_wrong_tool_completion_cannot_settle_original(native: NativeCase) -> None:
@@ -575,7 +590,9 @@ def test_native_wrong_tool_completion_cannot_settle_original(native: NativeCase)
         failure["failure_type"] = "error"
     dispatch(host, failure)
     # The unrelated failure must leave the original pending work intact.
-    assert "actual-tool" in case.state()["participants"][case.base["coordinator"]]["pending"]
+    assert (
+        actual_tool_key(case) in case.state()["participants"][case.base["coordinator"]]["pending"]
+    )
     # A matching terminal file-tool failure may settle only the actual admitted operation.
     failure["tool_use_id"] = "actual-tool"
     dispatch(host, failure)
@@ -634,7 +651,10 @@ def test_cursor_ambiguous_result_strings_retain_work(response: str) -> None:
         case.ready()
         dispatch("cursor", native_event("cursor", case, "PreToolUse"))
         dispatch("cursor", native_event("cursor", case, "PostToolUse", tool_output=response))
-        assert "actual-tool" in case.state()["participants"][case.base["coordinator"]]["pending"]
+        assert (
+            actual_tool_key(case)
+            in case.state()["participants"][case.base["coordinator"]]["pending"]
+        )
     # Release all disposable repositories after the uncertainty assertion.
     finally:
         # Release the disposable repository even when an assertion fails.
@@ -807,7 +827,9 @@ def test_cursor_imported_claude_hook_does_not_duplicate_writes(
         result = cursor.handle(native_event("cursor", case, "PreToolUse"))
         assert_decision("cursor", result, True)
         state = case.state()
-        assert set(state["participants"][case.base["coordinator"]]["pending"]) == {"actual-tool"}
+        assert set(state["participants"][case.base["coordinator"]]["pending"]) == {
+            actual_tool_key(case)
+        }
         assert state["seq"] == before["seq"] + 1
     # Restore the environment through pytest and remove only disposable fixture state.
     finally:
@@ -1034,7 +1056,8 @@ def test_claude_foreground_shell_retains_ambiguous_results_then_settles(
         ):
             claude.handle({**event, "hook_event_name": "PostToolUse", "tool_response": result})
             assert (
-                "actual-tool" in case.state()["participants"][case.base["coordinator"]]["pending"]
+                actual_tool_key(case)
+                in case.state()["participants"][case.base["coordinator"]]["pending"]
             )
         # A matching explicit foreground completion may finally retire the pending operation.
         claude.handle(

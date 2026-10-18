@@ -1066,6 +1066,8 @@ def canonical_bootstrap(
         request = bootstrap_request(command, host, python, lifecycle)
         # Select the operation-specific bootstrap field policy.
         operation = request.get("operation")
+        if not isinstance(operation, str) or operation in core.CURSOR_INTERNAL_OPERATIONS:
+            return False
         # Limit unready sessions to the documented recovery operation schemas.
         if not ready and (
             operation not in BOOTSTRAP_FIELDS
@@ -1341,6 +1343,31 @@ def native_tool(event: core.JSONObject, host: str) -> str:
     return tool
 
 
+def cursor_internal_command(event: core.JSONObject) -> bool:
+    """Recognize a canonical raw internal request before ordinary Cursor Shell fallback.
+
+    Args:
+        event: Observed native tool envelope.
+
+    Returns:
+        True only for an exact known adapter-internal lifecycle request.
+    """
+    if event.get("tool_name") != "Shell":
+        return False
+    args = event.get("tool_input")
+    if not isinstance(args, dict) or not isinstance(args.get("command"), str):
+        return False
+    # The public CLI independently fences variants that are not this canonical spelling.
+    try:
+        request = bootstrap_request(args["command"], "cursor", PYTHON, LIFECYCLE)
+    except (core.WorkspaceError, ValueError, KeyError, TypeError):
+        return False
+    return (
+        isinstance(request.get("operation"), str)
+        and request["operation"] in core.CURSOR_INTERNAL_OPERATIONS
+    )
+
+
 def native_pre(event: core.JSONObject, host: str) -> None:
     """Enforce readiness and record supported native tool admission.
 
@@ -1351,6 +1378,9 @@ def native_pre(event: core.JSONObject, host: str) -> None:
     Raises:
         core.WorkspaceError: If recovery scope, readiness, or admission fails.
     """
+    # Raw internal lifecycle commands never fall through to ordinary Cursor Shell.
+    if host == "cursor":
+        core.require(not cursor_internal_command(event), "HOST_UNSUPPORTED_TOOL")
     # Recovery accepts only the assigned exact command before ordinary readiness.
     native_token(event.get("tool_use_id"))
     # An exact lifecycle recovery command is allowed before readiness.

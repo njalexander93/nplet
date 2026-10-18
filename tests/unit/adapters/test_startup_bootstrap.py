@@ -260,7 +260,9 @@ def test_bootstrap_main_reports_core_failure_without_exception_trace(
         monkeypatch: Pytest fixture that isolates external state for this case.
         capsys: Pytest fixture capturing process output.
     """
-    monkeypatch.setattr(bootstrap.sys, "argv", ["bootstrap", "--request-base64", encoded({})])
+    monkeypatch.setattr(
+        bootstrap.sys, "argv", ["bootstrap", "--request-base64", encoded({"operation": "diagnose"})]
+    )
     monkeypatch.setattr(bootstrap.core, "execute", lambda _request: {"ok": False, "code": "ABSENT"})
     assert bootstrap.main() == 3
     assert json.loads(capsys.readouterr().out) == {"ok": False, "code": "ABSENT"}

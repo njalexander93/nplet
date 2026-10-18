@@ -6,6 +6,7 @@ import concurrent.futures
 import copy
 import threading
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -139,6 +140,55 @@ class CursorInvocationTests(Fixture):
         read = self.require_ok(
             core.execute(self.child_request("read", child, binding_generation=generation))
         )
+        # Explicit synthetic native evidence for this core fixture, never a native proof claim.
+        for index, ref in enumerate(read["references"]):
+            if not ref["available"]:
+                continue
+            path = Path(ref["locator"])
+            if not path.is_absolute():
+                path = self.root / ".task" / self.base["issue_id"] / path
+            data = path.read_bytes()
+            length = len(data.decode("utf-8").encode("utf-16-le")) // 2
+            tool = "fixture-source-" + str(index)
+            self.require_ok(
+                core.execute(
+                    self.child_request(
+                        "source-read-start",
+                        child,
+                        binding_generation=generation,
+                        tool_id=tool,
+                        source_locator=ref["locator"],
+                        packet_digest=read["packet_digest"],
+                    )
+                )
+            )
+            self.require_ok(
+                core.execute(
+                    self.child_request(
+                        "cursor-source-callback",
+                        child,
+                        binding_generation=generation,
+                        tool_id=tool,
+                        source_path=str(path),
+                        source_event="content",
+                        observed_sha256=core.sha(data),
+                        content_length=length,
+                    )
+                )
+            )
+            self.require_ok(
+                core.execute(
+                    self.child_request(
+                        "cursor-source-callback",
+                        child,
+                        binding_generation=generation,
+                        tool_id=tool,
+                        source_path=str(path),
+                        source_event="success",
+                        content_length=length,
+                    )
+                )
+            )
         self.require_ok(
             core.execute(
                 self.child_request(
@@ -537,10 +587,11 @@ class CursorInvocationTests(Fixture):
         self.require_ok(
             core.execute(
                 self.child_request(
-                    "tool-complete",
+                    "cursor-source-callback",
                     binding_generation=1,
                     tool_id="source",
-                    completed=True,
+                    source_event="failure",
+                    source_path=str(self.root / ".task" / self.base["issue_id"] / "roadmap.md"),
                 )
             )
         )
@@ -823,6 +874,316 @@ class CursorInvocationTests(Fixture):
             == "STALE_BINDING"
         )
         assert self.state() == before
+
+    def source_child(self, text: str | None = None) -> tuple[dict, bytes, str]:
+        """Bind one unacknowledged child assigned real disposable UTF8source bytes.
+
+        Args:
+            text: Optional external source text; None uses the managed roadmap.
+
+        Returns:
+            Child read response, exact source bytes and native file path.
+        """
+        self.create()
+        self.ready()
+        locator = "roadmap.md"
+        path = self.root / ".task" / self.base["issue_id"] / locator
+        if text is not None:
+            path = self.root / "unicode-source.md"
+            path.write_text(text, encoding="utf-8")
+            locator = str(path)
+        data = path.read_bytes()
+        packet = [
+            {
+                "id": "source",
+                "locator": locator,
+                "sha256": core.sha(data),
+                "required": True,
+                "authority": "fixture",
+                "reason": "source-test",
+                "stage": "implementation",
+                "reader": "cursor-child",
+            }
+        ]
+        self.call(
+            "cursor-plan",
+            expected_revision=self.state()["revision"],
+            plan_id="first",
+            parent_conversation="parent-conversation",
+            task_digest="a" * 64,
+            packet=packet,
+            owned_paths=["context/first.md"],
+        )
+        invocation = self.admit("first")
+        self.bind("first", invocation)
+        read = self.require_ok(core.execute(self.child_request("read", binding_generation=1)))
+        self.require_ok(
+            core.execute(
+                self.child_request(
+                    "source-read-start",
+                    binding_generation=1,
+                    tool_id="source",
+                    source_locator=locator,
+                    packet_digest=read["packet_digest"],
+                )
+            )
+        )
+        return read, data, str(path)
+
+    def source_event(self, phase: str, path: str, **fields: object) -> dict:
+        """Build one fresh synthetic closed callback under the independent child identity.
+
+        Args:
+            phase: content, success or failure.
+            path: Exact native source path.
+            **fields: Callback metadata or deliberate tool identity override.
+
+        Returns:
+            Unexecuted callback for success, failure and replay assertions.
+        """
+        return self.child_request(
+            "cursor-source-callback",
+            binding_generation=1,
+            tool_id=fields.pop("tool_id", "source"),
+            source_path=path,
+            source_event=phase,
+            **fields,
+        )
+
+    def fill_settlement_boundary(self) -> int:
+        """Fill only the disposable fixture's retained request metadata to its reserve boundary.
+
+        Returns:
+            Initial serialized state plus its remaining settlement allowance.
+        """
+        # Simulate accumulated immutable request history without modifying any live store.
+        state = self.state()
+        state["requests"]["e" * 64] = {"digest": "e" * 64, "result": {"history": ""}}
+        allowance, _ = core.settlement_reserve(state)
+        remaining = 8 * 1024 * 1024 - len(core.canonical(state)) - allowance - 32
+        assert remaining > 0
+        state["requests"]["e" * 64]["result"]["history"] = "x" * remaining
+        path = self.root / ".task/.control/issues/TEST-1/state.json"
+        path.write_bytes(core.canonical(state))
+        return len(core.canonical(state)) + allowance
+
+    def assert_settlement_shrinks(self, before: int) -> int:
+        """Check real committed transition growth against its released allowance.
+
+        Args:
+            before: Prior state bytes plus reserve.
+
+        Returns:
+            Current potential, bounded by the previous transition.
+        """
+        state = self.state()
+        allowance, _ = core.settlement_reserve(state)
+        after = len(core.canonical(state)) + allowance
+        assert after <= before
+        return after
+
+    def test_capacity_keeps_admitted_bind_and_retirement_room(self) -> None:
+        """Reject unrelated metadata growth while preserving already admitted settlement."""
+        invocation = self.start()
+        before = self.fill_settlement_boundary()
+        state = self.state()
+        # An unrelated observation cannot steal an admitted child's settlement reserve.
+        assert (
+            core.execute(self.req("event", event_type="observation", event={"code": "OK"}))["code"]
+            == "ARCHIVE_PENDING"
+        )
+        assert self.state() == state
+        self.bind("first", invocation)
+        before = self.assert_settlement_shrinks(before)
+        self.require_ok(core.execute(self.retirement("first", invocation)))
+        self.assert_settlement_shrinks(before)
+
+    def test_capacity_keeps_source_content_completion_and_retirement_room(self) -> None:
+        """Settle actual source proof and completion at the retained-state boundary."""
+        _, data, path = self.source_child("source bytes \u2603")
+        before = self.fill_settlement_boundary()
+        length = len(data.decode("utf-8").encode("utf-16-le")) // 2
+        content = self.source_event(
+            "content", path, observed_sha256=core.sha(data), content_length=length
+        )
+        self.require_ok(core.execute(content))
+        before = self.assert_settlement_shrinks(before)
+        complete = self.source_event("success", path, content_length=length)
+        result = self.require_ok(core.execute(complete))
+        before = self.assert_settlement_shrinks(before)
+        state = self.state()
+        assert core.execute(complete) == result
+        assert self.state() == state
+        invocation = {"invocation_id": next(iter(state["cursor_invocations"]))}
+        self.require_ok(core.execute(self.retirement("first", invocation)))
+        self.assert_settlement_shrinks(before)
+
+    def test_source_receipt_needs_content_then_correlated_success(self) -> None:
+        """Keep Read pending until completion and acknowledge only its finalized receipt."""
+        read, data, path = self.source_child()
+        ack = self.child_request(
+            "acknowledge", binding_generation=1, packet_digest=read["packet_digest"]
+        )
+        assert core.execute(ack)["code"] == "SOURCE_DELIVERY_REQUIRED"
+        content = self.source_event(
+            "content",
+            path,
+            observed_sha256=core.sha(data),
+            content_length=len(data.decode("utf-8").encode("utf-16-le")) // 2,
+        )
+        self.require_ok(core.execute(content))
+        assert core.execute(ack)["code"] == "SOURCE_DELIVERY_REQUIRED"
+        before = self.state()
+        assert (
+            core.execute(
+                self.child_request(
+                    "tool-complete", binding_generation=1, tool_id="source", completed=True
+                )
+            )["code"]
+            == "REQUEST_CONFLICT"
+        )
+        assert self.state() == before
+        success = self.source_event("success", path, content_length=content["content_length"])
+        result = self.require_ok(core.execute(success))
+        assert result["source_receipt"] is True
+        self.require_ok(core.execute({**ack, "request_id": str(uuid.uuid4())}))
+        key = core.participant_key(self.child_request("read"))
+        assert self.state()["participants"][key]["pending"] == {}
+        after = self.state()
+        assert core.execute(success) == result
+        assert self.state() == after
+
+    def test_finished_unverified_and_failed_sources_have_no_receipt(self) -> None:
+        """Success without content and failure after content settle without readiness credit."""
+        read, data, path = self.source_child()
+        assert (
+            self.require_ok(core.execute(self.source_event("success", path, content_length=1)))[
+                "source_receipt"
+            ]
+            is False
+        )
+        assert (
+            core.execute(
+                self.child_request(
+                    "acknowledge", binding_generation=1, packet_digest=read["packet_digest"]
+                )
+            )["code"]
+            == "SOURCE_DELIVERY_REQUIRED"
+        )
+        self.require_ok(
+            core.execute(
+                self.child_request(
+                    "source-read-start",
+                    binding_generation=1,
+                    tool_id="second-source",
+                    source_locator=read["references"][0]["locator"],
+                    packet_digest=read["packet_digest"],
+                )
+            )
+        )
+        self.require_ok(
+            core.execute(
+                self.source_event(
+                    "content",
+                    path,
+                    tool_id="second-source",
+                    observed_sha256=core.sha(data),
+                    content_length=1,
+                )
+            )
+        )
+        assert (
+            self.require_ok(
+                core.execute(self.source_event("failure", path, tool_id="second-source"))
+            )["source_receipt"]
+            is False
+        )
+        key = core.participant_key(self.child_request("read"))
+        assert self.state()["participants"][key]["pending"] == {}
+        assert self.state()["participants"][key].get("cursor_sources", {}) == {}
+
+    def test_foreign_unknown_or_wrong_source_callbacks_preserve_pending(self) -> None:
+        """Unknown tools and wrong source bytes cannot credit or clear a different Read."""
+        _, data, path = self.source_child()
+        before = self.state()
+        for request, code in (
+            (
+                self.source_event(
+                    "content", path, observed_sha256=core.sha(data + b"altered"), content_length=1
+                ),
+                "SOURCE_DELIVERY_REQUIRED",
+            ),
+            (
+                self.source_event("success", path, tool_id="foreign", content_length=1),
+                "UNKNOWN_OPERATION",
+            ),
+            (
+                self.source_event(
+                    "content", path + ".foreign", observed_sha256=core.sha(data), content_length=1
+                ),
+                "REQUEST_CONFLICT",
+            ),
+            (self.source_event("unknown", path), "INVALID_REQUEST"),
+        ):
+            assert core.execute(request)["code"] == code
+            assert self.state() == before
+
+    def test_source_refresh_settles_old_finished_read_without_credit(self) -> None:
+        """Old provisional content cannot authorize acknowledgment of a refreshed packet."""
+        read, data, path = self.source_child()
+        self.require_ok(
+            core.execute(
+                self.source_event("content", path, observed_sha256=core.sha(data), content_length=1)
+            )
+        )
+        packet = [
+            {key: value for key, value in ref.items() if key != "available"}
+            for ref in read["references"]
+        ]
+        packet[0]["sha256"] = "0" * 64
+        key = core.participant_key(self.child_request("read"))
+        self.call(
+            "scope",
+            expected_revision=self.state()["revision"],
+            target_participant=key,
+            packet=packet,
+        )
+        assert (
+            self.require_ok(core.execute(self.source_event("success", path, content_length=1)))[
+                "source_receipt"
+            ]
+            is False
+        )
+        assert self.state()["participants"][key]["pending"] == {}
+        assert self.state()["participants"][key].get("cursor_sources", {}) == {}
+
+    def test_unicode_source_receipt_persists_metadata_only(self) -> None:
+        """Use UTF16units for native length and persist no source prose."""
+        text = "unique source café\n😀\n"
+        read, data, path = self.source_child(text)
+        length = len(text.encode("utf-16-le")) // 2
+        assert length != len(data)
+        self.require_ok(
+            core.execute(
+                self.source_event(
+                    "content", path, observed_sha256=core.sha(data), content_length=length
+                )
+            )
+        )
+        assert (
+            self.require_ok(
+                core.execute(self.source_event("success", path, content_length=length))
+            )["source_receipt"]
+            is True
+        )
+        self.require_ok(
+            core.execute(
+                self.child_request(
+                    "acknowledge", binding_generation=1, packet_digest=read["packet_digest"]
+                )
+            )
+        )
+        assert "unique source café" not in core.canonical(self.state()).decode()
 
 
 @pytest.mark.parametrize(

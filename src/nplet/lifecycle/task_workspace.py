@@ -28,6 +28,10 @@ from typing import Any, NotRequired, TypedDict
 from nplet.lifecycle._errors import WorkspaceError, require
 from nplet.lifecycle._filesystem import Directory as NativeDirectory
 
+CURSOR_INTERNAL_OPERATIONS = frozenset(
+    {"cursor-admit", "cursor-bind-child", "cursor-retire", "cursor-source-callback"}
+)
+
 MAX_REQUEST = 96 * 1024 * 1024
 MAX_FILE = 16 * 1024 * 1024
 MAX_EVENTS = 16 * 1024 * 1024
@@ -82,6 +86,7 @@ class PendingOperation(TypedDict):
     poll_parent: NotRequired[str]
     poll_handle: NotRequired[str]
     cursor_invocation: NotRequired[str]
+    cursor_source: NotRequired[JSONObject]
 
 
 class Participant(TypedDict):
@@ -93,6 +98,7 @@ class Participant(TypedDict):
     packet: list[SourceRef] | None
     ack: str | None
     cursor_invocation: NotRequired[str]
+    cursor_sources: NotRequired[dict[str, JSONObject]]
 
 
 class RequestRecord(TypedDict):
@@ -856,6 +862,137 @@ def validate_history(files: PayloadFiles) -> tuple[int, str | None]:
     return validate_events(files.get("events.jsonl", b""), seq, head)
 
 
+def settlement_reserve(state: WorkspaceState) -> tuple[int, int]:
+    """Derive remaining Cursor settlement bytes and all pending event slots.
+
+    Args:
+        state: Complete post-transition state, including the current request result.
+
+    Returns:
+        Conservative positive state growth and future required event count. No counter
+        is persisted; the obligation disappears only with its committed settlement.
+    """
+    # Count mandatory bind/content transitions separately from their final completion.
+    invocations = state.get("cursor_invocations", {})
+    active = [(key, item) for key, item in invocations.items() if item["phase"] != "retired"]
+    slots = sum(2 if item["phase"] == "admitted" else 1 for _, item in active)
+    for member in state["participants"].values():
+        for pending in member["pending"].values():
+            if "cursor_invocation" in pending:
+                continue
+            if "cursor_source" in pending:
+                slots += 1 if pending["cursor_source"].get("provisional") is not None else 2
+            else:
+                slots += 1 if pending["status"] == "unknown" else 2
+    # Bound one stored completion result using real repository identifiers and counter sizes.
+    digest = "f" * 64
+    generation = (
+        max(
+            [member["generation"] for member in state["participants"].values()]
+            + [item.get("resume_generation") or 0 for _, item in active],
+            default=0,
+        )
+        + 1
+    )
+    result = {
+        "ok": True,
+        "code": "OK",
+        "revision": state["revision"] + slots + 1,
+        "repo_id": state["repo_id"],
+        "issue_id": state["issue_id"],
+        "binding_generation": generation,
+        "invocation_id": digest,
+        "source_content_verified": False,
+        "source_receipt": False,
+    }
+    request_bytes = len(canonical({digest: {"digest": digest, "result": result}}))
+    reserved = 0
+    # Token characters can need two JSON bytes; native text can need six per UTF8 byte.
+    token_bound = "\\" * 160
+    for identifier, invocation in active:
+        terminal = {
+            "parent_conversation": invocation["parent_conversation"],
+            "native_call": invocation["native_call"],
+            "storage_key": "\x01" * 2048,
+            "child_conversation": token_bound,
+            "kind": "foreground-success",
+            "is_background": False,
+            "background_reason": 0,
+            "duration_ms": (1 << 64) - 1,
+            "binary_sha256": digest,
+            "executor_sha256": digest,
+            "workbench_sha256": digest,
+        }
+        projected_member = {
+            "generation": generation,
+            "status": "detached",
+            "pending": {},
+            "packet": None,
+            "ack": None,
+            "cursor_invocation": identifier,
+        }
+        identity = {
+            "phase": "retired",
+            "child_conversation": token_bound,
+            "child_participant": digest,
+            "child_generation": generation,
+            "native_generation": token_bound,
+            "terminal_result": terminal,
+        }
+        # Include terminal-only classification even when an existing bound member will shrink.
+        reserved += len(
+            canonical({"participants": {digest: projected_member}, "invocation": identity})
+        )
+        reserved += request_bytes
+        if invocation["phase"] == "admitted":
+            packet = [{**ref, "reader": digest} for ref in invocation["packet"]]
+            projected_member = {**projected_member, "status": "attached", "packet": packet}
+            # Binding installs two copies and exact owned paths, not a guessed small slot.
+            additions = {
+                "assignments": {digest: {"packet": packet}},
+                "participants": {digest: projected_member},
+                "owners": {path: digest for path in invocation["owned_paths"]},
+                "invocation": {
+                    key: value for key, value in identity.items() if key != "terminal_result"
+                },
+            }
+            reserved += len(canonical(additions)) + request_bytes
+    # A source receipt uses the actual locator length; absolute locators are not token-bounded.
+    for member in state["participants"].values():
+        for tool, pending in member["pending"].items():
+            if "cursor_invocation" in pending or "cursor_invocation" not in member:
+                continue
+            if "cursor_source" in pending:
+                source = pending["cursor_source"]
+                receipt = {
+                    "packet_digest": source["packet_digest"],
+                    "sha256": source["sha256"],
+                    "invocation_id": source["invocation_id"],
+                }
+                reserved += len(canonical({"cursor_sources": {source["locator"]: receipt}}))
+                reserved += request_bytes
+                if source.get("provisional") is None:
+                    proof = {"sha256": digest, "content_length": MAX_FILE}
+                    reserved += len(canonical({"provisional": proof})) + request_bytes
+            else:
+                # Ordinary child transports retain room for unknown-handle and completion facts.
+                count = 1 if pending["status"] == "unknown" else 2
+                reserved += count * request_bytes
+                reserved += len(canonical({tool: {"status": "unknown", "handle": token_bound}}))
+    # Account for growth of the shared counters/head while the reserved facts are written.
+    if reserved:
+        reserved += len(
+            canonical(
+                {
+                    "revision": state["revision"] + slots + 1,
+                    "seq": state["seq"] + slots + 1,
+                    "head": digest,
+                }
+            )
+        )
+    return reserved, slots
+
+
 class Issue:
     """Coordinate one issue payload with its recoverable control state."""
 
@@ -1014,11 +1151,7 @@ class Issue:
             )
             optional = event_type == "observation"
             # Reserve async-transition and completion events for every admitted pending tool.
-            pending_slots = sum(
-                1 if tool["status"] == "unknown" else 2
-                for member in state["participants"].values()
-                for tool in member["pending"].values()
-            )
+            _, pending_slots = settlement_reserve(state)
             reserved = 8192 * (1 + pending_slots)
             # Suppress optional observations before they consume settlement reserves.
             if optional and len(files.get("events.jsonl", b"")) + reserved + 8192 > MAX_EVENTS:
@@ -1077,7 +1210,25 @@ class Issue:
             "digest": sha(canonical(request)),
             "result": stored_result,
         }
-        require(len(canonical(state)) <= 8 * 1024 * 1024, "ARCHIVE_PENDING")
+        # Preserve settlement room even when an event-free request adds retained metadata.
+        state_reserve, pending_slots = settlement_reserve(state)
+        require(len(canonical(state)) + state_reserve <= 8 * 1024 * 1024, "ARCHIVE_PENDING")
+        # Event-free archive progress may retain already committed checkpoint occupancy,
+        # but cannot increase event bytes or the number of unfinished obligations.
+        retained_occupancy = (
+            event_type is None
+            and self.state is not None
+            and files.get("events.jsonl", b"") == old_files.get("events.jsonl", b"")
+            and pending_slots <= settlement_reserve(self.state)[1]
+        )
+        event_reserve = (
+            0
+            if event_type == "archive-prepare" or retained_occupancy
+            else 8192 * (1 + pending_slots)
+        )
+        require(
+            len(files.get("events.jsonl", b"")) + event_reserve <= MAX_EVENTS, "ARCHIVE_PENDING"
+        )
         tx = {
             "base": self.state["files"] if self.state else None,
             "directory_identity": self.state.get("directory_identity") if self.state else None,
@@ -1539,7 +1690,7 @@ def cursor_operation(
                 and type(observed["background_reason"]) is int
                 and observed["background_reason"] == 0
                 and type(observed["duration_ms"]) is int
-                and observed["duration_ms"] >= 0,
+                and 0 <= observed["duration_ms"] < (1 << 64),
                 "RESULT_NOT_TERMINAL",
             )
             cursor_text(observed["storage_key"])
@@ -1630,6 +1781,125 @@ def cursor_operation(
     if operation in {"cursor-bind-child", "cursor-retire"}:
         store.save_binding(issue.committed_state(), child_key)
     return committed
+
+
+def cursor_source_callback(
+    state: WorkspaceState, files: PayloadFiles, request: JSONObject, participant: Participant
+) -> JSONObject:
+    """Record verified content or settle one exact Cursor source Read callback.
+
+    Caller holds the existing issue transaction and has authorized this generation.
+
+    Args:
+        state: Current locked issue state.
+        files: Verified managed payload bytes.
+        request: Adapter-internal closed content/success/failure metadata.
+        participant: Current independently bound Cursor child.
+
+    Returns:
+        Whether this callback verified content or finalized a current-packet receipt.
+
+    Raises:
+        WorkspaceError: Unknown/foreign call, closed shape, identity or content conflicts.
+    """
+    # This narrow protocol cannot authorize a parent, another host or a generic completion.
+    require(request["host"] == "cursor" and "cursor_invocation" in participant, "NOT_OWNER")
+    phase = request.get("source_event")
+    require(phase in {"content", "success", "failure"}, "INVALID_REQUEST")
+    allowed = {
+        "schema_version",
+        "operation",
+        "request_id",
+        "worktree",
+        "host",
+        "session_id",
+        "repo_id",
+        "issue_id",
+        "issue_uuid",
+        "binding_generation",
+        "expected_revision",
+        "source_event",
+        "tool_id",
+        "source_path",
+    }
+    # Raw source content is never accepted by or persisted in lifecycle state.
+    if phase == "content":
+        allowed |= {"observed_sha256", "content_length"}
+    elif phase == "success":
+        allowed |= {"content_length"}
+    require(set(request) <= allowed, "INVALID_REQUEST")
+    tool = token(request["tool_id"])
+    pending = participant["pending"].get(tool)
+    require(pending is not None and "cursor_source" in pending, "UNKNOWN_OPERATION")
+    assert pending is not None
+    source = pending["cursor_source"]
+    require(
+        source["invocation_id"] == participant["cursor_invocation"]
+        and source["generation"] == participant["generation"]
+        and request.get("source_path") == source["file_path"],
+        "REQUEST_CONFLICT",
+    )
+    digest = sha(canonical(participant["packet"]))
+    # Content is provisional until a distinct correlated native success is observed.
+    if phase == "content":
+        refs = packet_reads(state, participant, files)
+        require(source["packet_digest"] == digest, "SOURCE_STALE")
+        require(
+            any(
+                ref["available"]
+                and ref["locator"] == source["locator"]
+                and ref["sha256"] == source["sha256"]
+                for ref in refs
+            ),
+            "SOURCE_STALE",
+        )
+        observed = request.get("observed_sha256")
+        length = request.get("content_length")
+        require(isinstance(observed, str) and DIGEST.fullmatch(observed), "INVALID_REQUEST")
+        require(type(length) is int and 0 <= length <= MAX_FILE, "INVALID_REQUEST")
+        require(observed == source["sha256"], "SOURCE_DELIVERY_REQUIRED")
+        proof = {"sha256": observed, "content_length": length}
+        require(source.get("provisional") in (None, proof), "REQUEST_CONFLICT")
+        source["provisional"] = proof
+        return {"source_content_verified": True, "source_receipt": False}
+    # Known finished failure/stale/unmatched success settles this call without credit.
+    receipt = False
+    if (
+        phase == "success"
+        and source.get("provisional") is not None
+        and source["packet_digest"] == digest
+    ):
+        proof = source["provisional"]
+        length = request.get("content_length")
+        require(type(length) is int and length >= 0, "INVALID_REQUEST")
+        # Source refresh/missing bytes must not strand an already finished file Read.
+        try:
+            refs = packet_reads(state, participant, files)
+        except (WorkspaceError, OSError):
+            refs = []
+        current = any(
+            ref["available"]
+            and ref["locator"] == source["locator"]
+            and ref["sha256"] == source["sha256"]
+            for ref in refs
+        )
+        if current and length == proof["content_length"]:
+            # Prune old-packet receipts before adding at most one of64current assigned locators.
+            receipts = {
+                locator: item
+                for locator, item in participant.get("cursor_sources", {}).items()
+                if item["packet_digest"] == digest
+            }
+            receipts[source["locator"]] = {
+                "packet_digest": digest,
+                "sha256": source["sha256"],
+                "invocation_id": participant["cursor_invocation"],
+            }
+            require(len(receipts) <= 64, "SIZE_LIMIT")
+            participant["cursor_sources"] = receipts
+            receipt = True
+    del participant["pending"][tool]
+    return {"source_content_verified": False, "source_receipt": receipt}
 
 
 def authorize(
@@ -2833,6 +3103,22 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         # Record acknowledgment only for the current assigned packet digest.
         if operation == "acknowledge":
             require(request.get("packet_digest") == digest, "SOURCE_STALE")
+            # Cursor children need verified content and completed Reads for current sources.
+            if "cursor_invocation" in participant:
+                receipts = participant.get("cursor_sources", {})
+                require(
+                    all(
+                        not ref["available"]
+                        or receipts.get(ref["locator"], {})
+                        == {
+                            "packet_digest": digest,
+                            "sha256": ref["sha256"],
+                            "invocation_id": participant["cursor_invocation"],
+                        }
+                        for ref in refs
+                    ),
+                    "SOURCE_DELIVERY_REQUIRED",
+                )
             participant.update({"ack": digest, "status": "ready"})
         # Require active disposition and a current acknowledged packet.
         elif operation == "ready":
@@ -2963,6 +3249,9 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             request.get("event", {}).get("code", "OK") in {"OK", "FAILED", "UNKNOWN", "INTERRUPTED"}
         )
         event_type = request["event_type"]
+    # Only correlated native source callbacks can establish Cursor source receipts.
+    elif operation == "cursor-source-callback":
+        result = cursor_source_callback(state, files, request, participant)
     # Track exact source preparation before readiness without admitting ordinary work.
     elif operation in {"tool-start", "source-read-start"}:
         refs = packet_reads(state, participant, files)
@@ -2990,6 +3279,29 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         require(tool not in participant["pending"], "REQUEST_CONFLICT")
         # Associate an observed polling transport without borrowing another participant's work.
         pending: PendingOperation = {"status": "pending"}
+        # Cursor source effects carry their exact current assignment through both native callbacks.
+        if operation == "source-read-start" and "cursor_invocation" in participant:
+            require(request["host"] == "cursor", "HOST_UNSUPPORTED")
+            selected = next(
+                ref
+                for ref in refs
+                if ref["locator"] == request["source_locator"] and ref["available"]
+            )
+            locator = selected["locator"]
+            source_path = (
+                Path(locator)
+                if Path(locator).is_absolute()
+                else store.root / ".task" / issue.id / locator
+            )
+            pending["cursor_source"] = {
+                "invocation_id": participant["cursor_invocation"],
+                "generation": participant["generation"],
+                "packet_digest": request["packet_digest"],
+                "locator": locator,
+                "sha256": selected["sha256"],
+                "file_path": str(source_path),
+                "provisional": None,
+            }
         # Bind a polling transport only to a unique pending process handle.
         if request.get("poll_handle") is not None:
             handle: str | None = token(request["poll_handle"])
@@ -3042,7 +3354,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         # Generic observations cannot settle a Task whose child must retire atomically.
         invocation_pending = participant["pending"].get(tool)
         require(
-            invocation_pending is None or "cursor_invocation" not in invocation_pending,
+            invocation_pending is None
+            or not {"cursor_invocation", "cursor_source"}.intersection(invocation_pending),
             "REQUEST_CONFLICT",
         )
         # An already settled parent is allowed only through its still-recorded poll transport.
@@ -3623,7 +3936,11 @@ def main() -> int:
             else sys.stdin.buffer.read(MAX_REQUEST + 1)
         )
         require(len(raw) <= MAX_REQUEST, "SIZE_LIMIT")
-        result = execute(strict_json(raw))
+        request = strict_json(raw)
+        require(isinstance(request, dict), "INVALID_REQUEST")
+        require(isinstance(request.get("operation"), str), "INVALID_REQUEST")
+        require(request.get("operation") not in CURSOR_INTERNAL_OPERATIONS, "HOST_UNSUPPORTED_TOOL")
+        result = execute(request)
     # Return the bounded lifecycle diagnostic without exposing exception contents.
     except WorkspaceError as error:
         result = {"ok": False, "code": error.code}

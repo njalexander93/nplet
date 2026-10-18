@@ -967,6 +967,10 @@ def test_native_handlers_gate_ticket_first_and_route_completion(
     monkeypatch.delenv("CURSOR_VERSION", raising=False)
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(adapter.common, "native_identity", lambda observed, _host: observed)
+    if adapter is cursor:
+        monkeypatch.setattr(
+            cursor.cursor_children, "normalize", lambda observed, _deadline: observed
+        )
     monkeypatch.setattr(adapter.common, "lookup_required", lambda *_args: True)
     calls: list[tuple[bool, bool]] = []
     failures: list[str] = []
@@ -1029,7 +1033,7 @@ def test_cursor_mcp_specific_admission_requires_ticket_server(
     """
     # Route the MCP server callback through ticket admission during bootstrap.
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
-    monkeypatch.setattr(cursor.common, "native_identity", lambda observed, _host: observed)
+    monkeypatch.setattr(cursor.cursor_children, "normalize", lambda observed, _deadline: observed)
     monkeypatch.setattr(cursor.common, "lookup_required", lambda *_args: True)
     seen: list[bool] = []
 
@@ -1069,6 +1073,7 @@ def test_native_completion_without_verified_ticket_stays_unready(
     monkeypatch.delenv("CURSOR_VERSION", raising=False)
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(common, "native_identity", lambda observed, _host: observed)
+    monkeypatch.setattr(cursor.cursor_children, "normalize", lambda observed, _deadline: observed)
     monkeypatch.setattr(common, "lookup_required", lambda *_args: True)
     monkeypatch.setattr(common, "native_ticket_lookup", lambda *_args, **_kwargs: None)
     for adapter, name, tool in (
@@ -1091,7 +1096,7 @@ def test_cursor_unselected_mcp_callbacks_cannot_complete_ticket(
     """
     # An unselected session has no ticket admission; its callbacks stay advisory.
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
-    monkeypatch.setattr(cursor.common, "native_identity", lambda observed, _host: observed)
+    monkeypatch.setattr(cursor.cursor_children, "normalize", lambda observed, _deadline: observed)
     monkeypatch.setattr(cursor.common, "lookup_required", lambda *_args: False)
     monkeypatch.setattr(
         cursor.common,

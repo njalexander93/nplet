@@ -507,7 +507,7 @@ The first table compares Claude Code and Cursor; the second records Codex bounda
 | File-tool completion | Supported success/failure event and required payload settle the observed call | Same; native failure type is checked |
 | Shell completion | Successful Bash result with string stdout/stderr, `interrupted: false`, and no async markers | Successful Shell result with integer `exitCode` and no async markers |
 | Ambiguous shell result/failure | Retain pending operation and report recovery | Same; booleans are not exit codes |
-| Child/provider/background tools | Deny unsupported tool names, unconfigured servers, other provider operations (including document/archive operations) and background identities. A ready parent's foreground `Agent` call (no `run_in_background: true`, no `isolation`) is pending work under its `tool_use_id`; `Task`, `TaskOutput`, `TaskStop`, `SpawnAgent` and `Agent` from a child are denied. `SubagentStart` joins the child (restricted, below); `SubagentStop` is an observation | Same; `subagentStart` also denies; remote sessions denied |
+| Child/provider/background tools | Deny unsupported tool names, unconfigured servers, other provider operations (including document/archive operations) and background identities. A ready parent's foreground `Agent` call (no `run_in_background: true`, no `isolation`) is pending work under its `tool_use_id`; `Task`, `TaskOutput`, `TaskStop`, `SpawnAgent` and `Agent` from a child are denied. `SubagentStart` joins the child (restricted, below); `SubagentStop` is an observation | Only the experimental [scoped foreground Task route](#cursor-scoped-foreground-tasks) below; unsupported child tools and remote sessions denied |
 | Session start | Advisory recovery/readiness context; no readiness grant | Advisory context only |
 | Compaction | PreCompact/PostCompact observations only; no context or decision output | Advisory context only |
 | Stop/session end | Optional observation only | Optional observation only; no automatic follow-up |
@@ -529,7 +529,7 @@ installed-host delivery for every provider or operating system.
 
 The rule behind this route is runtime-neutral: a child joins only with a verified,
 host-issued child identity and its own reader binding. `Agent`, `SubagentStart` and
-`agent_id` are the Claude Code mechanism for it. Cursor's child route remains denied;
+`agent_id` are the Claude Code mechanism for it. Cursor has a separate experimental [scoped Task route](#cursor-scoped-foreground-tasks);
 Codex uses its separate [native child contract](#codex-native-child-route-restricted).
 The Claude route is
 implemented and covered by synthetic protocol tests, plus one observed local Desktop
@@ -611,6 +611,47 @@ archive-provider coverage is claimed here. Interrupted or ambiguous shell work r
 inspect the actual process outcome before an explicit lifecycle recovery/settlement. A stop event,
 empty result, or timeout is not that evidence. Shell commands remain cooperative tool calls; these
 hooks do not prove that arbitrary commands did not launch their own independent child processes.
+
+## Cursor scoped foreground Tasks
+
+The candidate adapter supports assigned source reads and owned managed-note writes.
+It does not admit generic child Shell, project-file Write/Edit, child providers or
+nested Tasks. This is an experimental implementation, not completed native
+acceptance. Installed profiles require separate verified deployment; changing this
+checkout does not upgrade existing installations or retire their obligations.
+
+A ready parent prepares an exact Task assignment through `cursor-plan`. Native
+`preToolUse` consumes that assignment and records the parent call before allowing
+execution. The actual child conversation and parent call identify its independent
+participant, packet and owned paths. Source content and correlated successful Read
+completion establish receipts before acknowledgment. A lifecycle `read` returns
+source references; it does not replace source delivery. Use the exposed model Read
+argument `path`; captured hook envelopes use `file_path`.
+
+The adapter does not register `subagentStart` or `subagentStop` hooks. Their opaque
+observations supply no authority or completion evidence. Actual Task admission,
+child tool callbacks and independently verified results own those transitions.
+
+After a Task callback, use the exact reconciliation command supplied in its context:
+`cursor-reconcile --issue <issue-id> --call <call-token>` through the indicated
+adapter entry point. The native prehook verifies the issue selector against the
+actual ready parent. Reconciliation reads only the selected issue and independently
+obtains the exact pinned native result. The core revalidates invocation, generation
+and pending effects before atomically detaching authority and settling the parent
+call. A report, tool completion, authority retirement and native invocation outcome
+are distinct facts. Parent output acceptance remains separate.
+
+A resumed conversation requires a fresh admitted invocation, generation, assignment
+and source acknowledgment. Old callbacks cannot revive its earlier authority.
+Missing or unsupported results remain unresolved; neither elapsed time nor an idle
+UI establishes completion. Existing issue transactions provide crash recovery.
+
+Native classification still searches registered issue metadata when the envelope
+cannot directly locate its parent-qualified child binding. Consequently an unrelated
+unreadable issue can still block the whole hook path, even though reconciliation's
+own lookup is issue-local. Do not interpret isolated-store tests as proof of full
+parent usability. Source delivery, genuine resume, repeated overlapping bursts and
+failure recovery still require actual native acceptance with hooks active.
 
 ## Avoiding duplicate imported hooks
 
