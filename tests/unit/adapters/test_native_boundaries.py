@@ -31,6 +31,19 @@ def event() -> dict[str, Any]:
     }
 
 
+@pytest.fixture
+def admitted_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supply an already recorded completion without manufacturing a session binding.
+
+    Args:
+        monkeypatch: Replace only the existing-admission storage boundary.
+    """
+    # Each dependent test still verifies its distinct native settlement result and effects.
+    monkeypatch.setattr(
+        common, "existing_admission", lambda _event, _host: {"operation": "tool-complete"}
+    )
+
+
 def test_native_bootstrap_rejects_non_shell_or_extra_args_before_parser(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -418,21 +431,15 @@ def test_native_post_rejects_async_cursor_shell_output_without_settlement(
 
 def test_native_post_preserves_core_settlement_failure(
     monkeypatch: pytest.MonkeyPatch,
+    admitted_completion: None,
 ) -> None:
     """Keep a failed core completion visible after a valid synchronous result.
 
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
+        admitted_completion: Existing admitted request supplied by the shared fixture.
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(
-        common, "request_for", lambda _event, operation, _host: {"operation": operation}
-    )
-    monkeypatch.setattr(
-        common,
-        "existing_admission",
-        lambda event, host: common.request_for(event, "tool-complete", host),
-    )
     requests: list[dict[str, Any]] = []
     monkeypatch.setattr(
         common.core,
@@ -921,26 +928,23 @@ def test_native_post_rejects_unproven_claude_bash_completion(
     ],
 )
 def test_native_post_settles_only_documented_synchronous_success(
-    monkeypatch: pytest.MonkeyPatch, host: str, tool: str, response: dict[str, object]
+    monkeypatch: pytest.MonkeyPatch,
+    admitted_completion: None,
+    host: str,
+    tool: str,
+    response: dict[str, object],
 ) -> None:
     """A typed synchronous host completion records the observed tool exactly once.
 
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
+        admitted_completion: Existing admitted request supplied by the shared fixture.
         host: Native adapter selected for this case.
         tool: Tool identity selected for this case.
         response: Provider or hook response supplied by this case.
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(common, "native_tool", lambda *_args: tool)
-    monkeypatch.setattr(
-        common, "request_for", lambda _event, operation, _host: {"operation": operation}
-    )
-    monkeypatch.setattr(
-        common,
-        "existing_admission",
-        lambda event, host: common.request_for(event, "tool-complete", host),
-    )
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         common.core, "execute", lambda request: calls.append(request) or {"ok": True, "code": "OK"}
@@ -961,26 +965,23 @@ def test_native_post_settles_only_documented_synchronous_success(
     ],
 )
 def test_native_post_settles_documented_file_tool_failure(
-    monkeypatch: pytest.MonkeyPatch, host: str, field: str, extra: dict[str, object]
+    monkeypatch: pytest.MonkeyPatch,
+    admitted_completion: None,
+    host: str,
+    field: str,
+    extra: dict[str, object],
 ) -> None:
     """A host failure event is a terminal observation for synchronous file tools.
 
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
+        admitted_completion: Existing admitted request supplied by the shared fixture.
         host: Native adapter selected for this case.
         field: Request or event field varied by this case.
         extra: Additional request fields that must be rejected.
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(common, "native_tool", lambda *_args: "Read")
-    monkeypatch.setattr(
-        common, "request_for", lambda _event, operation, _host: {"operation": operation}
-    )
-    monkeypatch.setattr(
-        common,
-        "existing_admission",
-        lambda event, host: common.request_for(event, "tool-complete", host),
-    )
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         common.core, "execute", lambda request: calls.append(request) or {"ok": True, "code": "OK"}

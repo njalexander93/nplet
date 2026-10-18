@@ -85,9 +85,9 @@ def handle(event: core.JSONObject) -> core.JSONObject:
                 "HOST_UNSUPPORTED_PROVIDER",
             )
             core.require(
-                observed.get("mcp_server_name") in {"linear", "linear-server"}
+                observed.get("mcp_server_name") in common.LINEAR_SERVER_NAMES
                 and observed.get("mcp_server_url", observed.get("url"))
-                in {"https://mcp.linear.app/mcp", "https://mcp.linear.app/mcp/readonly"},
+                in common.LINEAR_SERVER_URLS,
                 "HOST_UNSUPPORTED_PROVIDER",
             )
             core.require(

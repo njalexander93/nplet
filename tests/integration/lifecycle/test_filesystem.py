@@ -181,11 +181,32 @@ def test_issue_view_reparse_boundary_and_collision(tmp_path: Path) -> None:
         assert (root / "target/note.md").read_bytes() == b"shared"
 
 
-def test_lock_contention_and_process_exit_release(tmp_path: Path) -> None:
+def test_existing_only_lock_preserves_absence_and_persistent_identity(tmp_path: Path) -> None:
+    """Never create a missing lock and reuse an existing lock without changing its identity.
+
+    Args:
+        tmp_path: Disposable native filesystem directory.
+    """
+    # Missing locks remain absent on the actual platform filesystem.
+    with core.Directory.absolute(tmp_path.resolve()) as directory:
+        with pytest.raises(FileNotFoundError), directory.lock(create=False):
+            pytest.fail("entered missing lock")
+        assert list(tmp_path.iterdir()) == []
+        # A normal core operation establishes the persistent lock before lookup can use it.
+        with directory.lock():
+            identity = (tmp_path / "lock").stat().st_ino
+        with directory.lock(create=False):
+            assert (tmp_path / "lock").stat().st_ino == identity
+        assert [path.name for path in tmp_path.iterdir()] == ["lock"]
+
+
+@pytest.mark.parametrize("create", [True, False])
+def test_lock_contention_and_process_exit_release(tmp_path: Path, create: bool) -> None:
     """Prove cross-process exclusion, bounded BUSY, crash release and persistent lock identity.
 
     Args:
         tmp_path: Disposable directory owned by this test.
+        create: Whether the contender may create lock storage.
     """
     # Resolve the disposable root so native paths use one stable location.
     root = tmp_path.resolve()
@@ -213,7 +234,10 @@ with Directory.absolute(sys.argv[1]) as directory, directory.lock():
         # Hold a validated root directory handle during all file operations.
         with core.Directory.absolute(root) as directory:
             # Require bounded contention to report BUSY.
-            with pytest.raises(core.WorkspaceError, match="BUSY"), directory.lock(timeout=0.05):
+            with (
+                pytest.raises(core.WorkspaceError, match="BUSY"),
+                directory.lock(timeout=0.05, create=create),
+            ):
                 pass
         # Terminate the lock holder without a normal unlock.
         process.kill()

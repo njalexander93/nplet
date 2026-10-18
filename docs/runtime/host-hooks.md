@@ -562,8 +562,8 @@ receive no task-free admission. On Codex, use native `Bash` with only `command`.
 Legacy `exec_command` remains readiness-gated because it can return an untracked
 process handle. Its existing `write_stdin` correlation checks remain in force.
 Claude requires foreground Bash and inherited background-disable configuration.
-Cursor requires its supported synchronous `Shell` shape with no working-directory
-override for task-free reads.
+Cursor requires its supported synchronous `Shell` shape. A `working_directory`
+override is admitted only when native validation confirms the same checkout.
 
 | Command | Admitted arguments |
 | --- | --- |

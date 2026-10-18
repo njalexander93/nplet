@@ -537,14 +537,50 @@ def test_rename_rejects_cross_volume_and_moves_only_after_check(
     assert effects == ["move"]
 
 
-def test_lock_reopens_persistent_inode_and_retries_contention(
+def test_existing_only_lock_cannot_create_an_absent_file(
     windows: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Propagate a missing persistent lock without a native creating open.
+
+    Args:
+        windows: Native Windows filesystem module.
+        monkeypatch: Record the existing-only file open and prohibit kernel mutation.
+    """
+    item = directory(windows)
+    attempts = []
+
+    def missing(_name: str, _access: int, create: bool = False) -> int:
+        """Record the sole native open mode and report the missing entry.
+
+        Args:
+            _name: Missing direct lock entry.
+            _access: Requested lock access rights.
+            create: Actual native creation mode.
+
+        Raises:
+            FileNotFoundError: No persistent lock exists.
+        """
+        attempts.append(create)
+        raise FileNotFoundError("missing existing lock")
+
+    # Existing-only lookup cannot publish a lock or attempt a kernel lock on an absent file.
+    monkeypatch.setattr(item, "_file", missing)
+    monkeypatch.setattr(windows, "LockFile", lambda *_args: pytest.fail("locked absent handle"))
+    with pytest.raises(FileNotFoundError, match="missing existing lock"), item.lock(create=False):
+        pytest.fail("entered absent lock")
+    assert attempts == [False]
+
+
+@pytest.mark.parametrize("create", [True, False])
+def test_lock_reopens_persistent_inode_and_retries_contention(
+    windows: Any, monkeypatch: pytest.MonkeyPatch, create: bool
 ) -> None:
     """Lock reopens persistent inode and retries contention.
 
     Args:
         windows: Windows filesystem module being exercised.
         monkeypatch: Pytest fixture used to replace the dependency under test.
+        create: Whether the caller permits creation of absent lock storage.
     """
     # Record native handle closes to verify cleanup.
     item = directory(windows)
@@ -577,8 +613,8 @@ def test_lock_reopens_persistent_inode_and_retries_contention(
     monkeypatch.setattr(windows.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(windows, "CloseHandle", lambda handle: closed.append(handle) or True)
     # Hold the persistent lock handle while checking contention.
-    with item.lock():
-        assert attempts == [True, False]
+    with item.lock(create=create):
+        assert attempts == ([True, False] if create else [False])
     # Check recorded closed against the required side effects.
     assert closed == [91]
 

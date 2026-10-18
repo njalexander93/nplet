@@ -227,12 +227,15 @@ class Directory:
         os.fsync(self.fd)
 
     @contextmanager
-    def lock(self, name: str = "lock", timeout: float = 1.0) -> Iterator[None]:
+    def lock(
+        self, name: str = "lock", timeout: float = 1.0, *, create: bool = True
+    ) -> Iterator[None]:
         """Hold a bounded exclusive flock on a persistent safe lock file.
 
         Args:
             name: Direct entry name relative to the opened directory.
             timeout: Maximum seconds to wait for lock acquisition.
+            create: Permit creation of a missing lock; false opens only existing storage.
 
         Returns:
             A context manager that yields while the issue lock is held.
@@ -244,8 +247,11 @@ class Directory:
         entry_name(name)
         # Set the monotonic deadline for bounded lock acquisition.
         end = time.monotonic() + timeout
+        # Read-only admission lookup must never publish a missing persistent lock.
+        if not create:
+            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
         # Retry until success or the bounded deadline is reached.
-        while True:
+        while create:
             try:
                 fd = os.open(
                     name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd

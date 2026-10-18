@@ -373,13 +373,50 @@ def test_write_cleans_unpublished_temp_after_replace_failure(
     ]
 
 
+def test_existing_only_lock_cannot_create_an_absent_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Open a missing lock without creation flags or directory mutation.
+
+    Args:
+        monkeypatch: Record the single existing-file open attempt.
+    """
+    flags_seen = []
+
+    def missing(_name: str, flags: int, **_kwargs: object) -> int:
+        """Reject the absent lock and record its non-creating open flags.
+
+        Args:
+            _name: Missing direct lock entry.
+            flags: Actual native open flags.
+            **_kwargs: Directory-relative open arguments.
+
+        Raises:
+            FileNotFoundError: The lock has not been created by a core operation.
+        """
+        flags_seen.append(flags)
+        raise FileNotFoundError("missing existing lock")
+
+    # An absent existing-only lock must fail before fsync, flock or any creation retry.
+    monkeypatch.setattr(posix.os, "open", missing)
+    monkeypatch.setattr(posix.os, "fsync", lambda *_args: pytest.fail("mutated directory"))
+    monkeypatch.setattr(posix.fcntl, "flock", lambda *_args: pytest.fail("locked absent file"))
+    with (
+        pytest.raises(FileNotFoundError, match="missing existing lock"),
+        directory().lock(create=False),
+    ):
+        pytest.fail("entered absent lock")
+    assert len(flags_seen) == 1
+    assert not flags_seen[0] & (os.O_CREAT | os.O_EXCL)
+
+
+@pytest.mark.parametrize("create", [True, False])
 def test_lock_rejects_unsafe_existing_lock_and_releases_descriptor(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, create: bool
 ) -> None:
     """Reject a multi-link lock file before flock and release the opened handle.
 
     Args:
         monkeypatch: Pytest fixture used to replace the dependency under test.
+        create: Whether this lock acquisition permits missing-file creation.
     """
     # Record descriptor closes to verify cleanup.
     closed: list[int] = []
@@ -415,7 +452,7 @@ def test_lock_rejects_unsafe_existing_lock_and_releases_descriptor(
     # failure.
     with pytest.raises(WorkspaceError) as captured:
         # Hold the lock while checking descriptor cleanup.
-        with directory().lock():
+        with directory().lock(create=create):
             pytest.fail("entered unsafe lock")
     # Confirm the rejected operation reports UNSAFE_PATH.
     assert captured.value.code == "UNSAFE_PATH"

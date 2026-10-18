@@ -17,6 +17,10 @@ from nplet.adapters import runner, task_boundary
 from nplet.lifecycle import task_workspace as core
 
 ROOT = Path(__file__).resolve().parents[3]
+LINEAR_SERVER_NAMES = frozenset({"linear", "linear-server"})
+LINEAR_SERVER_URLS = frozenset(
+    {"https://mcp.linear.app/mcp", "https://mcp.linear.app/mcp/readonly"}
+)
 
 BOOTSTRAP_FIELDS = {
     "diagnose": set(),
@@ -356,103 +360,36 @@ def selected_lookup(event: core.JSONObject, host: str, complete: bool = False) -
 
 
 def existing_admission(event: core.JSONObject, host: str) -> core.JSONObject | None:
-    """Probe exact existing pending work without creating task, binding or lock storage.
+    """Select recorded completion authority through the core's synchronized existing-store lookup.
 
     Args:
         event: Identity-validated completion with its native call ID.
         host: Actual adapter identity.
 
     Returns:
-        Existing bound request for exact pending or replayed admission, or a local poll handle.
+        Existing bound request for exact admission, replay or a unique local poll handle;
         None when no admission exists.
 
     Raises:
-        core.WorkspaceError: If registered state is unsafe, inconsistent or transactional.
-        OSError: If present state cannot be inspected.
+        core.WorkspaceError: If existing state, native identity or correlation is invalid.
+        OSError: If existing safe storage cannot be inspected or locked.
     """
-    # Resolve native identity before examining any local state.
+    # Translate native polling shape; storage and lock ownership remain inside the core.
     tool_id = native_token(event.get("tool_use_id"))
-    root, common, trees = core.repository(event["cwd"])
-    key = core.participant_key({"host": host, "session_id": event["session_id"]})
-    request = {
-        "schema_version": 1,
-        "operation": "tool-complete",
-        "request_id": str(uuid.uuid4()),
-        "worktree": event["cwd"],
-        "host": host,
-        "session_id": event["session_id"],
-    }
-    # All opened directories already exist; this probe never uses Store or a lock creator.
-    with core.Directory.absolute(root) as directory:
-        if not directory.exists(".task"):
-            return None
-        with directory.child(".task") as task:
-            if not task.exists(".repository.json"):
-                # Assignment-only startup is valid; durable state requires registration.
-                core.require(not task.exists(".control"), "RECOVERY_REQUIRED")
-                if task.exists(".bindings"):
-                    with task.child(".bindings") as bindings:
-                        core.require(not bindings.exists(key + ".json"), "RECOVERY_REQUIRED")
-                return None
-            registration = task.json(".repository.json")
-            core.require(
-                str(common) == registration["common"]
-                and core.fs_identity(common) == registration["common_identity"]
-                and Path(registration["main"]) == trees[0],
-                "REPOSITORY_MISMATCH",
-            )
-            if not task.exists(".bindings"):
-                return None
-            with task.child(".bindings") as bindings:
-                if not bindings.exists(key + ".json"):
-                    return None
-                request.update(bindings.json(key + ".json"))
-        # Validate the shared registration before reading its committed issue state.
-        request["repo_id"] = registration["repo_id"]
-        with (
-            core.Directory.absolute(registration["main"]) as main,
-            main.child(".task") as task,
-            task.child(".control") as control,
-        ):
-            core.require(
-                main.identity == registration["main_identity"]
-                and control.json("repository.json") == registration,
-                "REPOSITORY_MISMATCH",
-            )
-            with (
-                control.child("issues") as issues,
-                issues.child(core.issue_id(request["issue_id"])) as issue,
-            ):
-                core.require(not issue.exists("transaction.json"), "RECOVERY_REQUIRED")
-                state = issue.json("state.json")
-                core.authorize(state, request, maintenance=True)
-                pending = state["participants"][key]["pending"]
-                if tool_id in pending:
-                    return request
-                # A matching durable admission permits exact completion replay after settlement.
-                admission = {
-                    **request,
-                    "operation": "tool-start",
-                    "request_id": "pre:" + tool_id,
-                    "tool_id": tool_id,
-                }
-                if host == "codex":
-                    admission["poll_handle"] = (
-                        str(event.get("tool_input", {}).get("session_id"))
-                        if event.get("tool_name") == "write_stdin"
-                        else None
-                    )
-                receipt = state["requests"].get(core.sha(admission["request_id"].encode()))
-                if receipt is not None and receipt["digest"] == core.sha(core.canonical(admission)):
-                    return request
-                # Legacy polls without a prehook may select only one participant-local handle.
-                if event.get("tool_name") == "write_stdin":
-                    handle = event.get("tool_input", {}).get("session_id")
-                    core.require(type(handle) in {str, int}, "ASYNC_HANDLE_CONFLICT")
-                    matches = [p for p in pending.values() if p.get("handle") == str(handle)]
-                    core.require(len(matches) == 1, "UNKNOWN_OPERATION")
-                    return request
-    return None
+    polling = event.get("tool_name") == "write_stdin"
+    return core._existing_tool_request(
+        {
+            "schema_version": 1,
+            "operation": "tool-complete",
+            "request_id": str(uuid.uuid4()),
+            "worktree": event["cwd"],
+            "host": host,
+            "session_id": event["session_id"],
+        },
+        tool_id,
+        polling=polling,
+        poll_handle=event.get("tool_input", {}).get("session_id") if polling else None,
+    )
 
 
 def _claude_linear_providers() -> dict[str, set[str]]:
@@ -510,11 +447,11 @@ def _linear_tool(event: core.JSONObject, host: str) -> tuple[str, core.JSONObjec
         if event.get("tool_name") != "get_issue":
             return None
         core.require(
-            event.get("mcp_server_name") in {"linear", "linear-server"}, "HOST_UNSUPPORTED_PROVIDER"
+            event.get("mcp_server_name") in LINEAR_SERVER_NAMES, "HOST_UNSUPPORTED_PROVIDER"
         )
         url = event.get("mcp_server_url", event.get("url"))
         core.require(
-            url in {"https://mcp.linear.app/mcp", "https://mcp.linear.app/mcp/readonly"},
+            url in LINEAR_SERVER_URLS,
             "HOST_UNSUPPORTED_PROVIDER",
         )
         raw = event.get("tool_input")
@@ -1530,12 +1467,22 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         else _linear_provider_tool(event, host)
     )
     roles = task_boundary.edit_roles(event)
+    # Strip only native shell metadata already validated for foreground/configuration/checkout.
+    effect = (
+        {
+            **event,
+            "tool_name": "Bash",
+            "tool_input": {"command": event["tool_input"]["command"]},
+        }
+        if tool in {"Bash", "Shell"}
+        else event
+    )
     if (
         host == "claude-code"
         and tool
         in CLAUDE_NO_EFFECT_TOOLS | {"mcp__ccd_turn__update_plan", "mcp__ccd_turn__wrap_up"}
         and event.get("child") is not True
-    ) or task_boundary.task_free(event, host, operation, roles):
+    ) or task_boundary.task_free(effect, host, operation, roles):
         return
     # Raw control-store mutation never becomes a readiness-authorized note.
     core.require("control" not in roles, "NOT_OWNER")

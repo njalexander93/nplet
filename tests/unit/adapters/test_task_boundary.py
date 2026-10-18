@@ -352,11 +352,12 @@ class ReadDirectory:
         """
         return name in self.entries
 
-    def child(self, name: str):
-        """Open one existing child; accepting no create parameter enforces read-only use.
+    def child(self, name: str, create: bool = False):
+        """Open one existing child and reject any attempted collection creation.
 
         Args:
             name: Existing child directory name.
+            create: Must remain false for an existing-state lookup.
 
         Returns:
             Another read-only directory handle.
@@ -364,7 +365,25 @@ class ReadDirectory:
         Raises:
             KeyError: If the required existing child is absent.
         """
+        assert create is False
         return ReadDirectory(self.entries[name])
+
+    def close(self) -> None:
+        """Release the modeled existing descriptor without state changes."""
+
+    def lock(self, name: str = "lock", *, create: bool = True):
+        """Model only a persistent existing lock without creation.
+
+        Args:
+            name: Existing lock entry.
+            create: Must be false for the lookup.
+
+        Returns:
+            This existing directory as a bounded lock context.
+        """
+        assert create is False
+        assert name in self.entries
+        return self
 
     def json(self, name: str):
         """Read stored JSON without manufacturing a default.
@@ -420,20 +439,49 @@ def admission_store(tmp_path, monkeypatch):
     tree = {
         ".task": {
             ".repository.json": registration,
-            ".bindings": {key + ".json": {"issue_id": "TEST-1", "binding_generation": 1}},
+            ".bindings": {
+                key + ".json": {"issue_id": "TEST-1", "binding_generation": 1},
+                key + ".lock": None,
+            },
             ".control": {
                 "repository.json": registration,
-                "issues": {"TEST-1": {"state.json": state}},
+                "issues": {"TEST-1": {"state.json": state, "lock": None}},
             },
         }
     }
-    # A creating open, lock or lifecycle transaction fails instead of passing unnoticed.
+    # Creating opens or lifecycle transactions fail instead of passing unnoticed.
     monkeypatch.setattr(common.core, "repository", lambda _path: (root, root / ".git", [root]))
     monkeypatch.setattr(common.core, "fs_identity", lambda _path: [1, 2])
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: ReadDirectory(tree))
-    monkeypatch.setattr(common.core, "Store", lambda *_args: pytest.fail("creating Store"))
     monkeypatch.setattr(common.core, "execute", lambda *_args: pytest.fail("lifecycle mutation"))
     return tree, observed, key, state
+
+
+@pytest.mark.parametrize("missing", ["bindings", "binding"])
+@pytest.mark.parametrize("field", ["common", "common_identity", "main"])
+def test_unbound_registered_completion_rejects_foreign_identity(
+    admission_store, missing: str, field: str
+) -> None:
+    """Validate present repository registration before treating missing admission as absence.
+
+    Args:
+        admission_store: Existing read-only directory and registration fixture.
+        missing: Absent binding collection or participant binding.
+        field: Foreign repository identity field.
+    """
+    from nplet.adapters import common
+
+    # Absence of a binding cannot hide a foreign or replaced repository registration.
+    tree, observed, key, _state = admission_store
+    task = tree[".task"]
+    if missing == "bindings":
+        task.pop(".bindings")
+    else:
+        task[".bindings"].pop(key + ".json")
+    task[".repository.json"][field] = [9, 9] if field == "common_identity" else "/foreign"
+    with pytest.raises(common.core.WorkspaceError) as failure:
+        common.existing_admission(observed, "codex")
+    assert failure.value.code == "REPOSITORY_MISMATCH"
 
 
 def test_existing_admission_distinguishes_absence_and_corruption(admission_store) -> None:
@@ -461,7 +509,7 @@ def test_existing_admission_distinguishes_absence_and_corruption(admission_store
     task.pop(".bindings")
     assert common.existing_admission(observed, "codex") is None
     # Durable binding or control state without registration must fail closed.
-    task[".bindings"] = {key + ".json": binding}
+    task[".bindings"] = {key + ".json": binding, key + ".lock": None}
     with pytest.raises(common.core.WorkspaceError) as captured:
         common.existing_admission(observed, "codex")
     assert captured.value.code == "RECOVERY_REQUIRED"
@@ -475,6 +523,26 @@ def test_existing_admission_distinguishes_absence_and_corruption(admission_store
     with pytest.raises(common.core.WorkspaceError) as captured:
         common.existing_admission(observed, "codex")
     assert captured.value.code == "RECOVERY_REQUIRED"
+    assert control["issues"]["TEST-1"]["transaction.json"] == {}
+
+
+def test_completion_binding_disappearing_before_lock_is_not_recreated(
+    admission_store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Treat a binding gone after preflight as no admission without changing pending work.
+
+    Args:
+        admission_store: Existing registered participant with one pending operation.
+        monkeypatch: Model the binding read after acquisition of its persistent lock.
+    """
+    from nplet.adapters import common
+
+    # The core must re-read the binding under lock rather than reuse its preflight contents.
+    tree, observed, key, state = admission_store
+    monkeypatch.setattr(common.core.Store, "binding", lambda _store: None)
+    assert common.existing_admission(observed, "codex") is None
+    assert state["participants"][key]["pending"] == {"owned": {"status": "pending"}}
+    assert set(tree[".task"][".bindings"]) == {key + ".json", key + ".lock"}
 
 
 def test_existing_admission_correlates_pending_replay_and_local_handles(admission_store) -> None:
@@ -590,6 +658,7 @@ def test_existing_admission_does_not_reuse_another_hosts_start(admission_store) 
         "issue_id": "TEST-1",
         "binding_generation": 1,
     }
+    tree[".task"][".bindings"][claude_key + ".lock"] = None
     state["participants"][claude_key] = {"generation": 1, "status": "ready", "pending": {}}
     assert common.existing_admission(observed, "claude-code") is None
 
@@ -702,11 +771,18 @@ def test_validated_provider_planning_and_native_reads_have_no_task_effect() -> N
     assert boundary.task_free(
         {"tool_name": "Bash", "tool_input": {"command": "pwd"}}, "claude-code"
     )
-    assert boundary.task_free({"tool_name": "Shell", "tool_input": {"command": "pwd"}}, "cursor")
+    # Cursor's native Shell is normalized to the shared command-only effect after validation.
+    assert boundary.task_free({"tool_name": "Bash", "tool_input": {"command": "pwd"}}, "cursor")
+    assert not boundary.task_free({"tool_name": "Shell", "tool_input": {"command": "pwd"}}, "codex")
     assert not boundary.task_free(
         {"tool_name": "Shell", "tool_input": {"command": "pwd", "working_directory": "other"}},
         "cursor",
     )
+    # Normalization does not grant another host the Claude-only review transport.
+    review = {"tool_name": "Bash", "tool_input": {"command": "gh pr view 7 --repo owner/repo"}}
+    assert boundary.task_free(review, "claude-code")
+    assert not boundary.task_free(review, "cursor")
+    assert not boundary.task_free(review, "codex")
 
 
 @pytest.mark.parametrize(

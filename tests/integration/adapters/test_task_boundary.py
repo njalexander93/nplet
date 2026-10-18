@@ -6,6 +6,8 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
 import pytest
@@ -87,6 +89,212 @@ def allowed(host: str, response: dict) -> bool:
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_completion_waits_for_overlapping_core_commit(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """Settle the finished call after a concurrent durable transaction publishes safely.
+
+    Args:
+        monkeypatch: Pause only the writer at its existing durable-intent failpoint.
+        host: Native completion shape sharing the synchronized core lookup.
+    """
+    # A genuine admitted call must survive another operation's in-progress transaction.
+    case = Fixture()
+    case.setUp()
+    case.base["host"] = {"codex": "codex", "claude": "claude-code", "cursor": "cursor"}[host]
+    case.base["coordinator"] = core.participant_key(case.base)
+    intent, release, observer = threading.Event(), threading.Event(), threading.Event()
+    try:
+        case.create()
+        case.ready()
+        case.call("tool-start", tool_id="finished")
+        request = case.req("tool-start", tool_id="other")
+
+        def pause(stage: str) -> None:
+            """Hold the writer after durable intent until the completion overlaps it.
+
+            Args:
+                stage: Existing core failpoint reached by a transaction.
+            """
+            if stage == "intent" and not intent.is_set():
+                intent.set()
+                assert release.wait(2)
+
+        def complete() -> dict:
+            """Deliver the actual terminal callback while the writer owns core locks.
+
+            Returns:
+                The adapter completion response.
+            """
+            observer.set()
+            observed = event(
+                case.root,
+                host,
+                "Write",
+                {"file_path": "src/app.py", "content": "done"},
+                name="PostToolUse",
+                call="finished",
+            )
+            observed.update(
+                session_id="coordinator",
+                conversation_id="coordinator",
+                tool_response={"isError": False},
+                tool_output="{}",
+            )
+            return {"codex": codex, "claude": claude, "cursor": cursor}[host].handle(observed)
+
+        # The reader must use existing locks rather than interpret live intent as corruption.
+        monkeypatch.setattr(core, "FAILPOINT", pause)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            writer = pool.submit(core.execute, request)
+            assert intent.wait(2)
+            completion = pool.submit(complete)
+            assert observer.wait(2)
+            try:
+                response = completion.result(timeout=0.2)
+            except TimeoutError:
+                release.set()
+                response = completion.result(timeout=3)
+            finally:
+                release.set()
+            assert writer.result(timeout=3)["ok"]
+        assert response == {}
+        pending = case.state()["participants"][case.base["coordinator"]]["pending"]
+        assert set(pending) == {"other"}
+    # Release any blocked writer and both disposable worktrees on failure.
+    finally:
+        release.set()
+        case.doCleanups()
+
+
+def test_cursor_same_checkout_shell_override_remains_task_free(checkout: Path) -> None:
+    """Treat an already validated local working directory like the plain read form.
+
+    Args:
+        checkout: Unregistered checkout whose state must remain absent.
+    """
+    # Both native spellings name the same foreground read effect.
+    subdirectory = checkout / "notes"
+    subdirectory.mkdir()
+    for args in (
+        {"command": "pwd"},
+        {"command": "pwd", "working_directory": str(checkout)},
+        {"command": "pwd", "working_directory": str(subdirectory)},
+    ):
+        assert cursor.handle(event(checkout, "cursor", "Shell", args)) == {"permission": "allow"}
+        assert not (checkout / ".task").exists()
+
+
+def test_completion_recovers_interrupted_existing_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roll existing durable intent forward before settling only the finished call.
+
+    Args:
+        monkeypatch: Interrupt one genuine core transaction after its durable intent.
+    """
+    # Retain the original pending call while another operation is interrupted durably.
+    case = Fixture()
+    case.setUp()
+    try:
+        case.create()
+        case.ready()
+        case.call("tool-start", tool_id="finished")
+
+        def interrupt(stage: str) -> None:
+            """Stop publication after intent without editing its staged bytes.
+
+            Args:
+                stage: Existing lifecycle failpoint.
+
+            Raises:
+                RuntimeError: Simulated process interruption after intent is durable.
+            """
+            if stage == "intent":
+                raise RuntimeError("interrupted writer")
+
+        monkeypatch.setattr(core, "FAILPOINT", interrupt)
+        with pytest.raises(RuntimeError, match="interrupted writer"):
+            core.execute(case.req("tool-start", tool_id="other"))
+        monkeypatch.setattr(core, "FAILPOINT", None)
+        # The actual completion uses normal locked recovery, never a blanket transaction retry.
+        observed = event(case.root, "codex", "Write", {}, name="PostToolUse", call="finished")
+        observed.update(session_id="coordinator", tool_response={"isError": False})
+        assert codex.handle(observed) == {}
+        pending = case.state()["participants"][case.base["coordinator"]]["pending"]
+        assert set(pending) == {"other"}
+        assert not (case.root / ".task/.control/issues/TEST-1/transaction.json").exists()
+    # Always release the disposable repository; the process-failure fixture remains isolated.
+    finally:
+        case.doCleanups()
+
+
+@pytest.mark.parametrize("lock", ["binding", "issue"])
+def test_completion_lookup_does_not_recreate_missing_locks(lock: str) -> None:
+    """Reject corrupt registered storage without creating an absent persistent lock.
+
+    Args:
+        lock: Existing binding or issue lock removed from this disposable store.
+    """
+    case = Fixture()
+    case.setUp()
+    try:
+        case.create()
+        case.ready()
+        case.call("tool-start", tool_id="finished")
+        path = (
+            case.root / ".task/.bindings" / (case.base["coordinator"] + ".lock")
+            if lock == "binding"
+            else case.root / ".task/.control/issues/TEST-1/lock"
+        )
+        path.unlink()
+        before = {
+            str(p.relative_to(case.root)): p.read_bytes()
+            for p in (case.root / ".task").rglob("*")
+            if p.is_file()
+        }
+        # A bound request requires the actual existing lock; no creating lock call is allowed.
+        observed = event(case.root, "codex", "Write", {}, call="finished")
+        observed["session_id"] = "coordinator"
+        with pytest.raises(core.WorkspaceError) as failure:
+            common.existing_admission(observed, "codex")
+        assert failure.value.code == "RECOVERY_REQUIRED"
+        assert not path.exists()
+        after = {
+            str(p.relative_to(case.root)): p.read_bytes()
+            for p in (case.root / ".task").rglob("*")
+            if p.is_file()
+        }
+        assert after == before
+    # Deletion was confined to the disposable fixture and cannot affect real repository locks.
+    finally:
+        case.doCleanups()
+
+
+def test_cursor_shell_override_rejects_foreign_checkout_and_unknown_effect(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """Retain foreign checkout denial and readiness for mutation-capable commands.
+
+    Args:
+        checkout: Unregistered native checkout.
+        tmp_path: Disposable parent for an unrelated Git repository.
+    """
+    # Native identity validation must reject an override before effect normalization.
+    foreign = tmp_path / "foreign"
+    subprocess.run(["git", "init", "-q", str(foreign)], check=True)
+    observed = event(
+        checkout, "cursor", "Shell", {"command": "pwd", "working_directory": str(foreign)}
+    )
+    assert "REPOSITORY_MISMATCH" in str(cursor.handle(observed))
+    # Same-checkout identity alone grants no task-free authority to an unknown command.
+    observed["tool_input"] = {"command": "npm install package", "working_directory": str(checkout)}
+    assert "REGISTRATION_REQUIRED" in str(cursor.handle(observed))
+    assert not (checkout / ".task").exists()
+    assert not (foreign / ".task").exists()
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
 def test_fresh_reads_notes_and_protected_denials_leave_no_task(checkout: Path, host: str) -> None:
     """Permit independent work while source, dependencies and controls remain unchanged.
 
@@ -117,6 +325,14 @@ def test_fresh_reads_notes_and_protected_denials_leave_no_task(checkout: Path, h
         "scripts/run.md",
         "requirements.txt",
         "requirements-dev.txt",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "package.json",
+        "poetry.lock",
+        "docs/CMakeLists.txt",
+        ".claude/settings.json",
+        ".cursor/hooks.json",
+        ".codex/hooks.json",
         "constraints.in",
         "deps/list.txt",
         "skills/example/references/instructions.md",
@@ -136,6 +352,41 @@ def test_fresh_reads_notes_and_protected_denials_leave_no_task(checkout: Path, h
         assert not allowed(host, response)
         assert not (checkout / path).exists()
         assert not (checkout / ".task").exists()
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_native_package_mutation_denial_preserves_manifest_and_absent_task(
+    checkout: Path, host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deny a representative package mutation through each real native adapter process.
+
+    Args:
+        checkout: Unregistered repository with a protected manifest sentinel.
+        host: Native adapter shape under test.
+        monkeypatch: Supply Claude's required synchronous shell configuration.
+    """
+    # Native foreground validation must run before the protected command requires a task.
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
+    manifest = checkout / "package.json"
+    manifest.write_text('{"sentinel": true}\n')
+    before = manifest.read_bytes()
+    observed = event(
+        checkout,
+        host,
+        "Shell" if host == "cursor" else "Bash",
+        {"command": "npm install package"},
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "nplet.adapters." + host],
+        input=json.dumps(observed),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert not allowed(host, json.loads(result.stdout))
+    assert manifest.read_bytes() == before
+    assert not (checkout / "node_modules").exists()
+    assert not (checkout / ".task").exists()
 
 
 @pytest.mark.parametrize(
@@ -512,14 +763,18 @@ def test_same_note_input_changes_identity_before_completion(host: str) -> None:
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
 @pytest.mark.parametrize("condition", ["pending", "stale"])
-def test_free_work_preserves_bound_pending_or_stale_state(host: str, condition: str) -> None:
+def test_free_work_preserves_bound_pending_or_stale_state(
+    host: str, condition: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Permit reads, admin and notes while retaining exact blocked implementation state.
 
     Args:
         host: Native parent adapter.
         condition: Reserved ticket or stale required source.
+        monkeypatch: Supply the required foreground shell configuration.
     """
     # Establish a genuine bound participant, then independently block implementation.
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
     case = Fixture()
     case.setUp()
     adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
@@ -606,15 +861,34 @@ def test_free_work_preserves_bound_pending_or_stale_state(host: str, condition: 
                 "tool_output": "{}",
             }
             assert adapter.handle(completed) == {}
-        blocked = event(
-            case.root, host, "Write", {"file_path": "src/blocked.py", "content": "blocked"}
+        # Independent literal headline categories remain implementation under either fence.
+        protected = (
+            "src/blocked.py",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "package.json",
+            "poetry.lock",
+            ".github/workflows/build.yml",
         )
-        blocked.update(session_id="coordinator", conversation_id="coordinator")
-        response = adapter.handle(blocked)
-        assert not allowed(host, response)
-        assert ("TICKET_READ_REQUIRED" if condition == "pending" else "SOURCE_STALE") in str(
-            response
+        for path in protected:
+            blocked = event(case.root, host, "Write", {"file_path": path, "content": "blocked"})
+            blocked.update(session_id="coordinator", conversation_id="coordinator")
+            response = adapter.handle(blocked)
+            assert not allowed(host, response)
+            assert ("TICKET_READ_REQUIRED" if condition == "pending" else "SOURCE_STALE") in str(
+                response
+            )
+            assert not (case.root / path).exists()
+        # A package-manager command is protected even when its native transport is foreground.
+        package = event(
+            case.root,
+            host,
+            "Shell" if host == "cursor" else "Bash",
+            {"command": "npm install package"},
         )
+        package.update(session_id="coordinator", conversation_id="coordinator")
+        assert not allowed(host, adapter.handle(package))
+        assert not (case.root / "node_modules").exists()
         after = {
             str(p.relative_to(case.root)): p.read_bytes()
             for p in (case.root / ".task").rglob("*")

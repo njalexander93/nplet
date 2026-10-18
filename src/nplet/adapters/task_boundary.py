@@ -492,25 +492,9 @@ def task_free(
     # Native read operations cannot modify the inspected paths.
     if tool in {"Read", "Glob", "Grep"}:
         return True
-    if tool in {"Bash", "Shell"}:
-        # Only native foreground transports have an observed synchronous read contract.
-        if host == "codex":
-            return (
-                tool == "Bash"
-                and set(args) == {"command"}
-                and read_command(args.get("command"), host)
-            )
-        allowed = (
-            {"command", "description", "timeout", "run_in_background"}
-            if tool == "Bash"
-            else {"command", "working_directory"}
-        )
-        return (
-            set(args) <= allowed
-            and args.get("run_in_background", False) is False
-            and (tool != "Shell" or "working_directory" not in args)
-            and read_command(args.get("command"), host)
-        )
+    if tool == "Bash":
+        # Native adapters supply a canonical command after validating their transport metadata.
+        return set(args) == {"command"} and read_command(args.get("command"), host)
     selected = edit_roles(event) if roles is None else roles
     return bool(selected) and all(role == "note" for role in selected)
 
