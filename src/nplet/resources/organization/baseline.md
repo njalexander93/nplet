@@ -85,6 +85,37 @@ An unfinished prerequisite makes an issue ineligible, including prerequisites ou
 
 Use Linear Queued for Wave-proposal reservation with an activity stamp identifying Controller/proposal and time; first to queue reserves the issue. The human assignee remains unchanged. Verify the winning claim before execution; Queued supplies neither execution authorization nor budget admission. Move to In Progress when the Wave starts. This rule does not claim that complete reservation enforcement is implemented. Each successor Wave needs explicit human start after retrospective interaction; retrospective recommendations neither change policy nor start it automatically.
 
+## Work Item Plan contract
+
+The **Work Item Plan** is the portable canonical name for the authorized issue-scoped execution contract. "Issue roadmap" and "task roadmap" are user-facing or adapter aliases of the same artifact, never competing types. Issue Planner authors the proposal; a fresh Plan Reviewer gives the independent disposition; Human Leadership authorizes the execution commitment and every material amendment. Issue Delivery Manager operates the authorized plan; it cannot rewrite or expand it or treat execution history as an implicit amendment.
+
+One logical artifact has two synchronized representations: a concise human-readable plan rendered in or linked from the Work System, and a versioned machine-readable manifest validated against the portable schema. Both carry the same plan ID, version, Work Item and content digest; a mismatch fails closed until reconciled. The Work System remains the durable operational entry point. An editable issue description without attributable version history is not a sufficient sole baseline.
+
+The plan identifies at least:
+
+- plan ID, schema version, plan version, Work Item reference, authoring Planner and authoritative source references;
+- approved outcome, included and excluded scope, assumptions, constraints and completion definition;
+- base artifact or repository state and applicable ownership boundaries;
+- selected workflow Profile and ordered Role lanes, each with Role, Profile, bounded objective, context inputs, writable artifacts and prohibited actions;
+- lane prerequisites, handoffs, required evidence, independent assurance, human gates and terminal outcome;
+- Estimate, Agent Class, Assurance Level, complete-lifecycle budget reservation inputs, retry or correction bounds and escalation conditions;
+- dependency, collision, security, destructive-action, external-account, publication, merge, deployment and rollback requirements when applicable;
+- known uncertainty, unresolved decisions that block execution, and conditions that require replanning rather than specialist improvisation.
+
+The human-readable plan has five stable sections:
+
+- identity and authority: Work Item, plan version and digest, status, Planner and Plan Reviewer dispositions, Human Leadership authorization, workflow Profile, Estimate, Agent Class and Assurance Level;
+- outcome and boundaries;
+- an execution graph of work packages, each carrying only its applicable Role lanes with objective, inputs, writable artifacts, prohibited actions, prerequisites, handoff, evidence receipt, correction route and next gate;
+- assurance and terminal gates;
+- amendments and exceptions.
+
+The machine-readable graph is a directed acyclic graph where possible. Numbered steps are a human projection of the valid order; a checked box projects an accepted state event and is neither authorization nor evidence. Reusable workflow Profiles supply generic lane rules, mandatory evidence classes and standard gates by reference; the plan records only the task-specific application, permitted overrides and exact artifact boundaries.
+
+Human authorization creates an immutable plan-version baseline bound to its digest. Execution events reference that baseline and never edit it. An amendment is a new attributable version recording changed fields, reason, evidence, author, review disposition, required authority and relationship to the prior version; it passes through the Planning Workflow as a new instance with renewed independent review and human authorization. Specialists exercise only the bounded discretion the plan and Role contract leave open. A discovery that changes product intent, material scope, Role topology, mandatory gates, risk classification, budget commitment, protected targets or terminal outcome pauses affected execution where continuing would be unsafe or invalid, and returns to the amendment path. The exact field schema, amendment-materiality matrix and provider-specific rendering remain unresolved implementation work; this section establishes artifact identity, contents and authority boundaries.
+
+The planning definitions in the packaged [roles](../roles/README.md) folder apply this contract; it grants no execution authority by itself.
+
 ## Model and capacity boundaries
 
 Model ranges, reasoning preferences, defaults and Agent Class mappings are user-local configuration, not a Company model envelope or universal program/Company/Project quality floor. Pin applicable approved Role-specific ranges, defaults, qualification basis and fallback policy at Wave admission. Before the Role first starts, the deterministic selector may replace an unavailable preferred model only within the admitted eligible set and same runtime, after hard-constraint and remaining-budget checks. Bind the exact model/reasoning at first start.
