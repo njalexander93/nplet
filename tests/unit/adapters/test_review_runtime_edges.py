@@ -186,6 +186,58 @@ def cursor_specific(**changes: object) -> dict[str, Any]:
     return base
 
 
+@pytest.mark.parametrize(
+    "changes,expected_code",
+    [
+        ({}, None),
+        (
+            {
+                "mcp_server_name": "linear-server",
+                "mcp_server_url": "https://mcp.linear.app/mcp/readonly",
+            },
+            None,
+        ),
+        ({"mcp_server_name": "unconfigured"}, "HOST_UNSUPPORTED_PROVIDER"),
+        ({"mcp_server_url": "https://unconfigured.invalid/mcp"}, "HOST_UNSUPPORTED_PROVIDER"),
+        ({"tool_input": {}}, "INVALID_REQUEST"),
+        ({"tool_input": "[]"}, "INVALID_REQUEST"),
+        ({"tool_input": "{"}, "INVALID_REQUEST"),
+    ],
+)
+def test_cursor_ordinary_provider_specific_hook_validates_provenance_and_object_input(
+    monkeypatch: pytest.MonkeyPatch, changes: dict, expected_code: str | None
+) -> None:
+    """Admit only configured ordinary MCP calls without starting lookup or lifecycle work.
+
+    Args:
+        monkeypatch: Isolate Git discovery and prohibit task/provider state changes.
+        changes: Server provenance or serialized native input varied by this case.
+        expected_code: Exact denial diagnostic, or an admitted specific callback.
+    """
+    # Exercise actual native identity and the ordinary provider branch, without ticket startup.
+    monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
+    monkeypatch.setattr(core, "repository", lambda _cwd: (ROOT, None, [ROOT]))
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args: pytest.fail("looked up Task"))
+    monkeypatch.setattr(
+        common, "native_ticket_lookup", lambda *_args, **_kwargs: pytest.fail("reserved ticket")
+    )
+    monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("started lifecycle work"))
+    observed = cursor_specific(
+        hook_event_name="beforeMCPExecution",
+        conversation_id="session",
+        workspace_roots=[str(ROOT)],
+        tool_name="save_issue",
+        tool_input='{"title":"independent administration"}',
+    )
+    observed.update(changes)
+    # Preserve exact provider/argument diagnostics and Cursor's native decision shape.
+    assert cursor.handle(observed) == (
+        {"permission": "allow"}
+        if expected_code is None
+        else cursor.failure("beforeMCPExecution", expected_code)
+    )
+
+
 def code(error: pytest.ExceptionInfo[core.WorkspaceError]) -> str:
     """Read the contractual diagnostic from a caught workspace error.
 

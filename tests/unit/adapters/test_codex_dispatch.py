@@ -14,6 +14,116 @@ from nplet.lifecycle import task_workspace as core
 pytestmark = pytest.mark.unit
 
 
+def test_pending_ticket_blocks_mutating_bootstrap_before_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep a valid recovery route from bypassing an unresolved selected ticket.
+
+    Args:
+        monkeypatch: Isolate the recognized bootstrap route and prohibit admission writes.
+    """
+    # Preparation and diagnostics do not match this mutation-capable bootstrap command.
+    monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
+    monkeypatch.setattr(common, "preparation_tool", lambda *_args: False)
+    monkeypatch.setattr(codex, "diagnostic_bootstrap", lambda *_args: False)
+    monkeypatch.setattr(codex, "bootstrap", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("opened binding"))
+    monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("started lifecycle work"))
+    observed = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "session",
+        "tool_use_id": "bootstrap",
+        "tool_name": "Bash",
+        "tool_input": {"command": "recognized scoped bootstrap"},
+    }
+    assert codex.handle(observed) == codex.denial("TICKET_READ_REQUIRED")
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("Read", {"file_path": "src/app.py"}),
+        ("mcp__codex_apps__linear__save_issue", {"title": "independent administration"}),
+    ],
+)
+def test_pending_ticket_keeps_independent_task_free_work_outside_admission(
+    monkeypatch: pytest.MonkeyPatch, tool: str, args: dict
+) -> None:
+    """Admit named independent work without repairing readiness or reserving a provider call.
+
+    Args:
+        monkeypatch: Model the pending lookup and reject lifecycle or provider admission.
+        tool: Native read or named administration operation.
+        args: Structured input for that independent task-free operation.
+    """
+    # A pending ticket does not turn independent task-free work into implementation.
+    monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
+    monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("opened binding"))
+    monkeypatch.setattr(codex, "provider_gate", lambda *_args: pytest.fail("reserved provider"))
+    monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("started lifecycle work"))
+    observed = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "session",
+        "tool_use_id": "independent",
+        "tool_name": tool,
+        "tool_input": args,
+    }
+    assert codex.handle(observed) == {}
+
+
+@pytest.mark.parametrize(
+    "tool,probe_error,expected",
+    [
+        (
+            "Read",
+            "RECOVERY_REQUIRED",
+            {"systemMessage": "TASK_WORKSPACE_NOT_READY: RECOVERY_REQUIRED"},
+        ),
+        ("write_stdin", None, {"systemMessage": "TASK_WORKSPACE_NOT_READY: UNKNOWN_OPERATION"}),
+        ("Read", None, {}),
+    ],
+)
+def test_invalid_or_unmatched_completion_never_starts_settlement(
+    monkeypatch: pytest.MonkeyPatch, tool: str, probe_error: str | None, expected: dict
+) -> None:
+    """Preserve invalid-state diagnostics and reject uncorrelated polls without settlement.
+
+    Args:
+        monkeypatch: Replace existing admission at its read-only storage boundary.
+        tool: Completed native operation.
+        probe_error: Existing-state diagnostic, or no recorded admission.
+        expected: Exact native completion response.
+    """
+    # Neither an invalid store nor an unmatched callback can create a completion transaction.
+    monkeypatch.setattr(common, "preparation_tool", lambda *_args: False)
+    monkeypatch.setattr(codex, "bootstrap", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("settled unmatched work"))
+
+    def admission(_event: dict, _host: str) -> None:
+        """Expose only the selected existing-store result.
+
+        Args:
+            _event: Completion envelope whose admission is being inspected.
+            _host: Explicit adapter identity.
+
+        Raises:
+            core.WorkspaceError: If the modeled existing state requires recovery.
+        """
+        if probe_error is not None:
+            raise core.WorkspaceError(probe_error)
+
+    monkeypatch.setattr(common, "existing_admission", admission)
+    observed = {
+        "hook_event_name": "PostToolUse",
+        "session_id": "session",
+        "tool_use_id": "unmatched",
+        "tool_name": tool,
+        "tool_input": {},
+        "tool_response": {"isError": False},
+    }
+    assert codex.handle(observed) == expected
+
+
 def test_native_web_result_settles_without_interpreting_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
