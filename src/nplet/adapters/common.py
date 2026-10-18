@@ -261,8 +261,11 @@ def prompt(event: core.JSONObject, host: str) -> core.JSONObject:
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
-                "Task identity recorded. Read the requested Linear ticket first. "
-                "Then complete scoped workspace setup and verify readiness."
+                "Task identity recorded. Before protected implementation, read the requested "
+                "Linear ticket, complete scoped workspace setup and verify readiness. "
+                "Independent authorized task-free work remains available. "
+                "Recording Task does not require immediate startup. "
+                "Honor the user's scope, pause or stop instructions."
                 + (
                     f" The verified read rebinds this session from {moving}, which stays "
                     f"preserved; a new Task: {moving} line returns to it."
