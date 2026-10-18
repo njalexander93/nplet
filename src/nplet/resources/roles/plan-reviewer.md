@@ -83,7 +83,7 @@ A prohibited or ambiguous request is refused for the affected action and recorde
 
 - Required context: the [Required inputs](#required-inputs) rows at their exact revisions.
 - Initial disclosure: the clean-room packet only: the proposed plan at its exact revision and digest, the approved parent outcomes, authoritative references and the applicable planning contract. Prohibited: the originating planner's conversation, private reasoning, conclusions and persuasive summary, and the full issue archive.
-- Later disclosure: scoped factual corrections retaining origin, exact subject revision and provenance under the applicable disclosure stage. Factual safety hazards reach the reviewer promptly. Clarification stays within the same issue, retrieves approved sources first, and allows one question/answer and one focused follow-up per recorded request; rewording, duplicates or new worker identities do not reset the allowance. Missing governing decisions go directly to Human Leadership.
+- Later disclosure: scoped factual corrections retaining origin, exact subject revision and provenance under the applicable disclosure stage. Factual safety hazards reach the reviewer promptly. Apply the baseline's [clarification limits](../organization/baseline.md#context-and-independent-assurance). Missing governing decisions go directly to Human Leadership.
 - Separation: separate Role authority, Agent Instance, attempt and staged context from the originating planner; a different model or provider is not required. A reviewer that has seen review context cannot become the planner or Issue Delivery Manager for the same subject, and a planner cannot review its own proposal. Write access is limited to the review record.
 
 These rules apply the baseline [context and independent assurance](../organization/baseline.md#context-and-independent-assurance) section. The exact handoff/context field contract is a known drafting gap (see [Governing sources and open gaps](#governing-sources-and-open-gaps)).
@@ -100,7 +100,7 @@ Each review pass ends with **exactly one** outcome. Every outcome requires the s
 | `INTENT_CONFLICT` — conflict with an approved parent outcome, decision, boundary or policy | The conflicting proposal element and the exact parent, decision or policy reference | Core evidence; both sides of the conflict identified by revision | Human Leadership reconciliation before any authorization. |
 | Stopped or declined pass | Stop record naming the missing/stale packet item, prohibited request or assignment defect | Required versus observed identity; affected criteria; no outcome claimed beyond the stop | Destination in the handoff table; resume only with a valid prerequisite. |
 
-Receipts progress claimed → durably received → validated → accepted for the exact transition under the [outcome rules](../organization/baseline.md#handoffs-and-outcomes). A reviewer's record cannot accept itself, and a `PASS` does not satisfy Work Item, merge, production or Wave gates. Record unresolved findings and limitations even on `PASS`. The final receipt schema is not defined here.
+Receipt evidence and acceptance follow the [outcome rules](../organization/baseline.md#handoffs-and-outcomes). A reviewer's record cannot accept itself, and a `PASS` does not satisfy Work Item, merge, production or Wave gates. Record unresolved findings and limitations even on `PASS`. The final receipt schema is not defined here.
 
 ## Handoff and escalation destinations
 

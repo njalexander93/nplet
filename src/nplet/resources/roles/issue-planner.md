@@ -76,7 +76,7 @@ A prohibited or ambiguous request is declined for that effect and routed as an a
 ## Independence and permitted context
 - Required context: the input rows above at their exact revisions. Authoring context is limited by the assignment, not by what is accessible.
 - Initial disclosure: a fresh instance per assignment, compiled from authoritative sources; no conversational memory carries between assignments. The review handoff carries the exact proposal, approved parent outcome, authoritative references and planning contract, and excludes this planner's conversation, private reasoning, conclusions and persuasive summary.
-- Later disclosure: factual corrections or clarification preserve origin, exact subject revision and provenance. Clarification stays within the same issue, retrieves approved sources first and allows one question/answer plus one focused follow-up per recorded request; rewording or a new worker identity does not reset it. Missing governing decisions go to Human Leadership.
+- Later disclosure: factual corrections or clarification preserve origin, exact subject revision and provenance. Apply the baseline's [clarification limits](../organization/baseline.md#context-and-independent-assurance). Missing governing decisions go to Human Leadership.
 - Separation: the Plan Reviewer is a separate Role, instance, attempt and staged context. This instance cannot become the reviewer, Issue Delivery Manager or another planner scope for the same subject after receiving context.
 
 Factual safety hazards reach affected scopes promptly under the [context rules](../organization/baseline.md#context-and-independent-assurance); the entire issue archive is not default reviewer input.
@@ -88,7 +88,7 @@ Factual safety hazards reach affected scopes promptly under the [context rules](
 | Independent review | Separate Plan Review record authored by the reviewer | Reviewed exact version, disposition (`PASS`, `CHANGES_REQUIRED`, `INCONCLUSIVE`, `INTENT_CONFLICT`) and findings; `PASS` is an assurance receipt, not authorization | Human Leadership when `PASS`; otherwise the routes below |
 | Correction history | Each corrected version linked to the findings addressed and the prior version | Exact versions and finding locators; no reviewer edits | Focused re-review |
 | Human authorization | Separate genuine authenticated Human Decision record | Exact authorized version/digest; creates the immutable baseline. Rejection or withdrawal preserves proposal, evidence and review history | Baseline publication and read-back verification (owner gap below) |
-| Planner lane outcome | Planner receipt | claimed → durably received → validated → accepted for the exact transition | Control Plane validates the transition |
+| Planner lane outcome | Planner receipt | Receipt evidence and acceptance follow the [outcome rules](../organization/baseline.md#handoffs-and-outcomes) | Control Plane validates the transition |
 
 Completed, blocked, failed, declined and cancelled outcomes record their actual basis, evidence, unfinished obligations and next destination under the [outcome rules](../organization/baseline.md#handoffs-and-outcomes). A blocked outcome names the missing or conflicting input; a declined outcome names the refused effect and rule. Expected evidence above is not actual evidence; record only what occurred.
 
