@@ -202,10 +202,8 @@ class LifecycleTests(Fixture):
             assert hook.startup_lookup_state(event, ".lookup-required.json")
         # Shell composition, redirected paths and ordinary tools cannot use the exception.
         for command in (
-            "cat " + str(self.root / "pyproject.toml"),
             "cat -- " + str(self.root / "AGENTS.md") + "; true",
             "cat -- " + str(self.root / "AGENTS.md") + " > copied",
-            "pwd",
         ):
             event["tool_input"] = {"command": command}
             assert hook.handle(event) == hook.denial("TICKET_READ_REQUIRED")

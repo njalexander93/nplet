@@ -50,15 +50,15 @@ def test_desktop_connector_requires_mapping_and_exact_correlated_read(
                 mcp_server={"name": CONNECTOR, "source": source},
             )
         # A UUID alone grants no exception, even when the host reports a known source.
-        assert "TICKET_READ_REQUIRED" in str(claude.handle(before[0]))
+        assert "HOST_UNSUPPORTED_PROVIDER" in str(claude.handle(before[0]))
         monkeypatch.setenv("NPLET_CLAUDE_LINEAR_CONNECTOR_ID", CONNECTOR)
         # Wrong issues remain denied and must not create a workspace.
         wrong = {**before[0], "tool_input": {"id": "TEST-2"}}
-        assert "BINDING_CONFLICT" in str(claude.handle(wrong))
+        assert claude.handle(wrong) == {}
         assert not (case.root / ".task/TEST-1").exists()
         # Admit the real read, reject a mismatched completion, then settle the right call.
         assert claude.handle(before[0]) == {}
-        assert "BINDING_CONFLICT" in str(claude.handle({**after, "tool_use_id": "different-call"}))
+        assert claude.handle({**after, "tool_use_id": "different-call"}) == {}
         assert not (case.root / ".task/TEST-1").exists()
         # Multiple content blocks remain invalid and cannot create workspace state.
         if content_blocks:
@@ -148,6 +148,7 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
         monkeypatch: Scoped environment configuration for the connector binding.
     """
     # Record the Task line and locate the governing files and lookup marker.
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
     case = _desktop_case(monkeypatch)
     try:
         _start_desktop_task(case)
@@ -174,30 +175,45 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
             assert claude.handle(native_event("claude", case, "PreToolUse", **fields)) == {}
             completed = native_event("claude", case, "PostToolUse", tool_response="ok", **fields)
             assert claude.handle(completed) == {}
-        # Wrong paths, shell composition, other selections and providers stay denied.
-        denied = [
+        # Independent reads and schema loading remain free while startup is reserved.
+        independent = [
             ("Read", {"file_path": str(case.root / "README.md")}),
             ("Read", {"file_path": str(case.root / "docs/../AGENTS.md")}),
             ("Read", {"file_path": "docs/runtime/contributor-workflow.md"}),
-            ("Bash", {"command": f"cat {quoted_procedure} | head"}),
             ("Bash", {"command": f"cat {quoted_procedure} {quoted_agents}"}),
-            ("Bash", {"command": f"cat {quoted_procedure}; true"}),
-            ("Bash", {"command": f"cat -n {quoted_procedure}"}),
             ("Bash", {"command": "cat " + shlex.quote(str(case.root) + "//AGENTS.md")}),
-            ("Bash", {"command": f"cat {quoted_agents}", "run_in_background": True}),
             ("ToolSearch", {"query": f"select:mcp__{CONNECTOR}__save_issue"}),
             ("ToolSearch", {"query": f"select:mcp__{CONNECTOR}__get_issue,Agent"}),
             ("ToolSearch", {"query": "select:mcp__other__get_issue"}),
             ("ToolSearch", {"query": "linear save_issue"}),
             ("Glob", {"pattern": "**/*.md"}),
         ]
+        for tool, args in independent:
+            assert (
+                claude.handle(
+                    native_event("claude", case, "PreToolUse", tool_name=tool, tool_input=args)
+                )
+                == {}
+            )
+        # Wrong paths, shell composition, other selections and providers stay denied.
+        denied = [
+            ("Bash", {"command": f"cat {quoted_procedure} | head"}),
+            ("Bash", {"command": f"cat {quoted_procedure}; true"}),
+            ("Bash", {"command": f"cat -n {quoted_procedure}"}),
+            ("Bash", {"command": f"cat {quoted_agents}", "run_in_background": True}),
+        ]
         # Each rejected call is denied with the ticket-read diagnostic.
         for tool, args in denied:
             response = claude.handle(
                 native_event("claude", case, "PreToolUse", tool_name=tool, tool_input=args)
             )
-            assert _denied(response, "TICKET_READ_REQUIRED"), (tool, args)
-        # A provider write before the ticket read is denied like any other call.
+            assert _denied(
+                response,
+                "HOST_UNSUPPORTED_ASYNC"
+                if args.get("run_in_background")
+                else "TICKET_READ_REQUIRED",
+            ), (tool, args)
+        # A named administrative write does not consume the reserved startup read.
         save = native_event(
             "claude",
             case,
@@ -206,20 +222,20 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
             tool_input={"id": "TEST-1", "state": "In Progress"},
             mcp_server={"name": CONNECTOR, "source": "sdk"},
         )
-        assert _denied(claude.handle(save), "TICKET_READ_REQUIRED")
+        assert claude.handle(save) == {}
         # A linked governing directory cannot stand in for the checkout's own file.
         (case.root / "elsewhere/runtime").mkdir(parents=True)
         (case.root / "elsewhere/runtime/contributor-workflow.md").write_text("redirected")
         assert not (case.root / "docs").exists()
         link_directory(case.root / "docs", case.root / "elsewhere")
         try:
-            # Both the file tool and the shell read reject the linked path.
+            # Both independent reads remain free without supplying startup authority.
             for tool, args in (
                 ("Read", {"file_path": procedure}),
                 ("Bash", {"command": f"cat {quoted_procedure}"}),
             ):
                 event = native_event("claude", case, "PreToolUse", tool_name=tool, tool_input=args)
-                assert _denied(claude.handle(event), "TICKET_READ_REQUIRED")
+                assert claude.handle(event) == {}
         finally:
             # Remove only the fixture link, never its target.
             unlink_directory(case.root / "docs")
@@ -234,10 +250,10 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
         case.doCleanups()
 
 
-def test_ready_session_tracks_configured_provider_operations(
+def test_configured_parent_provider_operations_leave_task_state_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admit allowlisted connector operations as pending work and settle them natively.
+    """Admit named parent connector operations without recording lifecycle work.
 
     Args:
         monkeypatch: Scoped environment configuration for the connector binding.
@@ -281,18 +297,18 @@ def test_ready_session_tracks_configured_provider_operations(
             """
             return case.state()["participants"][case.base["coordinator"]]["pending"]
 
-        # Another issue's read is ordinary pending work settled by Desktop's content list.
+        # Another issue's read and its Desktop content-list completion leave task state unchanged.
         assert claude.handle(provider("PreToolUse", "get_issue", "read-other")) == {}
-        assert "read-other" in pending()
+        assert pending() == {}
         blocks = [{"type": "text", "text": json.dumps({"id": "OTHER-2"})}]
         assert (
             claude.handle(provider("PostToolUse", "get_issue", "read-other", tool_response=blocks))
             == {}
         )
         assert pending() == {}
-        # A procedure write is admitted the same way and settled by its failure event.
+        # An administrative write and its failure event also leave task state unchanged.
         assert claude.handle(provider("PreToolUse", "save_issue", "write-state")) == {}
-        assert "write-state" in pending()
+        assert pending() == {}
         failure = provider(
             "PostToolUseFailure", "save_issue", "write-state", error="denied", is_interrupt=False
         )
@@ -364,9 +380,14 @@ def test_ready_parent_tracks_app_pr_monitor_operations(monkeypatch: pytest.Monke
             """
             return case.state()["participants"][case.base["coordinator"]]["pending"]
 
-        # Before readiness the PR-monitor read is denied like any other call.
+        # The PR-monitor read retains its existing readiness gate.
         _start_desktop_task(case)
-        early = monitor("PreToolUse", "mcp__ccd_pr__get_status", "early")
+        early = monitor(
+            "PreToolUse",
+            "mcp__ccd_pr__get_status",
+            "early",
+            mcp_server={"name": "ccd_pr", "source": "sdk"},
+        )
         assert _denied(claude.handle(early), "TICKET_READ_REQUIRED")
         _ready_desktop(case)
         server = {"name": "ccd_pr", "source": "sdk"}

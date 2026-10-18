@@ -609,7 +609,7 @@ def test_recovery_names_the_admitted_next_operation_per_code(
     # Host-specific Claude routes are not advertised to Cursor.
     if host == "cursor":
         assert "ToolSearch" not in message
-        assert "save_comment" not in message
+        assert "set_monitor" not in message
         assert "Agent" not in message
         assert "Skill" not in message
 
@@ -635,6 +635,11 @@ def test_native_post_does_not_settle_cursor_without_output(
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(common, "request_for", lambda *_args: pytest.fail("binding read"))
+    monkeypatch.setattr(
+        common,
+        "existing_admission",
+        lambda event, host: {"operation": "tool-complete"},
+    )
     event = {**native_event("Read"), "hook_event_name": "postToolUse"}
     # A completion without provider output cannot settle the pending tool.
     with pytest.raises(core.WorkspaceError) as captured:
@@ -654,6 +659,11 @@ def test_native_post_records_exact_synchronous_completion(
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         common, "request_for", lambda _event, operation, _host: {"operation": operation}
+    )
+    monkeypatch.setattr(
+        common,
+        "existing_admission",
+        lambda event, host: common.request_for(event, "tool-complete", host),
     )
 
     def execute(request: dict[str, object]) -> dict[str, object]:
@@ -708,7 +718,7 @@ def test_native_pre_rejects_unsupported_tool_before_tool_start(
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_pre(native_event("Task"), "cursor")
     assert captured.value.code == "HOST_UNSUPPORTED_CHILD_IDENTITY"
-    assert calls == ["ready"]
+    assert calls == []
 
 
 def test_native_pre_records_supported_tool_after_ready(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -736,7 +746,7 @@ def test_native_pre_records_supported_tool_after_ready(monkeypatch: pytest.Monke
         return {"ok": True, "code": "OK"}
 
     monkeypatch.setattr(common.core, "execute", execute)
-    assert common.native_pre(native_event("Read"), "cursor") is None
+    assert common.native_pre(native_event("Write"), "cursor") is None
     assert [item["operation"] for item in calls] == ["ready", "tool-start"]
     assert calls[-1]["tool_id"] == "tool-1"
 

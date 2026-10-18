@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from nplet.adapters import bootstrap as encoded_bootstrap
-from nplet.adapters import runner
+from nplet.adapters import runner, task_boundary
 from nplet.lifecycle import task_workspace as core
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -309,6 +309,149 @@ def lookup_required(event: core.JSONObject, host: str) -> bool:
                 return bindings.exists(key + ".lookup-required.json")
 
 
+def selected_lookup(event: core.JSONObject, host: str, complete: bool = False) -> bool:
+    """Select only the exact assigned startup read or its reserved completion.
+
+    Args:
+        event: Validated native call.
+        host: Actual adapter host.
+        complete: Require the recorded native call ID for completion.
+
+    Returns:
+        Whether this invocation belongs to the reserved startup route.
+
+    Raises:
+        core.WorkspaceError: If existing assignment storage is invalid.
+        OSError: If existing storage cannot be inspected.
+    """
+    # No assignment means no reserved startup call.
+    if not lookup_required(event, host):
+        return False
+    root = core.repository(event["cwd"])[0]
+    key = core.participant_key({"host": host, "session_id": event["session_id"]})
+    # Read the actual assignment without creating any directories or locks.
+    with (
+        core.Directory.absolute(root) as directory,
+        directory.child(".task") as task,
+        task.child(".bindings") as bindings,
+    ):
+        assignment = bindings.json(key + ".assignment.json")
+        core.require(bindings.json(key + ".lookup-required.json") == assignment, "BINDING_CONFLICT")
+        args = event.get("tool_input")
+        # Cursor's specific callback supplies serialized provider arguments.
+        if host == "cursor" and event.get("hook_event_name") == "beforeMCPExecution":
+            args = core.strict_json(args) if isinstance(args, str) else None
+        if args != {"id": assignment["issue_id"]}:
+            return False
+        # Only the original native call may consume a reserved provider response.
+        if complete:
+            name = key + ".lookup.json"
+            return bindings.exists(name) and bindings.json(name).get("tool_id") == event.get(
+                "tool_use_id"
+            )
+        return True
+
+
+def existing_admission(event: core.JSONObject, host: str) -> core.JSONObject | None:
+    """Probe exact existing pending work without creating task, binding or lock storage.
+
+    Args:
+        event: Identity-validated completion with its native call ID.
+        host: Actual adapter identity.
+
+    Returns:
+        Existing bound request for exact pending or replayed admission, or a local poll handle.
+        None when no admission exists.
+
+    Raises:
+        core.WorkspaceError: If registered state is unsafe, inconsistent or transactional.
+        OSError: If present state cannot be inspected.
+    """
+    # Resolve native identity before examining any local state.
+    tool_id = native_token(event.get("tool_use_id"))
+    root, common, trees = core.repository(event["cwd"])
+    key = core.participant_key({"host": host, "session_id": event["session_id"]})
+    request = {
+        "schema_version": 1,
+        "operation": "tool-complete",
+        "request_id": str(uuid.uuid4()),
+        "worktree": event["cwd"],
+        "host": host,
+        "session_id": event["session_id"],
+    }
+    # All opened directories already exist; this probe never uses Store or a lock creator.
+    with core.Directory.absolute(root) as directory:
+        if not directory.exists(".task"):
+            return None
+        with directory.child(".task") as task:
+            if not task.exists(".repository.json"):
+                # Assignment-only startup is valid; durable state requires registration.
+                core.require(not task.exists(".control"), "RECOVERY_REQUIRED")
+                if task.exists(".bindings"):
+                    with task.child(".bindings") as bindings:
+                        core.require(not bindings.exists(key + ".json"), "RECOVERY_REQUIRED")
+                return None
+            registration = task.json(".repository.json")
+            core.require(
+                str(common) == registration["common"]
+                and core.fs_identity(common) == registration["common_identity"]
+                and Path(registration["main"]) == trees[0],
+                "REPOSITORY_MISMATCH",
+            )
+            if not task.exists(".bindings"):
+                return None
+            with task.child(".bindings") as bindings:
+                if not bindings.exists(key + ".json"):
+                    return None
+                request.update(bindings.json(key + ".json"))
+        # Validate the shared registration before reading its committed issue state.
+        request["repo_id"] = registration["repo_id"]
+        with (
+            core.Directory.absolute(registration["main"]) as main,
+            main.child(".task") as task,
+            task.child(".control") as control,
+        ):
+            core.require(
+                main.identity == registration["main_identity"]
+                and control.json("repository.json") == registration,
+                "REPOSITORY_MISMATCH",
+            )
+            with (
+                control.child("issues") as issues,
+                issues.child(core.issue_id(request["issue_id"])) as issue,
+            ):
+                core.require(not issue.exists("transaction.json"), "RECOVERY_REQUIRED")
+                state = issue.json("state.json")
+                core.authorize(state, request, maintenance=True)
+                pending = state["participants"][key]["pending"]
+                if tool_id in pending:
+                    return request
+                # A matching durable admission permits exact completion replay after settlement.
+                admission = {
+                    **request,
+                    "operation": "tool-start",
+                    "request_id": "pre:" + tool_id,
+                    "tool_id": tool_id,
+                }
+                if host == "codex":
+                    admission["poll_handle"] = (
+                        str(event.get("tool_input", {}).get("session_id"))
+                        if event.get("tool_name") == "write_stdin"
+                        else None
+                    )
+                receipt = state["requests"].get(core.sha(admission["request_id"].encode()))
+                if receipt is not None and receipt["digest"] == core.sha(core.canonical(admission)):
+                    return request
+                # Legacy polls without a prehook may select only one participant-local handle.
+                if event.get("tool_name") == "write_stdin":
+                    handle = event.get("tool_input", {}).get("session_id")
+                    core.require(type(handle) in {str, int}, "ASYNC_HANDLE_CONFLICT")
+                    matches = [p for p in pending.values() if p.get("handle") == str(handle)]
+                    core.require(len(matches) == 1, "UNKNOWN_OPERATION")
+                    return request
+    return None
+
+
 def _claude_linear_providers() -> dict[str, set[str]]:
     """Map each configured Claude Linear server name to its accepted provenance sources.
 
@@ -383,19 +526,11 @@ def _linear_tool(event: core.JSONObject, host: str) -> tuple[str, core.JSONObjec
     return token, arguments
 
 
-LINEAR_PROVIDER_OPERATIONS = frozenset(
-    {
-        "get_issue",
-        "get_user",
-        "list_users",
-        "list_issue_statuses",
-        "list_comments",
-        "save_issue",
-        "save_comment",
-    }
+LINEAR_PROVIDER_OPERATIONS = task_boundary.LINEAR_OPERATIONS
+# Freeze the original child read authority independently of parent additions.
+LINEAR_CHILD_OPERATIONS = frozenset(
+    {"get_issue", "get_user", "list_users", "list_issue_statuses", "list_comments"}
 )
-# A child subagent receives only the read operations; writes stay with its parent.
-LINEAR_CHILD_OPERATIONS = LINEAR_PROVIDER_OPERATIONS - {"save_issue", "save_comment"}
 PREPARATION_FILES = ("docs/runtime/contributor-workflow.md", "AGENTS.md")
 # The Claude desktop app's built-in PR-monitor server: a parent may read a PR's state
 # and turn on the app's monitor. Auto-merge, PR binding and every other app server
@@ -1270,15 +1405,36 @@ def native_tool(event: core.JSONObject, host: str) -> str:
     # Require a structured native tool input for supported synchronous work.
     if not isinstance(args, dict):
         raise core.WorkspaceError("INVALID_REQUEST")
-    # Only the configured Claude Linear connector's allowlisted operations and the
-    # desktop app's two PR-monitor operations become ordinary pending work; every
-    # other provider route stays unsupported.
+    # Validate configured provider provenance and exact named parent operations before effects.
+    # Existing child restrictions remain narrower than the parent's task-free contracts.
     if tool.startswith(("mcp__", "MCP:")) or event.get("mcp_server") is not None:
         # A parent may read and arm the app's PR monitor; delivery stays with the parent.
         if _app_pr_monitor_tool(event, host) is not None:
             core.require(event.get("child") is not True, "HOST_UNSUPPORTED_PROVIDER")
             return tool
-        operation = _linear_provider_tool(event, host)
+        if host == "claude-code" and tool in {
+            "mcp__ccd_turn__update_plan",
+            "mcp__ccd_turn__wrap_up",
+        }:
+            core.require(
+                event.get("child") is not True
+                and event.get("mcp_server") == {"name": "ccd_turn", "source": "sdk"},
+                "HOST_UNSUPPORTED_PROVIDER",
+            )
+            allowed = (
+                {"items", "content", "status", "scope", "advance", "done", "start"}
+                if tool.endswith("update_plan")
+                else {"recap", "ask", "blocked", "actions"}
+            )
+            core.require(bool(args) and set(args) <= allowed, "INVALID_REQUEST")
+            return tool
+        operation = (
+            tool[4:]
+            if host == "cursor"
+            and tool.startswith("MCP:")
+            and tool[4:] in LINEAR_PROVIDER_OPERATIONS
+            else _linear_provider_tool(event, host)
+        )
         core.require(operation is not None, "HOST_UNSUPPORTED_PROVIDER")
         # A child subagent gets no provider writes; issue delivery stays with the parent.
         core.require(
@@ -1355,15 +1511,36 @@ def native_pre(event: core.JSONObject, host: str) -> None:
     native_token(event.get("tool_use_id"))
     # An exact lifecycle recovery command is allowed before readiness.
     if native_bootstrap(event, host):
+        core.require(not lookup_required(event, host), "TICKET_READ_REQUIRED")
         return
+    # Ready-only lifecycle transactions retain their exact recovery route before shell policy.
+    if native_bootstrap(event, host, ready=True):
+        core.require(not lookup_required(event, host), "TICKET_READ_REQUIRED")
+        result = core.execute(request_for(event, "ready", host))
+        core.require(result["ok"], result["code"])
+        return
+    tool = native_tool(event, host)
+    # Validated parent reads, planning and notes need no task lifecycle admission.
+    operation = (
+        tool[4:]
+        if host == "cursor" and tool.startswith("MCP:")
+        else _linear_provider_tool(event, host)
+    )
+    roles = task_boundary.edit_roles(event)
+    if (
+        host == "claude-code"
+        and tool
+        in CLAUDE_NO_EFFECT_TOOLS | {"mcp__ccd_turn__update_plan", "mcp__ccd_turn__wrap_up"}
+        and event.get("child") is not True
+    ) or task_boundary.task_free(event, host, operation, roles):
+        return
+    # Raw control-store mutation never becomes a readiness-authorized note.
+    core.require("control" not in roles, "NOT_OWNER")
+    core.require(not lookup_required(event, host), "TICKET_READ_REQUIRED")
     request = request_for(event, "ready", host)
     result = core.execute(request)
     core.require(result["ok"], result["code"])
-    # After readiness, exact lifecycle commands remain distinct from work tools.
-    if native_bootstrap(event, host, ready=True):
-        return
     # Native permission approval remains separate from recording pending work.
-    tool = native_tool(event, host)
     # A ready session's no-effect load, message or hand-back needs no settlement.
     if host == "claude-code" and tool in CLAUDE_NO_EFFECT_TOOLS | CLAUDE_CHILD_REPORT_TOOLS:
         return
@@ -1396,6 +1573,9 @@ def native_post(event: core.JSONObject, host: str, failed: bool) -> None:
     if native_bootstrap(event, host, ready=True):
         return
     tool = native_tool(event, host)
+    request = existing_admission(event, host)
+    if request is None:
+        return
     # No-effect loads, messages and hand-backs were never recorded as pending work.
     if host == "claude-code" and tool in CLAUDE_NO_EFFECT_TOOLS | CLAUDE_CHILD_REPORT_TOOLS:
         return
@@ -1464,7 +1644,6 @@ def native_post(event: core.JSONObject, host: str, failed: bool) -> None:
             "HOST_UNSUPPORTED_ASYNC",
         )
     # Success/failure hook events settle the supported synchronous file tools themselves.
-    request = request_for(event, "tool-complete", host)
     result = core.execute(
         {
             **request,
@@ -1751,7 +1930,8 @@ def _recovery_route(code: str, host: str) -> str:
     # Ticket preparation is host-specific and never consumes the required provider read.
     if code == "TICKET_READ_REQUIRED":
         preparation = (
-            " Before it, only ToolSearch selecting that get_issue tool and Read or a plain "
+            " Startup preparation permits ToolSearch selecting that get_issue tool, "
+            "Read or a plain "
             "`cat` of <checkout>/docs/runtime/contributor-workflow.md or <checkout>/AGENTS.md "
             "are admitted."
             if host == "claude-code"
@@ -1765,14 +1945,23 @@ def _recovery_route(code: str, host: str) -> str:
         )
         return (
             "Next admitted operation: the configured Linear get_issue call with exactly "
-            '{"id": "<selected issue>"}.' + preparation
+            '{"id": "<selected issue>"} before protected implementation.'
+            + preparation
+            + " Independent authorized task-free reads, planning, notes and administration "
+            "remain available."
         )
     # An unbound session starts or resumes only through the ticket-first route.
     if code == "BINDING_MISSING":
         return (
-            "This session has no issue binding. Submit exactly one `Task: <issue-id>` line, "
+            "This session has no issue binding. Before protected implementation, submit "
+            "exactly one `Task: <issue-id>` line, "
             "then read that ticket with the configured Linear get_issue call; startup "
-            f"registers or resumes the workspace. A pre-registration diagnose uses {command}."
+            f"registers or resumes the workspace. A pre-registration diagnose uses {command}. "
+            "Independent authorized task-free reads, planning, notes and administration "
+            "remain available. "
+            "Finite shell reads include canonical cat, rg --no-config, and "
+            "git --no-pager -c core.fsmonitor=false "
+            "forms documented in docs/runtime/host-hooks.md; arbitrary shell commands remain gated."
         )
     # A current packet whose acknowledgment is missing or outdated needs a new cycle.
     if code == "NOT_READY":
@@ -1877,18 +2066,19 @@ def _recovery_route(code: str, host: str) -> str:
         )
     # Provider admission is fixed by host, readiness and the configured connector.
     if code == "HOST_UNSUPPORTED_PROVIDER":
-        admitted = (
-            " After readiness, only the configured Linear connector's get_issue, get_user, "
-            "list_users, list_issue_statuses, list_comments, save_issue and save_comment, "
-            "and for a parent session the desktop app's PR monitor get_status and "
-            "set_monitor (ccd_pr), are admitted."
+        monitor = (
+            " Claude's parent ccd_pr get_status and set_monitor remain readiness-gated."
             if host == "claude-code"
             else ""
         )
         return (
-            "No lifecycle operation admits this provider call. Before readiness only the "
-            "exact selected-ticket get_issue is admitted." + admitted + " Another server or "
-            "operation needs a separately verified provider workflow."
+            "This provider identity, provenance or operation is unsupported. "
+            "Use a named task-free Linear contract, including save_issue and save_comment, "
+            "or a verified review route. Startup still requires "
+            "the exact selected-ticket get_issue."
+            + monitor
+            + " Another server or operation needs a separately verified provider workflow; "
+            "readiness does not widen the configured provider or child authority."
         )
     # Unsupported tools need a different tool, not lifecycle recovery.
     if code == "HOST_UNSUPPORTED_TOOL":
