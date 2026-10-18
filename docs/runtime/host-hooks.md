@@ -1,6 +1,9 @@
 # Local host hooks
 
-The lifecycle and ticket-first startup contract are runtime-neutral. This checkout
+The lifecycle, task boundary and ticket-first startup contract are runtime-neutral.
+Authorized task-free work requires no Task assignment or local registration.
+Protected implementation retains verified startup, readiness and explicit roadmap
+approval. See the [contributor procedure](contributor-workflow.md). This checkout
 implements three native adapters over that shared core:
 
 | Host | Project configuration | Python entry | Participant host |
@@ -170,19 +173,21 @@ local lifecycle integration, not proposal approval.
    identifier without requiring local registration. Read that exact Linear ticket
    through the runtime's supported provider integration. The adapter admits this
    narrow read before readiness and verifies its native completion. See
-   [ticket-read protocols](#ticket-read-protocols). A new Task line fences ordinary
-   tools even when the session was previously ready. While that read is pending,
-   a runtime may admit a read-only preparation phase: loading the issue-read tool's
+   [ticket-read protocols](#ticket-read-protocols). A new Task line gates protected
+   tools until its exact ticket read completes, even if the session was ready.
+   Independent named task-free work remains available. The startup preparation
+   route also permits loading the issue-read tool's
    schema and reading the governing procedure. The rule is runtime-neutral; this
    checkout implements schema loading in the Claude Code adapter as `ToolSearch` (a
    Claude Code mechanism) loading only configured `get_issue` schemas, and `Read`
    or a plain `cat` of exactly `<checkout>/docs/runtime/contributor-workflow.md`
    or `<checkout>/AGENTS.md`. These calls get no lifecycle decision and write
    nothing, so the selected ticket read remains the first issue-provider
-   operation. Codex admits only exact native command-only `Bash` reads of those two
+   operation in startup. Within the reserved preparation route, Codex admits
+   only exact native command-only `Bash` reads of those two
    absolute paths, spelled `cat <path>` or `cat -- <path>` with canonical quoting.
    It does not admit an opaque schema-loading wrapper. Cursor has no preparation
-   phase. Other tools stay denied until the ticket read completes. A session already bound
+   phase. Other protected tools stay denied until the ticket read completes. A session already bound
    to another issue may submit a Task line too: the adapter records the new issue as
    a pending assignment and the binding stays on the old issue until the verified
    read moves it (step 5). If that read or the move fails, the old binding remains;
@@ -203,8 +208,8 @@ local lifecycle integration, not proposal approval.
    For a recorded participant with a packet, the issue-level result also returns
    `packet`, its committed reference list exactly as stored, and `sources`, the
    aligned list of each reference's `recorded_sha256`, `current_sha256` (`null`
-   when unreadable) and `available`. A stranded session cannot hash files itself,
-   because the hook denies every ordinary tool while it is unready.
+   when unreadable) and `available`. These values support bounded lifecycle
+   recovery without requiring a separate hashing command in the stranded session.
    The issue coordinator may also run one `scope` before readiness: a self-refresh
    whose `target_participant` is its own key and whose `packet` repeats its current
    packet (the issue-level `diagnose` `packet`) with the same references in the same order, changing only each `sha256`
@@ -228,7 +233,7 @@ local lifecycle integration, not proposal approval.
    coordinator's `roadmap.md` moves only that coordinator's own `roadmap.md` packet
    reference to the committed digest and clears its acknowledgment. The coordinator
    then runs the admitted `read` and `acknowledge` bootstrap commands; the next
-   covered tool verifies readiness. Reader packets are unchanged. Out-of-band edits
+   protected tool verifies readiness. Reader packets are unchanged. Out-of-band edits
    remain conflicts.
    When the session's binding names another issue, the orchestrator moves it with
    core `rebind` instead of `create`, `resume` or `join`, citing the verified ticket
@@ -258,8 +263,10 @@ are not installed-hook acceptance. Keep acceptance hooks enabled and trusted.
 Freeze the candidate before each acceptance run. Record file digests, copy only
 the intended source changes, and preserve the acceptance project's hook settings
 and independent lifecycle store. Do not copy development `.task` state into it.
-Start with native ticket-first startup and a denied negative control; run child
-concurrency only after parent readiness and completion tracking pass.
+Start with a fresh unbound session and verify task-free reads, notes and authorized
+administration without task state. Verify protected denials before native
+ticket-first startup. Run child concurrency only after parent readiness and
+completion tracking pass.
 
 A new or forked chat has its own observed session identity. Inherited messages
 do not transfer the coordinator role. Join under the new identity and use an
@@ -390,7 +397,8 @@ most 256 characters. A `Read` or `Bash` call
 qualifies only when it names exactly `<checkout>/docs/runtime/contributor-workflow.md`
 or `<checkout>/AGENTS.md`; the comparison is lexical, no path entry may be a
 symbolic link or junction, and `Bash` must split to exactly `cat` plus that
-literal path. Everything else stays denied until the ticket read. This does not
+literal path. This preparation route preserves exact ticket-first startup;
+independent named task-free work remains available. This does not
 add support for cloud/Cowork workspaces.
 
 For a successful Claude `PostToolUse`, Desktop can supply `tool_response` as a
@@ -492,19 +500,19 @@ inside the hook to fabricate proof of the parent runtime's configuration.
 
 ## Implemented coverage
 
-These rules are implemented in `adapters/common.py`, `adapters/claude.py`,
+These rules are implemented in `adapters/task_boundary.py`, `adapters/common.py`, `adapters/claude.py`,
 `adapters/cursor.py`, `adapters/codex.py` and `adapters/codex_children.py`.
 The first table compares Claude Code and Cursor; the second records Codex boundaries:
 
 | Boundary | Claude Code | Cursor Agent |
 | --- | --- | --- |
 | Identity | Exact native session ID. A hook carrying `agent_id` with a valid `session_id` is a subagent keyed `<session_id>/agent/<agent_id>`; `subagent_id`, `parent_conversation_id`, background markers and `agent_id` without `session_id` are rejected | Exact conversation ID; require any session ID to match; one workspace root |
-| Ordinary tools | Read, Write, Edit, Glob, Grep, NotebookEdit; foreground Bash under the setting above. `ToolSearch`, `Skill`, `SendMessage` and `AskUserQuestion` are readiness-checked no-effect operations with no pending entry; a tool they surface is evaluated on its own call. A subagent's `SubagentHandback` is the same kind of no-effect operation and is admitted only under a child identity | Read, Write, Edit, Grep, Delete; Shell with supported foreground arguments |
-| Linear provider after readiness | Configured connector only (same server name and `mcp_server.source` checks as the ticket read): `get_issue` (any ID), `get_user`, `list_users`, `list_issue_statuses`, `list_comments`, `save_issue`, `save_comment` (a subagent child gets the read operations only). Each call is pending work under its native `tool_use_id`, settled by `PostToolUse` (any non-null `tool_response`, including Desktop's content-block list) or `PostToolUseFailure` | No native provider admission; `MCP:` tools are denied |
-| Desktop PR monitor after readiness | The desktop app's built-in `ccd_pr` server only: `get_status` and `set_monitor`, for a parent session (a subagent child gets neither). The tool name must be exactly `mcp__ccd_pr__get_status` or `mcp__ccd_pr__set_monitor`; the hook's `mcp_server` object must be present with `name` `ccd_pr` and `source` `sdk`, the provenance the desktop app reports for its built-in server; a call without that object, or with any other name or source, is denied. `set_auto_merge`, `bind_pr`, `unbind_pr` and every other app server stay denied. Each call is pending work under its native `tool_use_id`, settled by `PostToolUse` or `PostToolUseFailure` like a Linear call. Live capture (2026-10-11, macOS Desktop, hooks enabled): a ready parent session called `get_status` and then `set_monitor` (`auto_fix` on the open PR); both were admitted, recorded as pending work and settled by their completion events, and the app returned the PR state and confirmed the monitor. The server identity was captured separately the same day with a throwaway project whose `PreToolUse` hook appended the raw event: `tool_name` `mcp__ccd_pr__get_status`, `mcp_server` `{"name": "ccd_pr", "source": "sdk"}`, `agent_id` null, alongside `session_id`, `tool_use_id`, `cwd`, `permission_mode` and `transcript_path`. The check is pinned to that name and source | No native provider admission |
+| Ordinary tools | Read, Write, Edit, Glob, Grep, NotebookEdit; foreground Bash under the setting above. `ToolSearch`, `Skill`, `SendMessage` and `AskUserQuestion` are task-free parent no-effect operations with no pending entry; a tool they surface is evaluated on its own call. Their availability does not authorize sending messages. A subagent's `SubagentHandback` is a readiness-checked no-effect operation admitted only under a child identity | Read, Write, Edit, Grep, Delete; Shell with supported foreground arguments |
+| Linear parent provider | The named inspection and administration operations below are task-free through the configured connector, with the same server/provenance checks as startup. Children retain only the original five read operations and require readiness | The same named parent operations are task-free. Generic `preToolUse` validates native identity and structured operation; `beforeMCPExecution` independently checks the exact operation, serialized object arguments, configured server name and URL. Both blocking hooks must pass; ordinary calls create no cross-callback ledger. Startup alone retains its paired lookup reservation |
+| Desktop PR monitor after readiness | The desktop app's built-in `ccd_pr` server only: `get_status` and `set_monitor`, for a parent session (a subagent child gets neither). The tool name must be exactly `mcp__ccd_pr__get_status` or `mcp__ccd_pr__set_monitor`; the hook's `mcp_server` object must be present with `name` `ccd_pr` and `source` `sdk`, the provenance the desktop app reports for its built-in server; a call without that object, or with any other name or source, is denied. `set_auto_merge`, `bind_pr`, `unbind_pr` and every other `ccd_pr` operation stay denied. Each call is pending work under its native `tool_use_id`, settled by `PostToolUse` or `PostToolUseFailure`. Live capture (2026-10-11, macOS Desktop, hooks enabled): a ready parent session called `get_status` and then `set_monitor` (`auto_fix` on the open PR); both were admitted, recorded as pending work and settled by their completion events, and the app returned the PR state and confirmed the monitor. The server identity was captured separately the same day with a throwaway project whose `PreToolUse` hook appended the raw event: `tool_name` `mcp__ccd_pr__get_status`, `mcp_server` `{"name": "ccd_pr", "source": "sdk"}`, `agent_id` null, alongside `session_id`, `tool_use_id`, `cwd`, `permission_mode` and `transcript_path`. The check is pinned to that name and source | No native provider admission |
 | Ticket-first startup | Exact configured Linear issue read before readiness; matching native completion runs shared startup | Exact Linear issue read with generic call-ID and MCP server checks before shared startup |
-| Admission | Deny on failed readiness outside the ticket-read/recovery exceptions; otherwise preserve native permission decisions | Allow only the particular validated ticket-read, recovery or ordinary tool call |
-| File-tool completion | Supported success/failure event and required payload settle the observed call | Same; native failure type is checked |
+| Admission | Validate native identity, provider provenance and child restrictions first. Named task-free parents need no readiness; other supported effects require readiness. Preserve native permissions | Validate the same boundary in Cursor's native shape; allow only that particular task-free, bootstrap or ready supported call |
+| File-tool completion | A supported success/failure event with required payload settles only existing admitted work. A task-free completion creates no state | Same; native failure type is checked for existing work |
 | Shell completion | Successful Bash result with string stdout/stderr, `interrupted: false`, and no async markers | Successful Shell result with integer `exitCode` and no async markers |
 | Ambiguous shell result/failure | Retain pending operation and report recovery | Same; booleans are not exit codes |
 | Child/provider/background tools | Deny unsupported tool names, unconfigured servers, other provider operations (including document/archive operations) and background identities. A ready parent's foreground `Agent` call (no `run_in_background: true`, no `isolation`) is pending work under its `tool_use_id`; `Task`, `TaskOutput`, `TaskStop`, `SpawnAgent` and `Agent` from a child are denied. `SubagentStart` joins the child (restricted, below); `SubagentStop` is an observation | Same; `subagentStart` also denies; remote sessions denied |
@@ -514,9 +522,9 @@ The first table compares Claude Code and Cursor; the second records Codex bounda
 
 | Codex boundary | Implemented admission and limit |
 | --- | --- |
-| Parent providers after readiness | Generic `mcp__` tools, including non-Linear operations, pass the readiness gate as ordinary pending work when earlier special-case handling reaches this route. There is no connector or operation allowlist. Existing child/delegation tool-name denials still apply before this route. A matching native MCP completion with the validated content-block shape settles its pending call; other responses require typed completion evidence. |
+| Parent providers | Named Linear and GitHub review operations below are task-free. Other generic `mcp__` tools, including non-Linear operations, pass the readiness gate as ordinary pending work when earlier special-case handling reaches this route. There is no connector or operation allowlist. Existing child/delegation tool-name denials still apply before this route. A matching native MCP completion with the validated content-block shape settles its pending call; other responses require typed completion evidence. |
 | Archive provider gate | Exact coordinator-bound document save/read requests have a separate archive gate. This gate is not exclusive: a false return permits fallthrough to generic readiness admission. Earlier archive-specific errors can prevent fallthrough; a legacy document save without an existing export fails before generic readiness. Passing generic admission does not verify an archive or grant cleanup authority. |
-| Ticket-first startup | Only the exact selected-ticket read is admitted before readiness, alongside bounded preparation/recovery exceptions. Matching native completion validates the issue before shared startup. |
+| Ticket-first startup | The exact selected-ticket read has reserved correlation and startup precedence. Independent named task-free work remains available. Matching native completion validates the issue before shared startup. |
 | Child tools and providers | A verified child has its own binding and scope. Only command-only Bash for its own canonical lifecycle commands and exact packet-source reads is admitted; generic provider tools are denied. |
 | Native child control | Exact supported spawn/control tools use parent-bound receipts and correlated completion. Unsupported delegation names remain denied. See the [restricted Codex child route](#codex-native-child-route-restricted) for supported shapes and evidence limits. |
 
@@ -524,6 +532,76 @@ Codex's generic provider admission is broader than Claude Code's fixed allowlist
 It does not enforce the contributor procedure's permitted provider operations.
 Provider success is not lifecycle authority, and this table does not establish
 installed-host delivery for every provider or operating system.
+
+### Task-free parent operations
+
+The shared [task boundary](task-workspace.md#task-free-and-protected-work) applies
+after native identity, provider provenance and child restrictions. These are
+finite implemented contracts, not prefix-based permission grants.
+
+| Parent effect | Implemented operation contract |
+| --- | --- |
+| Linear inspection | `get_issue`, `list_issues`, `search`, `get_project`, `list_projects`, `get_user`, `list_users`, `get_team`, `list_teams`, `get_issue_status`, `list_issue_statuses`, `list_issue_labels`, `list_project_labels`, `get_milestone`, `list_milestones`, `list_cycles`, `list_comments` |
+| Linear administration | `save_issue`, `save_project`, `save_comment`, `save_issue_label`, `save_project_label`, `save_milestone`, including actual create and update. Human authorization and read-back still apply. No local issue startup, assignment, status or approval is inferred |
+| Codex GitHub review | `fetch_pr`, `get_pr_info`, `get_pr_diff`, `fetch_pr_patch`, `list_pr_changed_filenames`, `fetch_pr_file_patch`, `fetch_pr_comments`, `list_pull_request_reviews`, `list_pull_request_review_threads`. Native Codex connector names accept the verified single-underscore and double-underscore operation separators. Each requires `link_id`, a repository field and positive numeric `pr_number`. `get_pr_info` uses `repository_full_name`; the others use `repo_full_name`. File patch also requires `path`. Only `get_pr_diff` has an optional `format`, either `diff` or `patch` |
+| Planning and research | Codex `webrun`, `update_plan`, `request_user_input`, `request_user_input_async`. Claude parent `ToolSearch`, `Skill`, `SendMessage`, `AskUserQuestion`, plus exact `mcp__ccd_turn__update_plan` and `mcp__ccd_turn__wrap_up` with server `{name: ccd_turn, source: sdk}`. Planning helpers grant no implementation approval |
+| Local inspection | Supported native `Read`, `Glob`, `Grep`, and the finite shell reads below. Read access can include protected files |
+| Ordinary notes | Known `Write`, `Edit` or `apply_patch` shapes whose every target has an ordinary-note role. Source, tests, dependencies, governed docs, instructions, control stores, executable identities and ambiguous paths do not qualify |
+
+The five operations `delete_comment`, `delete_customer`, `delete_customer_need`,
+`delete_diff_comment` and `delete_status_update` remain outside this task-free
+inventory. Claude and Cursor deny them; Codex retains its readiness fallback.
+Other unknown operations retain their existing gated or unsupported route.
+Task-free access grants no merge, publication or review-submission authority.
+
+#### Finite shell reads
+
+Use one canonical command, spelled exactly as Python `shlex.join` produces it.
+Composition, redirection, shell expansion, interpreter wrappers and unknown flags
+receive no task-free admission. On Codex, use native `Bash` with only `command`.
+Legacy `exec_command` remains readiness-gated because it can return an untracked
+process handle. Its existing `write_stdin` correlation checks remain in force.
+Claude requires foreground Bash and inherited background-disable configuration.
+Cursor requires its supported synchronous `Shell` shape with no working-directory
+override for task-free reads.
+
+| Command | Admitted arguments |
+| --- | --- |
+| `pwd` | No arguments |
+| `cat` | One or more literal paths, optionally after `--`; no option operands or `/dev/stdin` |
+| `rg` | Must include `--no-config`. Other flags are only `--files`, `--hidden`, `--line-number`, `-n`, `-l`, `--files-with-matches`, `-i`, `--ignore-case`, `--fixed-strings`, `-F`, `--`, `--no-ignore` |
+| `git --no-pager -c core.fsmonitor=false status` | Only `--short`, `--porcelain`, `--branch`, `--untracked-files=no` and literal operands |
+| `git --no-pager -c core.fsmonitor=false ls-files` | Only `--cached`, `--others`, `--exclude-standard`, `--stage` and literal operands |
+| `git --no-pager -c core.fsmonitor=false diff` | Requires `--no-ext-diff --no-textconv`; optional `--stat`, `--name-only`, `--cached`, `--staged` and literal operands |
+| `git --no-pager -c core.fsmonitor=false show` or `log` | Requires `--no-ext-diff --no-textconv`; optional `--stat`, `--name-only`, `--oneline` and literal operands |
+
+The Git forms also admit `--` before operands. They disable pager, filesystem
+monitor, external diff and text conversion behavior where applicable. General
+shell commands and package install/remove/update commands remain protected.
+
+#### Claude GitHub review fallback
+
+Claude has no verified GitHub connector route. Its task-free review route is one
+foreground `gh` command with an explicit positive PR number and `OWNER/REPO`.
+The exact parser and two literal GraphQL queries are in
+[`task_boundary.py`](../../src/nplet/adapters/task_boundary.py).
+
+- `gh pr view NUMBER --repo OWNER/REPO` accepts no extra option, `--comments`,
+  or `--json` with only `number,title,body,url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,author,files,comments,reviews,latestReviews,reviewDecision,statusCheckRollup`.
+- `gh pr diff NUMBER --repo OWNER/REPO` accepts no extra option, `--name-only`
+  or `--patch`, optionally followed by `--color never`. `--color never` alone is
+  also admitted.
+- `gh api --method GET` accepts only `repos/OWNER/REPO/pulls/NUMBER/files`,
+  `comments` or `reviews`, and `repos/OWNER/REPO/issues/NUMBER/comments`,
+  optionally followed by `--paginate`.
+- `gh api graphql` accepts only the literal `THREAD_QUERY` or `COMMENTS_QUERY`
+  from the parser. Use `-f query=...`, `-f owner=...`, `-f repo=...`, `-F number=...`,
+  `-f id=...` and optional `-f cursor=...` as required by that query. Follow both
+  thread and nested-comment pagination; an initial page does not prove a complete read.
+
+Arbitrary queries, mutations, headers, bodies, `@file`, stdin, aliases, output
+files, `--jq`, templates and browser routes receive no task-free admission.
+Provider authentication and permissions still apply.
 
 ### Claude subagent child route (restricted)
 
@@ -624,7 +702,7 @@ The Claude shell entry and Python main exit silently when that variable is prese
 input or touching lifecycle state. Only the native Cursor adapter owns those events. This is a
 no-decision duplicate skip, not an unconditional permission grant. No global import setting is
 changed. Cursor uses generic pre/post hooks for ordinary tools and native call identity.
-Its MCP-specific pre-hook additionally checks ticket-read server routing; the
+Its MCP-specific pre-hook additionally checks configured Linear server routing; the
 MCP-specific post-hook does not duplicate completion or lifecycle mutation.
 
 ## Validation and remaining evidence
@@ -662,8 +740,9 @@ reusable operating constraints.
    an empty adapter decision alone does not prove a visible permission prompt.
 5. Verify roadmap acknowledgment, coordinator source refresh, reader refresh,
    repeated startup, legacy recovery, issue switching and failed-switch return.
-   For an invalidated or stale packet, verify an ordinary-work denial before
-   recovery and readiness afterward. Follow
+   For an invalidated or stale packet, verify a protected-work denial before
+   recovery and readiness afterward. Independent task-free work must preserve
+   the stale packet and unresolved pending state. Follow
    [source placement and recovery](task-workspace-usage.md#explicit-setup-and-bootstrap).
    Preserve old work and label any operator intervention as manual recovery.
 6. Validate the [restricted native child route](#codex-native-child-route-restricted)
@@ -692,7 +771,7 @@ the arbiter for `make check` from such a session and do not weaken those tests t
 Before claiming actual-host acceptance, use a disposable registered repository and retain:
 
 1. The installed host version and evidence that these exact project hook definitions loaded once.
-2. An observed native session/tool ID pair and a readiness denial before acknowledgment.
+2. An observed native session/tool ID pair, task-free work without phantom state, and a protected-operation denial before acknowledgment.
 3. A supported foreground call and its matching completion, with no remaining pending entry.
 4. A malformed/unsupported call denial and retained state after ambiguous completion.
 5. For Cursor with third-party imports enabled, one native mutation and no Claude-host binding.
@@ -706,8 +785,18 @@ host timeout, but an externally killed or timed-out hook is not guaranteed enfor
 
 **Earlier observation.** In a local Desktop session before this allowlist existed,
 `save_issue`, `list_users` and `list_comments` completed although the adapter of that
-revision denied every MCP tool after readiness. The current revision admits exactly those operations on the configured
-connector (see the allowlist above), so the observation no longer points at a defect. A
+revision denied every MCP tool after readiness. The current revision includes those operations in its named configured-connector
+allowlist, so the observation no longer points at a defect. A
 host-side timeout fail-open was considered as the cause but never established; the
 project hooks keep `timeout: 10` and the runner its 2-second deadline, and an explicit
 `onFailure` setting in the hook definitions remains unverified on an installed host.
+
+Installed-host acceptance of the task-free boundary requires fresh Codex and Claude
+sessions on the frozen candidate. Historical dated observations above remain
+historical. Retain actual prompt, pre-tool and post-tool callbacks; authorized
+remote ticket creation, read-back and meaningful update; unbound task-free work;
+protected denials; ticket startup; approved implementation; stale/pending-state
+preservation; and no phantom lifecycle state. Manual lifecycle calls and synthetic
+events cannot substitute for these observations. Cursor installed validation is
+deferred until its prerequisite host and child integration work is complete;
+shared-policy tests do not establish installed Cursor acceptance.
