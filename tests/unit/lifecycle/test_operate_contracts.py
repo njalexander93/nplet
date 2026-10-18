@@ -2586,3 +2586,1282 @@ def test_ordinary_tool_start_cannot_borrow_source_preparation_exception() -> Non
     assert issue.state == before
     assert issue.commits == []
     assert store.saved == []
+
+
+def cursor_model() -> tuple[MemoryStore, MemoryIssue, str]:
+    """Reuse the existing memory collaborators with an explicit ready Cursor parent.
+
+    Returns:
+        The existing store, issue model and Cursor coordinator key.
+    """
+    # Move the existing modeled coordinator to the selected host without filesystem work.
+    store, issue = MemoryStore(), MemoryIssue()
+    old_key = issue.state["coordinator"]
+    key = core.participant_key(base_request("read", host="cursor"))
+    member = issue.state["participants"].pop(old_key)
+    member.update(packet=[], ack=core.sha(core.canonical([])))
+    issue.state["participants"][key] = member
+    issue.state["coordinator"] = key
+    issue.state["owners"] = {path: key for path in issue.state["owners"]}
+    return store, issue, key
+
+
+def cursor_request(issue: MemoryIssue, operation: str, **fields: object) -> dict[str, Any]:
+    """Build one deterministic internal request for the memory model.
+
+    Args:
+        issue: Existing issue whose fixed modeled revision is named.
+        operation: Internal Cursor transition.
+        **fields: Explicit overrides for the scenario.
+
+    Returns:
+        A request naming the modeled parent unless explicitly overridden.
+    """
+    return base_request(
+        operation,
+        host="cursor",
+        expected_revision=issue.state["revision"],
+        request_id=operation + "-" + str(len(issue.commits)),
+        **fields,
+    )
+
+
+def cursor_apply(
+    store: MemoryStore,
+    issue: MemoryIssue,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Call the real transition helper with an isolated staging copy.
+
+    Args:
+        store: Existing memory store.
+        issue: Existing memory issue.
+        request: Complete internal request.
+
+    Returns:
+        The actual transition response from the existing modeled commit.
+
+    Raises:
+        core.WorkspaceError: The transition rejects its explicit state or request.
+    """
+    # Production operate also passes a copied state and verified payload to this helper.
+    return core.cursor_operation(
+        store,
+        issue,
+        copy.deepcopy(issue.state),
+        issue.payload.copy(),
+        request,
+    )
+
+
+def cursor_plan_request(
+    issue: MemoryIssue,
+    identifier: str = "plan",
+    **fields: object,
+) -> dict[str, Any]:
+    """Name a packet template and one bounded output using the model request builder.
+
+    Args:
+        issue: Existing modeled issue.
+        identifier: Plan identity.
+        **fields: Scenario-specific plan overrides.
+
+    Returns:
+        A ready-to-dispatch plan request.
+    """
+    # Keep supplied overrides distinct from the shared request metadata.
+    values: dict[str, Any] = {
+        "plan_id": identifier,
+        "parent_conversation": "parent-conversation",
+        "task_digest": "a" * 64,
+        "packet": [],
+        "owned_paths": ["context/child.md"],
+    }
+    values.update(fields)
+    return cursor_request(issue, "cursor-plan", **values)
+
+
+def cursor_launch(
+    store: MemoryStore,
+    issue: MemoryIssue,
+    identifier: str = "plan",
+    **plan_fields: object,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Plan and admit one invocation without modeling native execution.
+
+    Args:
+        store: Existing memory store.
+        issue: Existing memory issue.
+        identifier: Unique plan and tool suffix.
+        **plan_fields: Explicit template, output or resume overrides.
+
+    Returns:
+        Admission response and its original request.
+
+    Raises:
+        core.WorkspaceError: Planning or admission is denied.
+    """
+    # Apply only the prerequisite planned metadata and parent pending reservation.
+    cursor_apply(store, issue, cursor_plan_request(issue, identifier, **plan_fields))
+    request = cursor_request(
+        issue,
+        "cursor-admit",
+        plan_id=identifier,
+        parent_conversation="parent-conversation",
+        task_digest="a" * 64,
+        tool_id="tool-" + identifier,
+        native_call="native\n" + identifier,
+    )
+    return cursor_apply(store, issue, request), request
+
+
+def cursor_binding_request(
+    issue: MemoryIssue,
+    invocation: dict[str, Any],
+    identifier: str = "plan",
+    child: str = "child",
+    **fields: object,
+) -> dict[str, Any]:
+    """Build one actual child callback identity for an admitted invocation.
+
+    Args:
+        issue: Existing modeled issue.
+        invocation: Admission response naming invocation_id.
+        identifier: Plan/tool suffix.
+        child: Exact synthetic returned conversation.
+        **fields: Explicit callback overrides.
+
+    Returns:
+        A callback request under the normalized child identity.
+    """
+    # Opaque native generation is deliberately distinct from framework generation two.
+    values: dict[str, Any] = {
+        "session_id": "session/agent/" + child,
+        "invocation_id": invocation["invocation_id"],
+        "tool_id": "tool-" + identifier,
+        "child_conversation": child,
+        "native_generation": "actual-child-generation",
+    }
+    values.update(fields)
+    return cursor_request(issue, "cursor-bind-child", **values)
+
+
+def cursor_result(identifier: str = "plan", child: str = "child") -> dict[str, Any]:
+    """Return bounded synthetic result metadata for internal transition tests.
+
+    Args:
+        identifier: Original native call suffix.
+        child: Exact returned child conversation.
+
+    Returns:
+        A complete foreground projection, with no claim of SQLite authentication.
+    """
+    return {
+        "parent_conversation": "parent-conversation",
+        "native_call": "native\n" + identifier,
+        "storage_key": "row\n" + identifier,
+        "child_conversation": child,
+        "kind": "foreground-success",
+        "is_background": False,
+        "background_reason": 0,
+        "duration_ms": 12,
+        "binary_sha256": "b" * 64,
+        "executor_sha256": "c" * 64,
+        "workbench_sha256": "d" * 64,
+    }
+
+
+def cursor_retirement_request(
+    issue: MemoryIssue,
+    invocation: dict[str, Any],
+    identifier: str = "plan",
+    child: str = "child",
+) -> dict[str, Any]:
+    """Build an original parent's retirement request.
+
+    Args:
+        issue: Existing modeled issue.
+        invocation: Admission response naming invocation_id.
+        identifier: Original call suffix.
+        child: Exact child conversation.
+
+    Returns:
+        A complete internal retirement request.
+    """
+    return cursor_request(
+        issue,
+        "cursor-retire",
+        invocation_id=invocation["invocation_id"],
+        result=cursor_result(identifier, child),
+    )
+
+
+def cursor_denied(
+    store: MemoryStore,
+    issue: MemoryIssue,
+    request: dict[str, Any],
+    code: str,
+) -> None:
+    """Assert an exact denial and no modeled publication or binding effect.
+
+    Args:
+        store: Existing memory store.
+        issue: Existing memory issue.
+        request: Request expected to fail before commit.
+        code: Exact contractual diagnostic.
+
+    Raises:
+        AssertionError: The diagnostic or unchanged-state invariant fails.
+    """
+    # Snapshot committed collaborators, not the disposable staging copy.
+    state, payload = copy.deepcopy(issue.state), issue.payload.copy()
+    commits, saved = len(issue.commits), list(store.saved)
+    with pytest.raises(core.WorkspaceError) as captured:
+        cursor_apply(store, issue, request)
+    # A denial cannot publish copied metadata, notes, receipts or binding repairs.
+    assert captured.value.code == code
+    assert issue.state == state
+    assert issue.payload == payload
+    assert len(issue.commits) == commits
+    assert store.saved == saved
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("host", "HOST_UNSUPPORTED"),
+        ("unbound", "BINDING_MISSING"),
+        ("generation", "STALE_BINDING"),
+        ("role", "NOT_OWNER"),
+        ("attached", "NOT_READY"),
+        ("ack", "NOT_READY"),
+        ("packet", "SCOPE_MISSING"),
+        ("source", "SOURCE_STALE"),
+        ("classified", "NOT_OWNER"),
+    ],
+)
+def test_cursor_ready_denies_each_authority_or_source_failure(fault: str, code: str) -> None:
+    """Reject parent authority and readiness failures without touching collaborators.
+
+    Args:
+        fault: One changed parent/source dimension.
+        code: Exact expected diagnostic.
+
+    Raises:
+        AssertionError: Invalid authority is accepted or state is mutated.
+    """
+    # Select one invalid boundary from an independently ready parent.
+    store, issue, key = cursor_model()
+    request = cursor_request(issue, "cursor-plan")
+    member = issue.state["participants"][key]
+    if fault == "host":
+        request["host"] = "codex"
+    elif fault == "unbound":
+        request["session_id"] = "foreign"
+    elif fault == "generation":
+        request["binding_generation"] = 1
+    elif fault == "role":
+        issue.state["coordinator"] = "other"
+    elif fault == "attached":
+        member["status"] = "attached"
+    elif fault == "ack":
+        member["ack"] = "0" * 64
+    elif fault == "packet":
+        member["packet"] = None
+    elif fault == "source":
+        member["packet"] = [
+            {
+                "id": "required",
+                "locator": "roadmap.md",
+                "sha256": "0" * 64,
+                "required": True,
+                "authority": "fixture",
+                "reason": "test",
+                "stage": "execution",
+                "reader": key,
+            }
+        ]
+    else:
+        # A synthetic active classified coordinator reaches the explicit child-role fence.
+        member["cursor_invocation"] = "classified"
+        issue.state["cursor_invocations"] = {
+            "classified": {
+                "phase": "bound",
+                "child_participant": key,
+                "child_generation": 2,
+            }
+        }
+    before = copy.deepcopy(issue.state)
+    # The ready helper performs no staging or publication.
+    with pytest.raises(core.WorkspaceError) as captured:
+        core.cursor_ready(issue.state, request, issue.payload)
+    assert captured.value.code == code
+    assert issue.state == before
+    assert issue.commits == []
+    assert store.saved == []
+
+
+def test_cursor_ready_returns_the_actual_ready_parent_record() -> None:
+    """Return the existing coordinator identity and record without a modeled commit."""
+    # Check identity, not a copied or fabricated readiness result.
+    _store, issue, key = cursor_model()
+    result = core.cursor_ready(issue.state, cursor_request(issue, "cursor-plan"), issue.payload)
+    assert result[0] == key
+    assert result[1] is issue.state["participants"][key]
+    assert issue.commits == []
+
+
+@pytest.mark.parametrize(
+    "fields,code",
+    [
+        ({"expected_revision": 6}, "REVISION_CONFLICT"),
+        ({"packet": [{"reader": "foreign"}]}, "SCOPE_MISSING"),
+        ({"owned_paths": "context/child.md"}, "INVALID_REQUEST"),
+        ({"owned_paths": ["context/child.md", "context/child.md"]}, "INVALID_REQUEST"),
+        ({"owned_paths": ["roadmap.md"]}, "NOT_OWNER"),
+        ({"owned_paths": ["context/../foreign.md"]}, "UNSAFE_PATH"),
+        ({"task_digest": "bad"}, "INVALID_REQUEST"),
+        ({"parent_conversation": ""}, "INVALID_REQUEST"),
+        ({"resume_child": "unknown-child"}, "STALE_BINDING"),
+    ],
+)
+def test_cursor_plan_rejects_invalid_boundary_without_publication(
+    fields: dict[str, Any],
+    code: str,
+) -> None:
+    """Validate plan revision, template, scope and resume identity before publication.
+
+    Args:
+        fields: Single invalid plan override.
+        code: Exact expected diagnostic.
+    """
+    # Apply metadata overrides after request construction to permit expected_revision overrides.
+    store, issue, _key = cursor_model()
+    request = cursor_plan_request(issue)
+    request.update(fields)
+    cursor_denied(store, issue, request, code)
+
+
+def test_cursor_plan_replacement_replay_and_note_reservations() -> None:
+    """Replace unconsumed intent, preserve exact replay and refuse conflicting outputs."""
+    # Initial planning reserves the output without installing participant ownership.
+    store, issue, key = cursor_model()
+    request = cursor_plan_request(issue)
+    first = cursor_apply(store, issue, request)
+    assert issue.state["cursor_plans"]["plan"]["parent"] == key
+    assert "context/child.md" not in issue.state["owners"]
+    cursor_denied(store, issue, cursor_plan_request(issue, "other"), "NOT_OWNER")
+    # Seed only the exact replay receipt; MemoryIssue does not model production receipts.
+    issue.state["requests"][core.sha(request["request_id"].encode())] = {
+        "digest": core.sha(core.canonical(request)),
+        "result": first,
+    }
+    commits = len(issue.commits)
+    assert cursor_apply(store, issue, request) == first
+    assert len(issue.commits) == commits
+    # Replacement releases an unconsumed reservation and permits another explicit plan.
+    replacement = cursor_plan_request(issue, owned_paths=[])
+    cursor_apply(store, issue, replacement)
+    cursor_apply(store, issue, cursor_plan_request(issue, "other"))
+    assert issue.state["cursor_plans"]["plan"]["owned_paths"] == []
+    assert issue.state["cursor_plans"]["other"]["owned_paths"] == ["context/child.md"]
+
+
+@pytest.mark.parametrize("fault", ["consumed", "parent", "generation"])
+def test_cursor_plan_replacement_preserves_existing_authority(fault: str) -> None:
+    """Keep consumed intent immutable and recover unconsumed older-parent planning.
+
+    Args:
+        fault: Existing plan relationship made incompatible with replacement.
+    """
+    # Change the existing planned relationship before requesting an explicit replacement.
+    store, issue, _key = cursor_model()
+    cursor_apply(store, issue, cursor_plan_request(issue))
+    plan = issue.state["cursor_plans"]["plan"]
+    if fault == "consumed":
+        plan["invocation_id"] = "already-consumed"
+    elif fault == "parent":
+        plan["parent"] = "other-parent"
+    else:
+        plan["parent_generation"] = 1
+    replacement = cursor_plan_request(issue, owned_paths=[])
+    if fault == "consumed":
+        cursor_denied(store, issue, replacement, "REQUEST_CONFLICT")
+    else:
+        # Current ready coordinator recovery may replace unused older planning intent.
+        cursor_apply(store, issue, replacement)
+        plan = issue.state["cursor_plans"]["plan"]
+        assert plan["parent"] == issue.state["coordinator"]
+        assert plan["parent_generation"] == 2 and plan["owned_paths"] == []
+
+
+@pytest.mark.parametrize("phase", ["unconsumed", "admitted"])
+def test_cursor_plan_keeps_output_reserved_until_first_child_callback(phase: str) -> None:
+    """Refuse another plan during both pre-admission and pre-first-callback intervals.
+
+    Args:
+        phase: Whether the existing plan is already consumed by an admitted Task.
+    """
+    # An admitted invocation still needs its output reservation before ownership is installed.
+    store, issue, _key = cursor_model()
+    if phase == "admitted":
+        cursor_launch(store, issue)
+    else:
+        cursor_apply(store, issue, cursor_plan_request(issue))
+    cursor_denied(store, issue, cursor_plan_request(issue, "other"), "NOT_OWNER")
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("missing-plan", "SCOPE_MISSING"),
+        ("parent", "REQUEST_CONFLICT"),
+        ("generation", "REQUEST_CONFLICT"),
+        ("conversation", "REQUEST_CONFLICT"),
+        ("task", "REQUEST_CONFLICT"),
+        ("native", "INVALID_REQUEST"),
+        ("tool-pending", "REQUEST_CONFLICT"),
+        ("consumed", "REQUEST_CONFLICT"),
+        ("same-native", "REQUEST_CONFLICT"),
+        ("stale-revision", "REVISION_CONFLICT"),
+    ],
+)
+def test_cursor_admit_denies_invalid_or_conflicting_launch(fault: str, code: str) -> None:
+    """Consume only the exact planned foreground launch without losing prior charges.
+
+    Args:
+        fault: Single plan, native call or pending relationship changed.
+        code: Exact expected diagnostic.
+    """
+    # Start from one unused validated plan and its independent parent identity.
+    store, issue, key = cursor_model()
+    cursor_apply(store, issue, cursor_plan_request(issue))
+    request = cursor_request(
+        issue,
+        "cursor-admit",
+        plan_id="plan",
+        parent_conversation="parent-conversation",
+        task_digest="a" * 64,
+        tool_id="tool-plan",
+        native_call="native\nplan",
+    )
+    plan = issue.state["cursor_plans"]["plan"]
+    if fault == "missing-plan":
+        request["plan_id"] = "missing"
+    elif fault == "parent":
+        plan["parent"] = "other"
+    elif fault == "generation":
+        plan["parent_generation"] = 1
+    elif fault == "conversation":
+        request["parent_conversation"] = "other"
+    elif fault == "task":
+        request["task_digest"] = "b" * 64
+    elif fault == "native":
+        request["native_call"] = ""
+    elif fault == "tool-pending":
+        issue.state["participants"][key]["pending"]["tool-plan"] = {"status": "pending"}
+    elif fault == "consumed":
+        plan["invocation_id"] = "other"
+    elif fault == "same-native":
+        issue.state["cursor_invocations"] = {
+            "other": {
+                "parent": key,
+                "parent_generation": 2,
+                "native_call": "native\nplan",
+            }
+        }
+    else:
+        request["expected_revision"] = 6
+    cursor_denied(store, issue, request, code)
+
+
+@pytest.mark.parametrize("receipt", [False, True])
+def test_cursor_admit_semantic_and_exact_duplicates_are_event_free(receipt: bool) -> None:
+    """Return an active admission without charging or committing it again.
+
+    Args:
+        receipt: Whether to seed an exact prior-result record.
+    """
+    # The production helper constructs the pending correlation and invocation once.
+    store, issue, key = cursor_model()
+    admitted, request = cursor_launch(store, issue)
+    identifier = admitted["invocation_id"]
+    assert issue.state["cursor_plans"]["plan"]["invocation_id"] == identifier
+    assert (
+        issue.state["participants"][key]["pending"]["tool-plan"]["cursor_invocation"] == identifier
+    )
+    if receipt:
+        issue.state["requests"][core.sha(request["request_id"].encode())] = {
+            "digest": core.sha(core.canonical(request)),
+            "result": admitted,
+        }
+    before, commits = copy.deepcopy(issue.state), len(issue.commits)
+    duplicate = cursor_apply(store, issue, request)
+    assert duplicate["invocation_id"] == identifier
+    if receipt:
+        assert duplicate == admitted
+    assert issue.state == before
+    assert len(issue.commits) == commits
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("retired", "STALE_BINDING"),
+        ("plan", "REQUEST_CONFLICT"),
+        ("native", "REQUEST_CONFLICT"),
+        ("pending", "REQUEST_CONFLICT"),
+    ],
+)
+def test_cursor_admit_duplicate_revalidates_existing_invocation(fault: str, code: str) -> None:
+    """Reject stale or contradictory native duplicates before treating them as retries.
+
+    Args:
+        fault: One relationship changed after original admission.
+        code: Exact expected diagnostic.
+    """
+    # Keep the same normalized tool ID while changing only the selected correlation.
+    store, issue, key = cursor_model()
+    admitted, request = cursor_launch(store, issue)
+    invocation = issue.state["cursor_invocations"][admitted["invocation_id"]]
+    if fault == "retired":
+        invocation["phase"] = "retired"
+    elif fault == "plan":
+        invocation["plan_id"] = "different"
+    elif fault == "native":
+        request["native_call"] = "contradictory\nnative"
+    else:
+        issue.state["participants"][key]["pending"] = {}
+    cursor_denied(store, issue, request, code)
+
+
+@pytest.mark.parametrize("native_generation", [None, "actual-child-generation"])
+@pytest.mark.parametrize("receipt", [False, True])
+def test_cursor_bind_installs_independent_scope_and_repairs_duplicate_binding(
+    native_generation: str | None,
+    receipt: bool,
+) -> None:
+    """Bind an actual callback once and repair only its derived binding on retry.
+
+    Args:
+        native_generation: Opaque observed child generation or host omission.
+        receipt: Whether an exact replay receipt is explicitly seeded.
+    """
+    # Use a nonempty template to verify reader replacement rather than merely an empty packet.
+    store, issue, parent = cursor_model()
+    packet = [
+        {
+            "id": "source",
+            "locator": "roadmap.md",
+            "sha256": core.sha(b"approved roadmap"),
+            "required": True,
+            "authority": "fixture",
+            "reason": "test",
+            "stage": "execution",
+            "reader": "cursor-child",
+        }
+    ]
+    admitted, _admission = cursor_launch(store, issue, packet=packet)
+    request = cursor_binding_request(issue, admitted, native_generation=native_generation)
+    bound = cursor_apply(store, issue, request)
+    child = core.participant_key(request)
+    member = issue.state["participants"][child]
+    assert bound["binding_generation"] == 1
+    assert member["packet"] == [{**packet[0], "reader": child}]
+    assert member["packet"] is not packet
+    assert member["ack"] is None and member["pending"] == {}
+    assert member["status"] == "attached"
+    assert issue.state["owners"]["context/child.md"] == child
+    assert issue.state["coordinator"] == parent
+    if receipt:
+        issue.state["requests"][core.sha(request["request_id"].encode())] = {
+            "digest": core.sha(core.canonical(request)),
+            "result": bound,
+        }
+    before, commits, saves = copy.deepcopy(issue.state), len(issue.commits), len(store.saved)
+    duplicate = cursor_apply(store, issue, request)
+    assert duplicate["binding_generation"] == 1
+    if receipt:
+        assert duplicate == bound
+    assert issue.state == before and len(issue.commits) == commits
+    assert store.saved[saves:] == [child]
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("unknown", "UNKNOWN_OPERATION"),
+        ("parent-missing", "STALE_BINDING"),
+        ("parent-generation", "STALE_BINDING"),
+        ("parent-pending", "REQUEST_CONFLICT"),
+        ("child-session", "NOT_OWNER"),
+        ("tool", "REQUEST_CONFLICT"),
+        ("native-generation", "INVALID_REQUEST"),
+        ("retired", "STALE_BINDING"),
+        ("active-conversation", "PENDING_OPERATION"),
+        ("resume-other", "REQUEST_CONFLICT"),
+        ("resume-missing", "STALE_BINDING"),
+        ("existing-unplanned", "STALE_BINDING"),
+        ("owner", "NOT_OWNER"),
+    ],
+)
+def test_cursor_bind_denies_conflicting_identity_or_scope(fault: str, code: str) -> None:
+    """Require genuine child, current parent, independent output and explicit resume.
+
+    Args:
+        fault: One pre-binding relationship made incompatible.
+        code: Exact expected diagnostic.
+    """
+    # Admit once; manipulate only the state dimension checked by this case.
+    store, issue, parent = cursor_model()
+    admitted, _admission = cursor_launch(store, issue)
+    request = cursor_binding_request(issue, admitted)
+    identifier = admitted["invocation_id"]
+    invocation = issue.state["cursor_invocations"][identifier]
+    child = core.participant_key(request)
+    if fault == "unknown":
+        request["invocation_id"] = "missing"
+    elif fault == "parent-missing":
+        del issue.state["participants"][parent]
+    elif fault == "parent-generation":
+        issue.state["participants"][parent]["generation"] = 3
+    elif fault == "parent-pending":
+        issue.state["participants"][parent]["pending"] = {}
+    elif fault == "child-session":
+        request["session_id"] = "foreign/agent/child"
+    elif fault == "tool":
+        request["tool_id"] = "other"
+    elif fault == "native-generation":
+        request["native_generation"] = ""
+    elif fault == "retired":
+        invocation["phase"] = "retired"
+    elif fault == "active-conversation":
+        issue.state["cursor_invocations"]["other"] = {
+            "phase": "admitted",
+            "child_conversation": None,
+            "resume_child": "child",
+        }
+    elif fault == "resume-other":
+        invocation["resume_child"] = "other-child"
+    elif fault == "resume-missing":
+        invocation["resume_child"] = "child"
+    elif fault == "existing-unplanned":
+        issue.state["participants"][child] = {
+            "generation": 1,
+            "status": "detached",
+            "pending": {},
+            "packet": None,
+            "ack": None,
+            "cursor_invocation": "older",
+        }
+    else:
+        issue.state["owners"]["context/child.md"] = "other-owner"
+    cursor_denied(store, issue, request, code)
+
+
+@pytest.mark.parametrize("fault", ["native", "generation", "status", "classification", "child"])
+def test_cursor_bound_duplicate_checks_the_original_child_generation(fault: str) -> None:
+    """Keep duplicate callback repair from reviving or replacing child authority.
+
+    Args:
+        fault: One already-bound relationship contradicted by the callback.
+    """
+    # Bind one child before corrupting its duplicate relationship.
+    store, issue, _parent = cursor_model()
+    admitted, _admission = cursor_launch(store, issue)
+    request = cursor_binding_request(issue, admitted)
+    cursor_apply(store, issue, request)
+    invocation = issue.state["cursor_invocations"][admitted["invocation_id"]]
+    member = issue.state["participants"][core.participant_key(request)]
+    if fault == "native":
+        request["native_generation"] = "different-native-generation"
+    elif fault == "generation":
+        member["generation"] = 2
+    elif fault == "status":
+        member["status"] = "detached"
+    elif fault == "classification":
+        member["cursor_invocation"] = "other"
+    else:
+        invocation["child_participant"] = "foreign"
+    cursor_denied(store, issue, request, "STALE_BINDING")
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_cursor_resume_advances_generation_with_fresh_or_absent_packet(early: bool) -> None:
+    """Advance a planned resumed conversation without carrying old acknowledgment.
+
+    Args:
+        early: Whether the resumed invocation returns before its first callback.
+    """
+    # A terminal-only first invocation provides classification without invented source delivery.
+    store, issue, parent = cursor_model()
+    first, _request = cursor_launch(store, issue)
+    cursor_apply(store, issue, cursor_retirement_request(issue, first))
+    first_child = core.participant_key(
+        base_request(
+            "read",
+            host="cursor",
+            session_id="session/agent/child",
+        )
+    )
+    old = copy.deepcopy(issue.state["participants"][first_child])
+    assert old["packet"] is None and old["pending"] == {} and old["status"] == "detached"
+    second, _request = cursor_launch(
+        store,
+        issue,
+        "second",
+        resume_child="child",
+        owned_paths=["context/second.md"],
+    )
+    invocation = issue.state["cursor_invocations"][second["invocation_id"]]
+    assert invocation["resume_generation"] == 1
+    if early:
+        result = cursor_apply(store, issue, cursor_retirement_request(issue, second, "second"))
+    else:
+        result = cursor_apply(store, issue, cursor_binding_request(issue, second, "second"))
+    member = issue.state["participants"][first_child]
+    assert result["binding_generation"] == 2
+    assert member["generation"] == 2 and member["ack"] is None and member["pending"] == {}
+    assert member["cursor_invocation"] == second["invocation_id"]
+    assert member["packet"] is None if early else member["packet"] == []
+    assert member["status"] == ("detached" if early else "attached")
+    assert issue.state["coordinator"] == parent
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("result-type", "INVALID_REQUEST"),
+        ("keys", "INVALID_REQUEST"),
+        ("native", "RESULT_NOT_TERMINAL"),
+        ("kind", "RESULT_NOT_TERMINAL"),
+        ("background", "RESULT_NOT_TERMINAL"),
+        ("reason", "RESULT_NOT_TERMINAL"),
+        ("duration", "RESULT_NOT_TERMINAL"),
+        ("hash", "INVALID_REQUEST"),
+        ("storage", "INVALID_REQUEST"),
+        ("child", "STALE_BINDING"),
+        ("generation", "STALE_BINDING"),
+        ("classification", "STALE_BINDING"),
+        ("effect", "PENDING_OPERATION"),
+        ("phase", "STALE_BINDING"),
+        ("revision", "REVISION_CONFLICT"),
+    ],
+)
+def test_cursor_retirement_denies_invalid_result_or_live_effect(fault: str, code: str) -> None:
+    """Keep the exact parent charge and child authority for every failed retirement.
+
+    Args:
+        fault: One projected-result or generation relationship changed.
+        code: Exact expected diagnostic.
+    """
+    # Bind one genuine modeled callback before asking its parent to retire it.
+    store, issue, _parent = cursor_model()
+    admitted, _admission = cursor_launch(store, issue)
+    binding = cursor_binding_request(issue, admitted)
+    cursor_apply(store, issue, binding)
+    member = issue.state["participants"][core.participant_key(binding)]
+    request = cursor_retirement_request(issue, admitted)
+    invocation = issue.state["cursor_invocations"][admitted["invocation_id"]]
+    if fault == "result-type":
+        request["result"] = []
+    elif fault == "keys":
+        request["result"]["extra"] = "unapproved"
+    elif fault == "native":
+        request["result"]["native_call"] = "other"
+    elif fault == "kind":
+        request["result"]["kind"] = "task-error"
+    elif fault == "background":
+        request["result"]["is_background"] = True
+    elif fault == "reason":
+        request["result"]["background_reason"] = True
+    elif fault == "duration":
+        request["result"]["duration_ms"] = -1
+    elif fault == "hash":
+        request["result"]["binary_sha256"] = "bad"
+    elif fault == "storage":
+        request["result"]["storage_key"] = ""
+    elif fault == "child":
+        request["result"]["child_conversation"] = "foreign"
+    elif fault == "generation":
+        member["generation"] = 2
+    elif fault == "classification":
+        member["cursor_invocation"] = "other"
+    elif fault == "effect":
+        member["pending"]["effect"] = {"status": "pending"}
+    elif fault == "phase":
+        invocation["phase"] = "unknown"
+    else:
+        request["expected_revision"] = 6
+    cursor_denied(store, issue, request, code)
+
+
+@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize("receipt", [False, True])
+def test_cursor_retirement_commits_both_sides_and_duplicates_only_repair_binding(
+    bound: bool,
+    receipt: bool,
+) -> None:
+    """Detach the exact generation with parent settlement, then recognize identical metadata.
+
+    Args:
+        bound: Whether a genuine child callback precedes the returned result.
+        receipt: Whether an exact prior-result receipt is explicitly seeded.
+    """
+    # The same transition supports ordinary and pre-callback foreground completion.
+    store, issue, parent = cursor_model()
+    admitted, _admission = cursor_launch(store, issue)
+    if bound:
+        cursor_apply(store, issue, cursor_binding_request(issue, admitted))
+    request = cursor_retirement_request(issue, admitted)
+    first = cursor_apply(store, issue, request)
+    child = core.participant_key(
+        base_request(
+            "read",
+            host="cursor",
+            session_id="session/agent/child",
+        )
+    )
+    member = issue.state["participants"][child]
+    invocation = issue.state["cursor_invocations"][admitted["invocation_id"]]
+    assert member["status"] == "detached" and member["ack"] is None
+    assert member["pending"] == {} and member["generation"] == 1
+    assert member["packet"] == ([] if bound else None)
+    assert issue.state["participants"][parent]["pending"] == {}
+    assert invocation["phase"] == "retired"
+    assert invocation["terminal_result"] == request["result"]
+    assert invocation["terminal_result"] is not request["result"]
+    if receipt:
+        issue.state["requests"][core.sha(request["request_id"].encode())] = {
+            "digest": core.sha(core.canonical(request)),
+            "result": first,
+        }
+    before, commits, saves = copy.deepcopy(issue.state), len(issue.commits), len(store.saved)
+    duplicate = cursor_apply(store, issue, request)
+    assert duplicate["binding_generation"] == 1
+    if receipt:
+        assert duplicate == first
+    assert issue.state == before and len(issue.commits) == commits
+    assert store.saved[saves:] == [child]
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("metadata", "REQUEST_CONFLICT"),
+        ("generation", "STALE_BINDING"),
+        ("classification", "STALE_BINDING"),
+        ("missing", "STALE_BINDING"),
+    ],
+)
+def test_cursor_retired_duplicate_cannot_detach_a_resumed_child(fault: str, code: str) -> None:
+    """Reject contradictory results and old-generation replay after a newer child binding.
+
+    Args:
+        fault: One relationship changed after the original retirement.
+        code: Exact expected diagnostic.
+    """
+    # Seed a real retired relationship through the actual helper, then change only one fact.
+    store, issue, _parent = cursor_model()
+    admitted, _admission = cursor_launch(store, issue)
+    request = cursor_retirement_request(issue, admitted)
+    cursor_apply(store, issue, request)
+    child = core.participant_key(
+        base_request(
+            "read",
+            host="cursor",
+            session_id="session/agent/child",
+        )
+    )
+    if fault == "metadata":
+        request["result"]["binary_sha256"] = "e" * 64
+    elif fault == "generation":
+        issue.state["participants"][child]["generation"] = 2
+    elif fault == "classification":
+        issue.state["participants"][child]["cursor_invocation"] = "new-invocation"
+    else:
+        del issue.state["participants"][child]
+    cursor_denied(store, issue, request, code)
+
+
+@pytest.mark.parametrize("operation", ["cursor-bind-child", "cursor-retire"])
+def test_cursor_early_transition_refuses_another_active_actual_conversation(
+    operation: str,
+) -> None:
+    """Reject actual conversation collisions even before this invocation gets a callback.
+
+    Args:
+        operation: Callback binding or terminal-only projected return.
+    """
+    # Another normalized parent's invocation reserves the same actual conversation.
+    store, issue, _parent = cursor_model()
+    admitted, _admission = cursor_launch(store, issue)
+    issue.state["cursor_invocations"]["other-parent-invocation"] = {
+        "phase": "bound",
+        "child_conversation": "child",
+        "resume_child": None,
+    }
+    request = (
+        cursor_binding_request(issue, admitted)
+        if operation == "cursor-bind-child"
+        else cursor_retirement_request(issue, admitted)
+    )
+    cursor_denied(store, issue, request, "PENDING_OPERATION")
+
+
+@pytest.mark.parametrize(
+    "scenario,expected",
+    [
+        ("empty", False),
+        ("unconsumed", True),
+        ("admitted", True),
+        ("bound", False),
+        ("retired", False),
+        ("excluded", False),
+        ("nonmatching", False),
+        ("later", True),
+    ],
+)
+def test_cursor_output_reservation_uses_only_unconsumed_or_admitted_plans(
+    scenario: str,
+    expected: bool,
+) -> None:
+    """Retain pre-callback output reservation and release it once owners exist or work retires.
+
+    Args:
+        scenario: Explicit plan/invocation phase or exclusion relationship.
+        expected: Independently selected reservation result.
+    """
+    # Construct only the reservation metadata consumed by this pure read-only predicate.
+    state: dict[str, Any] = {}
+    excluded = None
+    if scenario != "empty":
+        state["cursor_plans"] = {
+            "plan": {"owned_paths": ["context/output.md"], "invocation_id": None},
+        }
+        if scenario in {"admitted", "bound", "retired"}:
+            state["cursor_plans"]["plan"]["invocation_id"] = "invocation"
+            state["cursor_invocations"] = {"invocation": {"phase": scenario}}
+        elif scenario == "excluded":
+            excluded = "plan"
+        elif scenario == "nonmatching":
+            state["cursor_plans"]["plan"]["owned_paths"] = ["context/other.md"]
+        elif scenario == "later":
+            state["cursor_plans"]["plan"]["owned_paths"] = []
+            state["cursor_plans"]["later"] = {
+                "owned_paths": ["context/output.md"],
+                "invocation_id": None,
+            }
+    before = copy.deepcopy(state)
+    assert core.cursor_path_reserved(state, "context/output.md", excluded) is expected
+    assert state == before
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("host", "HOST_UNSUPPORTED"),
+        ("terminal", "TERMINAL"),
+        ("storage", "TERMINAL"),
+    ],
+)
+def test_cursor_transition_rejects_host_and_retention_failures(fault: str, code: str) -> None:
+    """Reject the outer internal-operation boundary before any modeled publication.
+
+    Args:
+        fault: Host or retained issue state made invalid.
+        code: Exact expected diagnostic.
+    """
+    # Keep the request otherwise complete so this test reaches the intended first guard.
+    store, issue, _key = cursor_model()
+    request = cursor_plan_request(issue)
+    if fault == "host":
+        request["host"] = "codex"
+    elif fault == "terminal":
+        issue.state["disposition"] = "completed"
+    else:
+        issue.state["storage"] = "cleaned"
+    cursor_denied(store, issue, request, code)
+
+
+def test_cursor_ready_tolerates_an_unavailable_optional_source() -> None:
+    """Keep optional absence visible without blocking an acknowledged current parent packet."""
+    # Use only an absent managed locator; no external file reader is involved.
+    _store, issue, key = cursor_model()
+    packet = [
+        {
+            "id": "optional",
+            "locator": "context/absent.md",
+            "sha256": "a" * 64,
+            "required": False,
+            "authority": "fixture",
+            "reason": "test",
+            "stage": "execution",
+            "reader": key,
+        }
+    ]
+    member = issue.state["participants"][key]
+    member.update(packet=packet, ack=core.sha(core.canonical(packet)))
+    result = core.cursor_ready(issue.state, cursor_request(issue, "cursor-plan"), issue.payload)
+    assert result == (key, member)
+    assert issue.commits == []
+
+
+def test_cursor_plan_rejects_a_complete_template_for_a_foreign_reader() -> None:
+    """Reject template broadening even when every reference field is otherwise valid."""
+    # This reaches the template reader guard rather than validate_packet's shape guard.
+    store, issue, _key = cursor_model()
+    packet = [
+        {
+            "id": "source",
+            "locator": "roadmap.md",
+            "sha256": core.sha(b"approved roadmap"),
+            "required": True,
+            "authority": "fixture",
+            "reason": "test",
+            "stage": "execution",
+            "reader": "foreign-reader",
+        }
+    ]
+    cursor_denied(
+        store,
+        issue,
+        cursor_plan_request(issue, packet=packet),
+        "SCOPE_MISSING",
+    )
+
+
+@pytest.mark.parametrize("fault", ["attached", "pending", "unclassified"])
+def test_cursor_resume_plan_requires_a_retired_classified_empty_child(fault: str) -> None:
+    """Reject planning that would borrow a live or unclassified conversation.
+
+    Args:
+        fault: One prerequisite of the retained conversation made invalid.
+    """
+    # Create classification through the real early-return transition.
+    store, issue, _key = cursor_model()
+    first, _request = cursor_launch(store, issue)
+    cursor_apply(store, issue, cursor_retirement_request(issue, first))
+    child = core.participant_key(
+        base_request(
+            "read",
+            host="cursor",
+            session_id="session/agent/child",
+        )
+    )
+    member = issue.state["participants"][child]
+    if fault == "attached":
+        member["status"] = "attached"
+    elif fault == "pending":
+        member["pending"]["unresolved"] = {"status": "pending"}
+    else:
+        del member["cursor_invocation"]
+    cursor_denied(
+        store,
+        issue,
+        cursor_plan_request(
+            issue,
+            "second",
+            resume_child="child",
+            owned_paths=["context/second.md"],
+        ),
+        "STALE_BINDING",
+    )
+
+
+@pytest.mark.parametrize(
+    "consumed,code",
+    [
+        (False, "REQUEST_CONFLICT"),
+        (True, "PENDING_OPERATION"),
+    ],
+)
+def test_cursor_resume_conversation_is_reserved_before_and_after_admission(
+    consumed: bool,
+    code: str,
+) -> None:
+    """Reject a second known-conversation launch before it can create another charge.
+
+    Args:
+        consumed: Whether the first resume plan has already admitted a native Task.
+        code: Exact planning conflict expected for that phase.
+    """
+    # Retain one classified conversation with no live child effects.
+    store, issue, _key = cursor_model()
+    first, _request = cursor_launch(store, issue)
+    cursor_apply(store, issue, cursor_retirement_request(issue, first))
+    second_plan = cursor_plan_request(
+        issue,
+        "second",
+        resume_child="child",
+        owned_paths=["context/second.md"],
+    )
+    cursor_apply(store, issue, second_plan)
+    if consumed:
+        cursor_apply(
+            store,
+            issue,
+            cursor_request(
+                issue,
+                "cursor-admit",
+                plan_id="second",
+                parent_conversation="parent-conversation",
+                task_digest="a" * 64,
+                tool_id="tool-second",
+                native_call="native\nsecond",
+            ),
+        )
+    # Another disjoint output does not make reusing the same live conversation valid.
+    cursor_denied(
+        store,
+        issue,
+        cursor_plan_request(
+            issue,
+            "third",
+            resume_child="child",
+            owned_paths=["context/third.md"],
+        ),
+        code,
+    )
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("generation", "STALE_BINDING"),
+        ("missing", "STALE_BINDING"),
+        ("attached", "STALE_BINDING"),
+        ("pending", "STALE_BINDING"),
+        ("active-invocation", "PENDING_OPERATION"),
+    ],
+)
+def test_cursor_resume_admission_rechecks_the_planned_generation(fault: str, code: str) -> None:
+    """Do not consume a plan after its inspected retired relationship changes.
+
+    Args:
+        fault: Relationship changed between plan and native admission.
+        code: Exact expected diagnostic.
+    """
+    # Preserve an unconsumed resume plan while changing only its inspected prerequisite.
+    store, issue, _key = cursor_model()
+    first, _request = cursor_launch(store, issue)
+    cursor_apply(store, issue, cursor_retirement_request(issue, first))
+    cursor_apply(
+        store,
+        issue,
+        cursor_plan_request(
+            issue,
+            "second",
+            resume_child="child",
+            owned_paths=["context/second.md"],
+        ),
+    )
+    child = core.participant_key(
+        base_request(
+            "read",
+            host="cursor",
+            session_id="session/agent/child",
+        )
+    )
+    member = issue.state["participants"][child]
+    if fault == "generation":
+        member["generation"] = 2
+    elif fault == "missing":
+        del issue.state["participants"][child]
+    elif fault == "attached":
+        member["status"] = "attached"
+    elif fault == "pending":
+        member["pending"]["effect"] = {"status": "pending"}
+    else:
+        issue.state["cursor_invocations"]["other"] = {
+            "phase": "admitted",
+            "child_conversation": "child",
+            "resume_child": None,
+            "parent": "other-parent",
+            "parent_generation": 1,
+            "native_call": "other-native",
+        }
+    request = cursor_request(
+        issue,
+        "cursor-admit",
+        plan_id="second",
+        parent_conversation="parent-conversation",
+        task_digest="a" * 64,
+        tool_id="tool-second",
+        native_call="native\nsecond",
+    )
+    cursor_denied(store, issue, request, code)
+
+
+@pytest.mark.parametrize("operation", ["cursor-bind-child", "cursor-retire"])
+@pytest.mark.parametrize("fault", ["generation", "attached", "pending", "unclassified"])
+def test_cursor_resume_effect_boundary_rechecks_its_retired_generation(
+    operation: str,
+    fault: str,
+) -> None:
+    """Do not bind or classify an early return over a changed retired conversation.
+
+    Args:
+        operation: First callback or terminal-only return.
+        fault: One retired relationship changed after the new admission.
+    """
+    # Admit explicit resume before simulating a later change in its inspected prior generation.
+    store, issue, _key = cursor_model()
+    first, _request = cursor_launch(store, issue)
+    cursor_apply(store, issue, cursor_retirement_request(issue, first))
+    second, _request = cursor_launch(
+        store,
+        issue,
+        "second",
+        resume_child="child",
+        owned_paths=["context/second.md"],
+    )
+    child = core.participant_key(
+        base_request(
+            "read",
+            host="cursor",
+            session_id="session/agent/child",
+        )
+    )
+    member = issue.state["participants"][child]
+    if fault == "generation":
+        member["generation"] = 2
+    elif fault == "attached":
+        member["status"] = "attached"
+    elif fault == "pending":
+        member["pending"]["effect"] = {"status": "pending"}
+    else:
+        del member["cursor_invocation"]
+    request = (
+        cursor_binding_request(issue, second, "second")
+        if operation == "cursor-bind-child"
+        else cursor_retirement_request(issue, second, "second")
+    )
+    cursor_denied(store, issue, request, "STALE_BINDING")
+
+
+def test_cursor_bound_resume_can_reuse_its_own_existing_note_without_acknowledgment() -> None:
+    """Install a fresh generation while preserving an explicitly planned existing note owner."""
+    # The first callback installs the actual note owner before its invocation retires.
+    store, issue, _parent = cursor_model()
+    first, _request = cursor_launch(store, issue)
+    binding = cursor_binding_request(issue, first)
+    cursor_apply(store, issue, binding)
+    cursor_apply(store, issue, cursor_retirement_request(issue, first))
+    child = core.participant_key(binding)
+    assert issue.state["owners"]["context/child.md"] == child
+    second, _request = cursor_launch(store, issue, "second", resume_child="child")
+    result = cursor_apply(store, issue, cursor_binding_request(issue, second, "second"))
+    assert result["binding_generation"] == 2
+    assert issue.state["owners"]["context/child.md"] == child
+    assert issue.state["participants"][child]["ack"] is None
+
+
+def test_unknown_cursor_transition_is_not_silently_treated_as_retirement() -> None:
+    """Keep the internal dispatch vocabulary bounded even with otherwise valid correlation."""
+    # A valid existing invocation lets the test reach the explicit operation discriminator.
+    store, issue, _parent = cursor_model()
+    admitted, _request = cursor_launch(store, issue)
+    request = cursor_retirement_request(issue, admitted)
+    request["operation"] = "cursor-unsupported"
+    cursor_denied(store, issue, request, "UNSUPPORTED_OPERATION")
