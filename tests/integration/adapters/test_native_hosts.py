@@ -1355,3 +1355,32 @@ def test_native_self_refresh_from_prior_read_requires_removing_available(
     stripped = [{k: v for k, v in ref.items() if k != "available"} for ref in references]
     scoped = lifecycle_call(host, case, shell, {**scope, "packet": stripped})
     assert scoped is not None and scoped["ok"] is True, scoped
+
+
+def test_exact_parent_lifecycle_owns_native_shell_effects(native: NativeCase) -> None:
+    """Canonical parent commands retain real transaction authority with native metadata.
+
+    Args:
+        native: Host-specific disposable repository fixture.
+    """
+    # Establish the actual assignment and ready binding through the provider protocol.
+    host, case, base, shell = started_coordinator(native)
+    request = {**base, "operation": "ready", "request_id": "native-metadata-ready"}
+    arguments = {"command": common.bootstrap_command(request, case.base["host"])}
+    if host == "cursor":
+        arguments.update(cwd="", timeout=30000)
+    event = native_event(
+        host,
+        case,
+        "PreToolUse",
+        tool_name=shell,
+        tool_input=arguments,
+        tool_use_id="exact-lifecycle-metadata",
+    )
+    assert_decision(host, dispatch(host, event), True)
+    # The core transaction establishes the outcome; the generic Shell response does not.
+    result = core.execute(request)
+    assert result["ok"] is True, result
+    event["hook_event_name"] = "postToolUse" if host == "cursor" else "PostToolUse"
+    assert dispatch(host, event) == {}
+    assert core.execute({**base, "operation": "ready", "request_id": "verify-no-pending"})["ok"]

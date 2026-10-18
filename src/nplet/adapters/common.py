@@ -1199,6 +1199,39 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
     return normalized
 
 
+def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> None:
+    """Validate native Shell metadata for an independently authorized lifecycle command.
+
+    Args:
+        event: Identity-validated Cursor event with its observed repository.
+        args: Native Shell input to an exact canonical lifecycle command.
+
+    Raises:
+        core.WorkspaceError: Fields, aliases, timeout or repository override are invalid.
+    """
+    # Limit transport metadata without granting ordinary Shell or transaction authority.
+    core.require(
+        set(args) <= {"command", "working_directory", "cwd", "timeout"}
+        and not {"working_directory", "cwd"} <= set(args),
+        "HOST_UNSUPPORTED_TOOL",
+    )
+    # Cursor transports a positive int32 timeout; booleans and fractional values are invalid.
+    if "timeout" in args:
+        timeout = args["timeout"]
+        core.require(type(timeout) is int and 1 <= timeout <= 2147483647, "HOST_UNSUPPORTED_TOOL")
+    # Empty native cwd supplies no override; a supplied directory must stay in this repository.
+    key = "cwd" if "cwd" in args else "working_directory"
+    if key in args:
+        directory = args[key]
+        core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
+        if key == "cwd" and directory == "":
+            return
+        core.require(
+            core.repository(directory)[0] == core.repository(event["cwd"])[0],
+            "REPOSITORY_MISMATCH",
+        )
+
+
 def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> bool:
     """Check native shell arguments before the shared canonical command parser.
 
@@ -1219,7 +1252,7 @@ def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> 
     allowed = (
         {"command", "description", "timeout", "run_in_background"}
         if host == "claude-code"
-        else {"command", "working_directory"}
+        else {"command", "working_directory", "cwd", "timeout"}
     )
     # Reject undocumented native shell arguments.
     if not isinstance(args, dict) or not set(args) <= allowed:
@@ -1230,7 +1263,9 @@ def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> 
     # A native working-directory override cannot redirect the bootstrap to another repository.
     try:
         # Reject working-directory redirects to another repository.
-        if "working_directory" in args and (
+        if host == "cursor":
+            cursor_lifecycle_shell(event, args)
+        elif "working_directory" in args and (
             not isinstance(args["working_directory"], str)
             or core.repository(args["working_directory"])[0] != core.repository(event["cwd"])[0]
         ):

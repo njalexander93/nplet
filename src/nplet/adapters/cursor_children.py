@@ -518,12 +518,7 @@ def recognize_reconcile(event: core.JSONObject) -> tuple[str, str] | None:
         )
         issue, token = core.issue_id(argv[4]), core.token(argv[6])
         core.require(command == reconcile_command(issue, token), "HOST_UNSUPPORTED_TOOL")
-        core.require(set(args) <= {"command", "working_directory"}, "HOST_UNSUPPORTED_TOOL")
-        if "working_directory" in args:
-            core.require(
-                core.repository(args["working_directory"])[0] == core.repository(event["cwd"])[0],
-                "REPOSITORY_MISMATCH",
-            )
+        common.cursor_lifecycle_shell(event, args)
         return issue, token
     except ValueError as error:
         raise core.WorkspaceError("HOST_UNSUPPORTED_TOOL") from error
@@ -809,14 +804,12 @@ def child_lifecycle(event: core.JSONObject) -> bool:
     """
     if event.get("tool_name") != "Shell":
         return False
-    # A child has no generic Shell route, background mode or directory override outside checkout.
+    # Only exact lifecycle commands own transactions; Shell return does not prove their outcome.
     core.require(event.get("child") is True, "NOT_OWNER")
     args = event.get("tool_input")
-    core.require(
-        isinstance(args, dict) and set(args) <= {"command", "working_directory"},
-        "HOST_UNSUPPORTED_TOOL",
-    )
+    core.require(isinstance(args, dict), "HOST_UNSUPPORTED_TOOL")
     assert isinstance(args, dict)
+    common.cursor_lifecycle_shell(event, args)
     command = args.get("command")
     core.require(
         isinstance(command, str) and len(command.encode()) <= 65536, "HOST_UNSUPPORTED_TOOL"
@@ -860,12 +853,6 @@ def child_lifecycle(event: core.JSONObject) -> bool:
         core.repository(request["worktree"])[0] == core.repository(event["cwd"])[0],
         "REPOSITORY_MISMATCH",
     )
-    if "working_directory" in args:
-        core.require(
-            isinstance(args["working_directory"], str)
-            and core.repository(args["working_directory"])[0] == core.repository(event["cwd"])[0],
-            "REPOSITORY_MISMATCH",
-        )
     # Core enforces readiness, digest, provenance and invocation ownership atomically.
     if operation == "update":
         core.require(isinstance(request.get("path"), str), "INVALID_REQUEST")

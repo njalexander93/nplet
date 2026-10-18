@@ -46,7 +46,11 @@ def test_reconcile_command_round_trips_pinned_macos_spelling() -> None:
     """Recognize the one literal parent command without expanding paths or arguments."""
     token = children.call_token("native\ncall")
     command = children.reconcile_command("TEST-1", token)
-    event = {"tool_name": "Shell", "tool_input": {"command": command}, "cwd": str(Path.cwd())}
+    event = {
+        "tool_name": "Shell",
+        "tool_input": {"command": command, "cwd": "", "timeout": 30000},
+        "cwd": str(Path.cwd()),
+    }
     assert children.recognize_reconcile(event) == ("TEST-1", token)
     assert "--call" in command
     assert "--result" not in command
@@ -83,7 +87,11 @@ def test_reconcile_command_rejects_direct_malformed_variants(
     elif variant == "wrong-flag":
         argv[3] = "--child"
     command = shlex.join(argv) + ("\n" if variant == "newline" else "")
-    event = {"tool_name": "Shell", "tool_input": {"command": command}, "cwd": str(Path.cwd())}
+    event = {
+        "tool_name": "Shell",
+        "tool_input": {"command": command, "cwd": "", "timeout": 30000},
+        "cwd": str(Path.cwd()),
+    }
     with pytest.raises(core.WorkspaceError):
         children.recognize_reconcile(event)
 
@@ -987,7 +995,11 @@ def test_child_lifecycle_uses_own_binding_without_parent_assignment(
         "session_id": bound["session_id"],
         "cwd": "/checkout",
         "tool_name": "Shell",
-        "tool_input": {"command": children.common.bootstrap_command(request, "cursor")},
+        "tool_input": {
+            "command": children.common.bootstrap_command(request, "cursor"),
+            "cwd": "",
+            "timeout": 30000,
+        },
     }
     assert children.child_lifecycle(event) is True
     assert children.child_lifecycle({"tool_name": "Read"}) is False
@@ -1059,7 +1071,7 @@ def test_child_lifecycle_rejects_foreign_or_general_shell(
         "session_id": bound["session_id"],
         "cwd": "/checkout",
         "tool_name": "Shell",
-        "tool_input": {"command": command},
+        "tool_input": {"command": command, "cwd": "", "timeout": 30000},
     }
     with pytest.raises(core.WorkspaceError) as error:
         children.child_lifecycle(event)
@@ -1162,7 +1174,7 @@ def test_native_internal_request_denies_before_shell_bootstrap_fallback(
         "cwd": "/checkout",
         "tool_use_id": "tool",
         "tool_name": "Shell",
-        "tool_input": {"command": command},
+        "tool_input": {"command": command, "cwd": "", "timeout": 30000},
     }
     monkeypatch.setattr(
         children.common, "native_bootstrap", lambda *_args, **_kwargs: pytest.fail("fallback")
@@ -1256,7 +1268,9 @@ def test_reconcile_unclosed_quote_denies_instead_of_generic_shell() -> None:
     """Reject a recognizable reconcile entrypoint with broken shell grammar."""
     command = shlex.join([children.common.PYTHON, str(children.ENTRY)]) + " '"
     with pytest.raises(core.WorkspaceError, match="HOST_UNSUPPORTED_TOOL"):
-        children.recognize_reconcile({"tool_name": "Shell", "tool_input": {"command": command}})
+        children.recognize_reconcile(
+            {"tool_name": "Shell", "tool_input": {"command": command, "cwd": "", "timeout": 30000}}
+        )
 
 
 def test_source_transition_exhausts_contention_without_changing_request(

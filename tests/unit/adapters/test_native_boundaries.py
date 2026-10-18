@@ -978,3 +978,51 @@ def test_native_pre_records_only_eligible_tool_after_readiness(
     assert common.native_pre({**event(), "tool_name": "Read", "tool_input": {}}, "cursor") is None
     assert [call["operation"] for call in calls] == ["ready", "tool-start"]
     assert calls[-1]["request_id"] == "pre:tool-1"
+
+
+@pytest.mark.parametrize(
+    ("metadata", "accepted"),
+    [
+        ({"cwd": "", "timeout": 30000}, True),
+        ({"cwd": str(CHECKOUT), "timeout": 1}, True),
+        ({"working_directory": str(CHECKOUT), "timeout": 2147483647}, True),
+        *[
+            ({"timeout": value}, False)
+            for value in (True, False, 0, -1, 1.5, 2147483648, "30000", None)
+        ],
+        ({"cwd": str(OTHER)}, False),
+        ({"cwd": None}, False),
+        ({"cwd": "", "working_directory": str(CHECKOUT)}, False),
+        ({"background": True}, False),
+    ],
+)
+def test_cursor_lifecycle_metadata_preserves_canonical_boundary(
+    monkeypatch: pytest.MonkeyPatch, metadata: dict[str, Any], accepted: bool
+) -> None:
+    """Native transport fields cannot expand exact lifecycle or ordinary Shell authority.
+
+    Args:
+        monkeypatch: Isolate repository lookup and observe canonical parsing.
+        metadata: Native Shell transport fields under test.
+        accepted: Whether those fields fit the verified native schema.
+    """
+    # Separate envelope admission from the mandatory canonical command decision.
+    monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: True)
+    native = {**event(), "tool_input": {"command": "exact-command", **metadata}}
+    assert common.native_bootstrap(native, "cursor", ready=True) is accepted
+    # Accepted metadata never turns an unrecognized command into lifecycle authority.
+    monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: False)
+    assert common.native_bootstrap(native, "cursor", ready=True) is False
+
+
+@pytest.mark.parametrize("metadata", [{"cwd": "", "timeout": 30000}, {"timeout": 30000}])
+def test_cursor_native_timeout_does_not_admit_ordinary_shell(metadata: dict[str, Any]) -> None:
+    """A timeout that can background execution remains outside generic Shell admission.
+
+    Args:
+        metadata: Observed or timeout-only native argument shape.
+    """
+    native = {**event(), "tool_input": {"command": "echo ok", **metadata}}
+    with pytest.raises(core.WorkspaceError, match="HOST_UNSUPPORTED_ASYNC"):
+        common.native_tool(native, "cursor")

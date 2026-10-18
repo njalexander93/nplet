@@ -288,7 +288,7 @@ def own_lifecycle(
         generation=generation,
         tool_name="Shell",
         tool_use_id=raw_tool,
-        tool_input={"command": command},
+        tool_input={"command": command, "cwd": "", "timeout": 30000},
     )
     decision = cursor.handle(native)
     assert decision["permission"] == "allow", decision
@@ -337,7 +337,7 @@ def reconcile_native(case: Fixture, raw_call: str) -> dict:
         "preToolUse",
         tool_name="Shell",
         tool_use_id="reconcile-" + str(uuid.uuid4()),
-        tool_input={"command": command},
+        tool_input={"command": command, "cwd": "", "timeout": 30000},
     )
     decision = cursor.handle(native)
     assert decision["permission"] == "allow", decision
@@ -569,7 +569,7 @@ def test_issue_local_reconcile_ignores_unrelated_corrupt_issue(
             "preToolUse",
             tool_name="Shell",
             tool_use_id="issue-local-reconcile",
-            tool_input={"command": command},
+            tool_input={"command": command, "cwd": "", "timeout": 30000},
         ),
         time.monotonic() + 10,
     )

@@ -628,6 +628,13 @@ completion establish receipts before acknowledgment. A lifecycle `read` returns
 source references; it does not replace source delivery. Use the exposed model Read
 argument `path`; captured hook envelopes use `file_path`.
 
+Exact lifecycle and reconciliation commands accept native `cwd` and positive
+integer `timeout` metadata. Empty `cwd` means no override; nonempty overrides must
+remain in the same repository. The timeout can background execution. These commands
+rely on their checked core transactions, not Shell return, to establish effects.
+After an uncertain return, inspect the original request and committed state before
+retrying. This metadata does not authorize ordinary Shell work.
+
 The adapter does not register `subagentStart` or `subagentStop` hooks. Their opaque
 observations supply no authority or completion evidence. Actual Task admission,
 child tool callbacks and independently verified results own those transitions.
