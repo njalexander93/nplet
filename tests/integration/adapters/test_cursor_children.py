@@ -104,7 +104,7 @@ def cursor_native(
         "generation_id": generation if child else "parent-generation",
         "workspace_roots": [str(case.root)],
         "cwd": str(case.root),
-        "cursor_version": "3.25.6",
+        "cursor_version": "3.25.9",
         "_cursor_deadline": time.monotonic() + 10,
     }
     if parent_call is not None:

@@ -158,7 +158,7 @@ def test_pinned_source_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reader, "APP", Path("/fixture/app"))
     digest = hashlib.sha256(b"source").hexdigest()
     monkeypatch.setattr(reader, "PINS", {"executor_sha256": ("executor", digest)})
-    contents = {"package.json": b'{"version":"3.25.6"}', "executor": b"source"}
+    contents = {"package.json": b'{"version":"3.25.9"}', "executor": b"source"}
     opened = []
 
     def open_source(path: Path, mode: str) -> io.BytesIO:
@@ -181,7 +181,7 @@ def test_pinned_source_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     # Each rejection retains the external boundary; no repair or write is attempted.
     for name, value, code in [
         ("package.json", b"x" * (256 * 1024 + 1), "SIZE_LIMIT"),
-        ("package.json", b'{"version":"other"}', "RESULT_SCHEMA_MISMATCH"),
+        ("package.json", b'{"version":"3.25.6"}', "RESULT_SCHEMA_MISMATCH"),
         ("executor", b"changed", "RESULT_SCHEMA_MISMATCH"),
     ]:
         previous = contents[name]

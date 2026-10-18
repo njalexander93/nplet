@@ -173,7 +173,7 @@ def test_cursor_pins_version_source_and_deadline(
     # Verify a small synthetic installation through the actual streaming hash implementation.
     app = tmp_path / "app"
     app.mkdir()
-    (app / "package.json").write_text(json.dumps({"version": "3.25.6"}))
+    (app / "package.json").write_text(json.dumps({"version": "3.25.9"}))
     (app / "executor.js").write_bytes(b"executor")
     (app / "workbench.js").write_bytes(b"workbench")
     pins = {
@@ -193,7 +193,7 @@ def test_cursor_pins_version_source_and_deadline(
         ("deadline", "BUSY"),
     ):
         (app / "package.json").write_text(
-            json.dumps({"version": "changed" if alteration == "version" else "3.25.6"})
+            json.dumps({"version": "changed" if alteration == "version" else "3.25.9"})
         )
         (app / "executor.js").write_bytes(b"changed" if alteration == "source" else b"executor")
         monkeypatch.setattr(

@@ -187,11 +187,11 @@ DATABASE = Path.home() / "Library/Application Support/Cursor/User/globalStorage/
 PINS = {
     "executor_sha256": (
         "extensions/cursor-agent-exec/dist/main.js",
-        "8b181310e93d99e800f264a0eebcc26710afec5a5d2a4184070eae894de84b4c",
+        "6d13818167a3619794433ca1e1a9b822a7d23aceab98ef6acab110fa3d50991b",
     ),
     "workbench_sha256": (
         "out/vs/workbench/workbench.desktop.main.js",
-        "ccb73f4cbb222e7f137137ec3bfffaff4b40afb211b4bea609ab3130084d30e0",
+        "c999d13ea376bb074a6f269abeb4297d302e2ac76aa8b9cdc4af1e5bb199398b",
     ),
 }
 ROW_LIMIT = 16 * 1024 * 1024
@@ -231,7 +231,7 @@ def pinned_sources(deadline: float) -> core.JSONObject:
     core.require(len(package) <= 256 * 1024, "SIZE_LIMIT")
     manifest = core.strict_json(package)
     core.require(
-        isinstance(manifest, dict) and manifest.get("version") == "3.25.6", "RESULT_SCHEMA_MISMATCH"
+        isinstance(manifest, dict) and manifest.get("version") == "3.25.9", "RESULT_SCHEMA_MISMATCH"
     )
     # Hash fixed source files in bounded chunks; no caller chooses paths or accepted hashes.
     observed: core.JSONObject = {}
