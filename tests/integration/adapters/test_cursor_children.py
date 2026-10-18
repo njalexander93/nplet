@@ -719,3 +719,131 @@ def test_retained_raw_child_cannot_fall_through_to_parent(
     assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in decision["user_message"]
     assert case.state() == before
     assert index.read_bytes() == retained
+
+
+def test_rendered_child_templates_preserve_receipts_and_recover_revision(
+    cursor_case: Fixture,
+) -> None:
+    """Execute rendered schemas through the parser, admission and real lifecycle core.
+
+    Args:
+        cursor_case: Disposable registered Cursor coordinator with synthetic host callbacks.
+    """
+    # Bind an actual scoped child and parse each advisory command without rebuilding its schema.
+    case = cursor_case
+    raw_call = "rendered-guidance-call"
+    planned_task(case, "rendered-guidance", raw_call)
+    path = read_pre(case, raw_call, "rendered-source")
+    event = {
+        "child": True,
+        "cwd": str(case.root),
+        "session_id": case.base["session_id"] + "/agent/" + CHILD,
+    }
+    guidance = children.child_context(event)
+    lines = guidance.splitlines()
+    templates = {
+        name: common.bootstrap_request(
+            lines[lines.index(name + ":") + 1], "cursor", common.PYTHON, common.LIFECYCLE
+        )
+        for name in ("read", "acknowledge", "ready", "diagnose", "update")
+    }
+
+    def execute(request: dict) -> dict:
+        """Admit the substituted exact template and execute its real core request.
+
+        Args:
+            request: Complete advisory template with explicit current substitutions.
+
+        Returns:
+            Actual core result, including expected denials.
+        """
+        # Reparse canonical shell bytes and validate actual child scope before core execution.
+        command = common.bootstrap_command(request, "cursor")
+        parsed = common.bootstrap_request(command, "cursor", common.PYTHON, common.LIFECYCLE)
+        assert parsed == request
+        assert children.child_lifecycle(
+            {**event, "tool_name": "Shell", "tool_input": {"command": command}}
+        )
+        return core.execute(parsed)
+
+    # Missing delivery remains denied; full native source callbacks permit independent ack/ready.
+    packet = case.require_ok(execute(templates["read"]))
+    ack = {
+        **templates["acknowledge"],
+        "expected_revision": packet["revision"],
+        "packet_digest": packet["packet_digest"],
+    }
+    assert execute(ack)["code"] == "SOURCE_DELIVERY_REQUIRED"
+    read_complete(case, raw_call, "rendered-source", path)
+    packet = case.require_ok(execute({**templates["read"], "request_id": str(uuid.uuid4())}))
+    ack.update(expected_revision=packet["revision"], request_id=str(uuid.uuid4()))
+    acknowledged = case.require_ok(execute(ack))
+    ready = case.require_ok(execute(templates["ready"]))
+    assert ready["revision"] == acknowledged["revision"]
+    child = core.participant_key(event | {"host": "cursor"})
+    receipts = case.state()["participants"][child]["cursor_sources"]
+
+    # Interleave another participant's committed event and retry only the intended write.
+    sibling = {"host": "cursor", "session_id": "sibling"}
+    case.call(
+        "scope",
+        expected_revision=ready["revision"],
+        target_participant=core.participant_key(sibling),
+        packet=[],
+        owned_paths=["context/sibling.md"],
+    )
+    attached = case.call("attach", session_id="sibling", binding_generation=None)
+    case.call(
+        "acknowledge",
+        session_id="sibling",
+        binding_generation=attached["binding_generation"],
+        packet_digest=core.sha(core.canonical([])),
+    )
+    case.call(
+        "update",
+        session_id="sibling",
+        binding_generation=attached["binding_generation"],
+        expected_revision=case.state()["revision"],
+        path="context/sibling.md",
+        old_digest=None,
+        content="Sibling result.",
+        provenance={"sources": case.evidence(), "applicability": "test", "status": "verified"},
+    )
+    source = {key: packet["references"][0][key] for key in ("id", "locator", "sha256")}
+    update = {
+        **templates["update"],
+        "expected_revision": ready["revision"],
+        "path": "context/rendered-guidance.md",
+        "content": "Verified assigned result.\n",
+        "provenance": {**templates["update"]["provenance"], "sources": [source]},
+    }
+    assert execute(update)["code"] == "REVISION_CONFLICT"
+    metadata = case.require_ok(execute(templates["diagnose"]))
+    update.update(expected_revision=metadata["revision"], request_id=str(uuid.uuid4()))
+    committed = case.require_ok(execute(update))
+    assert execute(update) == committed
+    assert execute({**update, "content": "Changed uncertain request"})["code"] == "REQUEST_CONFLICT"
+    assert case.state()["participants"][child]["cursor_sources"] == receipts
+    assert (case.root / ".task/TEST-1/context/rendered-guidance.md").read_text() == update[
+        "content"
+    ]
+    assert case.state()["provenance"][update["path"]]["sources"] == [source]
+
+    # Complete schema guidance does not widen ownership or weaken provenance validation.
+    wrong = {
+        **update,
+        "request_id": str(uuid.uuid4()),
+        "expected_revision": committed["revision"],
+        "path": "context/foreign.md",
+    }
+    assert execute(wrong)["code"] == "NOT_OWNER"
+    malformed = {
+        **update,
+        "request_id": str(uuid.uuid4()),
+        "expected_revision": committed["revision"],
+        "old_digest": core.sha(update["content"].encode()),
+        "provenance": {},
+    }
+    assert execute(malformed)["code"] == "EVIDENCE_REQUIRED"
+    assert "A denial does not restart packet/source reads" in guidance
+    assert "never pin the startup revision" in guidance

@@ -862,31 +862,86 @@ def child_lifecycle(event: core.JSONObject) -> bool:
 
 
 def child_context(event: core.JSONObject) -> str:
-    """Deliver the actual child's own canonical packet-read command as advisory context.
+    """Render canonical own requests with explicit result/assignment substitutions.
 
     Args:
         event: Independently bound current child envelope.
 
     Returns:
-        Fixed guidance plus one exact command carrying the actual child identity.
+        Advisory templates carrying actual identity, without granting readiness or ownership.
 
     Raises:
         core.WorkspaceError: Current child binding cannot be recovered.
     """
+    # Retain only the actual child's public lifecycle identity envelope.
     core.require(event.get("child") is True, "NOT_OWNER")
     bound = common.request_for(event, "read", "cursor")
     request = {
         key: value
         for key, value in bound.items()
-        if key in common.COMMON_FIELDS and key != "issue_uuid"
+        if key in common.COMMON_FIELDS and key not in {"issue_uuid", "expected_revision"}
     }
-    command = common.bootstrap_command(request, "cursor")
+    # Render complete schemas; placeholders are replaced before invoking canonical Shell.
+    templates: dict[str, core.JSONObject] = {
+        "read": {},
+        "acknowledge": {
+            "expected_revision": "<LATEST_SUCCESSFUL_REVISION>",
+            "packet_digest": "<RETURNED_PACKET_DIGEST>",
+        },
+        "ready": {},
+        "diagnose": {},
+        "update": {
+            "expected_revision": "<LATEST_SUCCESSFUL_REVISION>",
+            "path": "<EXACT_ASSIGNED_CONTEXT_NOTE_PATH>",
+            "old_digest": None,
+            "content": "<REQUESTED_NOTE_CONTENT>",
+            "provenance": {
+                "sources": [
+                    {
+                        "id": "<REFERENCE_ID>",
+                        "locator": "<REFERENCE_LOCATOR>",
+                        "sha256": "<REFERENCE_SHA256>",
+                    }
+                ],
+                "applicability": "assigned-step",
+                "status": "verified",
+            },
+        },
+    }
+    commands = []
+    for operation, fields in templates.items():
+        command = common.bootstrap_command(
+            {**request, "operation": operation, "request_id": str(uuid.uuid4()), **fields},
+            "cursor",
+        )
+        commands.append(operation + ":\n" + command)
+    # Explain sequencing and recovery without restarting successful delivery after every denial.
     return (
-        "Read your assigned packet with this exact Shell command: "
-        + command
-        + ". Use native Read(path=...) for its exact assigned text sources, then "
-        "acknowledge its packet_digest and ready. Only canonical own lifecycle commands and "
-        "assigned Reads are supported; updates stay inside your owned context notes."
+        "Canonical own Shell templates follow. Replace every <...> before execution; "
+        "preserve the actual identity fields. Use a fresh request_id for each new or changed "
+        "request. If a reply is uncertain, replay the exact same request and ID.\n"
+        "Initially run read once. Retain its references and packet_digest. Use native "
+        "Read(path=...) for each exact assigned source, with no range/limit; relative locators "
+        "resolve under the issue task directory. Source Read callbacks advance revision; "
+        "refresh metadata with read or diagnose after source delivery, before acknowledgment. "
+        "Acknowledge the returned packet_digest "
+        "(not an individual file sha256), then require ready ok:true before update.\n"
+        "For expected_revision use the integer revision from the latest successful lifecycle "
+        "response, including acknowledge/update; never pin the startup revision. On "
+        "REVISION_CONFLICT, refresh metadata with read or diagnose, then retry the intended "
+        "operation with its current revision and a fresh request_id. Preserve completed "
+        "source receipts; do not repeat acknowledgment unless readiness or the packet changed.\n"
+        "For update copy the exact owned context note path from the parent's assignment; "
+        "never choose another context path. old_digest:null is only for an absent note; "
+        "for replacement use its current SHA-256, obtaining exact metadata from the "
+        "coordinator if unavailable. Copy provenance sources as exact id/locator/sha256 "
+        "triples from read references; include each applicable source. Replace content with "
+        "the requested result and choose truthful single-token applicability/status.\n"
+        "A denial does not restart packet/source reads. Follow the exact failure: missing "
+        "source delivery needs that assigned Read; changed scope/source needs coordinator "
+        "refresh. Otherwise stop the denied action and report its code. Do not try Grep, "
+        "unassigned Reads, ordinary Shell, another identity, or a replacement Task. These "
+        "templates grant no authority.\n" + "\n".join(commands)
     )
 
 
