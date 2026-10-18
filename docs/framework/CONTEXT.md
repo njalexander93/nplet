@@ -11,7 +11,7 @@ doc_type: maintenance-contract
 
 ### Rule topics
 
-- [Planning and assignment](../../src/nplet/resources/organization/baseline.md#planning-and-wave-boundaries) · [Model and capacity](../../src/nplet/resources/organization/baseline.md#model-and-capacity-boundaries)
+- [Planning and assignment](../../src/nplet/resources/organization/baseline.md#planning-and-wave-boundaries) · [Work Item Plan](../../src/nplet/resources/organization/baseline.md#work-item-plan-contract) · [Model and capacity](../../src/nplet/resources/organization/baseline.md#model-and-capacity-boundaries)
 - [Authority](../../src/nplet/resources/organization/baseline.md#authority-and-role-boundaries) · [Sources](../../src/nplet/resources/organization/baseline.md#source-authority-and-retrieval)
 - [Context and independence](../../src/nplet/resources/organization/baseline.md#context-and-independent-assurance) · [Assurance ownership](../../src/nplet/resources/organization/baseline.md#assurance-ownership)
 - [Governance and technical ownership](../../src/nplet/resources/organization/baseline.md#governance-and-technical-ownership) · [Handoffs](../../src/nplet/resources/organization/baseline.md#handoffs-and-outcomes)
