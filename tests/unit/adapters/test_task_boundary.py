@@ -1,6 +1,7 @@
 """Verify finite effect contracts independently of lifecycle storage."""
 
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -8,8 +9,56 @@ from nplet.adapters import task_boundary as boundary
 
 pytestmark = pytest.mark.unit
 
+# Freeze the approved provider contract independently of production allowlists.
+REQUIRED_LINEAR_OPERATIONS = frozenset(
+    {
+        "get_issue",
+        "list_issues",
+        "search",
+        "get_project",
+        "list_projects",
+        "get_user",
+        "list_users",
+        "get_team",
+        "list_teams",
+        "get_issue_status",
+        "list_issue_statuses",
+        "list_issue_labels",
+        "list_project_labels",
+        "get_milestone",
+        "list_milestones",
+        "list_cycles",
+        "list_comments",
+        "save_issue",
+        "save_project",
+        "save_comment",
+        "save_issue_label",
+        "save_project_label",
+        "save_milestone",
+    }
+)
+REQUIRED_GITHUB_READS = frozenset(
+    {
+        "fetch_pr",
+        "get_pr_info",
+        "get_pr_diff",
+        "fetch_pr_patch",
+        "list_pr_changed_filenames",
+        "fetch_pr_file_patch",
+        "fetch_pr_comments",
+        "list_pull_request_reviews",
+        "list_pull_request_review_threads",
+    }
+)
 
-@pytest.mark.parametrize("operation", sorted(boundary.LINEAR_OPERATIONS))
+
+def test_provider_inventories_match_the_approved_contract() -> None:
+    """Detect removed required operations and unapproved additions independently."""
+    assert boundary.LINEAR_OPERATIONS == REQUIRED_LINEAR_OPERATIONS
+    assert boundary.GITHUB_READS == REQUIRED_GITHUB_READS
+
+
+@pytest.mark.parametrize("operation", sorted(REQUIRED_LINEAR_OPERATIONS))
 def test_named_linear_operations_are_free(operation: str) -> None:
     """Admit each named parent operation while preserving the child boundary.
 
@@ -44,7 +93,7 @@ def test_unnamed_provider_operations_stay_gated(operation: str) -> None:
     )
 
 
-@pytest.mark.parametrize("operation", sorted(boundary.GITHUB_READS))
+@pytest.mark.parametrize("operation", sorted(REQUIRED_GITHUB_READS))
 @pytest.mark.parametrize("namespace", ["mcp__codex_apps__github_", "mcp__codex_apps__github__"])
 def test_declared_review_reads_have_exact_fields(operation: str, namespace: str) -> None:
     """Cover all nine review reads through both observed native spellings.
@@ -203,6 +252,66 @@ def test_legacy_shell_reads_and_unverified_file_aliases_remain_gated() -> None:
     assert not boundary.task_free(observed, "codex")
     assert boundary.task_free({"tool_name": "Bash", "tool_input": {"command": "pwd"}}, "codex")
     assert boundary.edit_targets("write_file", {"path": "note.md", "content": "prose"}) is None
+
+
+def test_control_roles_survive_external_and_internal_aliases(tmp_path, monkeypatch) -> None:
+    """Keep lexical controls unconditional and detect controls behind ordinary aliases.
+
+    Args:
+        tmp_path: Proven checkout root.
+        monkeypatch: Supply resolved target identities without platform link requirements.
+    """
+    root = tmp_path.resolve()
+    resolve = Path.resolve
+    aliases = {
+        root / ".codex": root.parent / "external",
+        root / ".codex/config.md": root.parent / "external/config.md",
+        root / "notes": root / ".claude",
+        root / "notes/config.md": root / ".claude/config.md",
+    }
+    # Resolve only the observed aliases; checkout discovery retains its actual identity.
+    monkeypatch.setattr(
+        Path, "resolve", lambda path, **kwargs: aliases.get(path, resolve(path, **kwargs))
+    )
+    assert boundary.target_role(str(root), ".codex/config.md", root) == "control"
+    assert boundary.target_role(str(root), "notes/config.md", root) == "control"
+
+
+def test_checkout_anchor_stops_before_resolving_control_descendants(tmp_path, monkeypatch) -> None:
+    """Recognize lexical control ownership without inspecting a failing deeper alias.
+
+    Args:
+        tmp_path: Proven canonical checkout root.
+        monkeypatch: Inject the older runtime's loop-resolution failure.
+    """
+    root = tmp_path.resolve()
+    original_resolve = Path.resolve
+    attempted = []
+
+    def resolve(path, **kwargs):
+        """Record ancestor lookup and reject resolution inside the control directory.
+
+        Args:
+            path: Ancestor considered during checkout discovery.
+            **kwargs: Original pathlib resolution options.
+
+        Returns:
+            The actual resolved ancestor outside the control directory.
+
+        Raises:
+            RuntimeError: If discovery incorrectly resolves a control descendant.
+        """
+        # Model a symlink-loop failure without depending on the interpreter version.
+        attempted.append(path)
+        if path == root / ".codex":
+            raise RuntimeError("symlink loop")
+        return original_resolve(path, **kwargs)
+
+    # Discovery must stop at the checkout before consulting its deeper control alias.
+    monkeypatch.setattr(Path, "resolve", resolve)
+    assert boundary.target_role(str(root), ".codex/config.md", root) == "control"
+    assert root in attempted
+    assert root / ".codex" not in attempted
 
 
 class ReadDirectory:

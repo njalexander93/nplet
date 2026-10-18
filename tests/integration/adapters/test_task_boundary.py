@@ -183,6 +183,79 @@ def test_internal_links_hardlinks_and_executable_notes_remain_protected(checkout
     assert task_boundary.target_role(str(checkout), "program.exe") == "protected"
 
 
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+@pytest.mark.parametrize("layout", ["external-control", "internal-control-alias"])
+def test_ready_hosts_deny_control_aliases_without_changing_state(host: str, layout: str) -> None:
+    """Deny raw control writes even after readiness and through directory aliases.
+
+    Args:
+        host: Native adapter whose process must emit a denial.
+        layout: Lexical external control link or ordinary alias to an internal control.
+    """
+    # Use genuine ready state and unrelated admitted work to expose readiness fallthrough.
+    case = Fixture()
+    case.setUp()
+    case.base["host"] = {"codex": "codex", "claude": "claude-code", "cursor": "cursor"}[host]
+    case.base["coordinator"] = core.participant_key(case.base)
+    try:
+        case.create()
+        case.ready()
+        case.call("tool-start", tool_id="unrelated")
+        # Build real links in both directions across the control ownership boundary.
+        if layout == "external-control":
+            target = case.root.parent / "external"
+            target.mkdir()
+            paths = []
+            for control in (".codex", ".claude", ".cursor", ".agents"):
+                link_directory(case.root / control, target)
+                paths.append(case.root / control / "config.md")
+        else:
+            target = case.root / ".codex"
+            target.mkdir()
+            link_directory(case.root / "notes", target)
+            paths = [case.root / "notes/config.md"]
+        # Preserve target contents and every existing task file before native admission.
+        sentinel = target / "config.md"
+        sentinel.write_text("control sentinel")
+        before = {
+            str(p.relative_to(case.root)): p.read_bytes()
+            for p in (case.root / ".task").rglob("*")
+            if p.is_file()
+        }
+        # Exercise each native process, including Codex's exception-to-denial boundary.
+        for index, path in enumerate(paths):
+            assert task_boundary.target_role(str(case.root), str(path)) == "control"
+            observed = event(
+                case.root,
+                host,
+                "Write",
+                {"file_path": str(path), "content": "blocked"},
+                call="control-" + str(index),
+            )
+            observed.update(session_id="coordinator", conversation_id="coordinator")
+            result = subprocess.run(
+                [sys.executable, "-m", "nplet.adapters." + host],
+                input=json.dumps(observed),
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            response = json.loads(result.stdout)
+            assert not allowed(host, response)
+            assert "NOT_OWNER" in str(response)
+            assert sentinel.read_text() == "control sentinel"
+        # No denied call may append admission, revision or settlement state.
+        after = {
+            str(p.relative_to(case.root)): p.read_bytes()
+            for p in (case.root / ".task").rglob("*")
+            if p.is_file()
+        }
+        assert after == before
+    # Release both registered worktrees even when a native assertion fails.
+    finally:
+        case.doCleanups()
+
+
 def test_pending_ticket_allows_unrelated_work_without_consuming_reservation(checkout: Path) -> None:
     """Keep exact selected-ticket correlation while free administration continues.
 

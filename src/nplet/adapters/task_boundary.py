@@ -160,15 +160,18 @@ def target_role(cwd: str, value: object, root: Path | None = None) -> str:
         path = Path(value)
         path = path if path.is_absolute() else Path(cwd) / path
         # Resolve the checkout alias once, retaining all internal lexical components.
-        anchors = [p for p in reversed(path.parents) if p.resolve() == root]
-        if not anchors:
+        anchor = next((p for p in reversed(path.parents) if p.resolve() == root), None)
+        if anchor is None:
             return "protected"
-        relative = path.relative_to(anchors[0])
+        relative = path.relative_to(anchor)
+        # Lexical control ownership survives links that resolve outside the checkout.
+        if CONTROL_PARTS.intersection(p.lower() for p in relative.parts):
+            return "control"
         lexical = root / relative
         actual = lexical.resolve(strict=False)
         relatives = (relative, actual.relative_to(root))
-        # Control stores never become raw notes, including through aliases.
-        if any(CONTROL_PARTS.intersection(p.lower() for p in rel.parts) for rel in relatives):
+        # An ordinary lexical alias cannot hide a resolved control-store target.
+        if CONTROL_PARTS.intersection(p.lower() for p in relatives[1].parts):
             return "control"
         # A protected lexical role cannot be erased by an internal symlink or traversal.
         for rel in relatives:
