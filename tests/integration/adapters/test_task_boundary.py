@@ -301,6 +301,92 @@ def test_pending_ticket_allows_unrelated_work_without_consuming_reservation(chec
     assert after == before
 
 
+@pytest.mark.parametrize("route", ["archive", "spawn", "control"])
+def test_pending_new_task_fences_codex_special_routes_without_state_changes(route: str) -> None:
+    """Retain the old ready binding and pending work while blocking special mutations.
+
+    Args:
+        route: Real archive-provider or collaboration admission route.
+    """
+    # Keep a ready issue with a real frozen archive request and unrelated pending work.
+    case = Fixture()
+    case.setUp()
+    try:
+        case.create()
+        case.ready()
+        export = case.call("archive-prepare", expected_revision=case.state()["revision"])
+        case.call("tool-start", tool_id="unrelated")
+        codex.handle(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": str(case.root),
+                "session_id": "coordinator",
+                "prompt": "Task: TEST-2",
+            }
+        )
+        before = {
+            str(p.relative_to(case.root)): p.read_bytes()
+            for p in (case.root / ".task").rglob("*")
+            if p.is_file()
+        }
+        tools = {
+            "archive": ("mcp__codex_apps__linear_save_document", export["parts"][0]),
+            "spawn": ("spawn_agent", {"message": "bounded reader", "fork_context": False}),
+            "control": ("collaborationlist_agents", {}),
+        }
+        tool, args = tools[route]
+        observed = event(case.root, "codex", tool, args, call="blocked-" + route)
+        observed["session_id"] = "coordinator"
+        # Native denial must precede archive uncertainty or child pending/receipt mutation.
+        assert codex.handle(observed) == codex.denial("TICKET_READ_REQUIRED")
+        after = {
+            str(p.relative_to(case.root)): p.read_bytes()
+            for p in (case.root / ".task").rglob("*")
+            if p.is_file()
+        }
+        assert after == before
+    # Preserve normal fixture cleanup even when the regression exposes admission.
+    finally:
+        case.doCleanups()
+
+
+def test_update_patch_end_of_file_admits_notes_but_not_mixed_source(checkout: Path) -> None:
+    """Keep valid note update patches task-free without discarding other protected targets.
+
+    Args:
+        checkout: Real unregistered repository.
+    """
+    # A valid native update marker does not introduce a new target or implementation effect.
+    note = checkout / "notes/note.md"
+    note.parent.mkdir()
+    note.write_text("old\n")
+    patch = (
+        "*** Begin Patch\n*** Update File: notes/note.md\n@@\n-old\n+new\n"
+        "*** End of File\n*** End Patch"
+    )
+    observed = event(checkout, "codex", "apply_patch", {"command": patch})
+    assert codex.handle(observed) == {}
+    # Moving or updating a protected target gates the entire call, preserving both files.
+    source = checkout / "src/app.py"
+    source.parent.mkdir()
+    source.write_text("old\n")
+    mixed_update = patch.replace(
+        "*** End Patch",
+        "*** Update File: src/app.py\n@@\n-old\n+new\n*** End of File\n*** End Patch",
+    )
+    mixed_move = patch.replace(
+        "*** Update File: notes/note.md",
+        "*** Update File: notes/note.md\n*** Move to: src/app.py",
+    )
+    for mixed in (mixed_update, mixed_move):
+        with pytest.raises(core.WorkspaceError) as failure:
+            codex.handle({**observed, "tool_input": {"command": mixed}})
+        assert failure.value.code in {"REGISTRATION_REQUIRED", "BINDING_MISSING"}
+    assert note.read_text() == "old\n"
+    assert source.read_text() == "old\n"
+    assert not (checkout / ".task").exists()
+
+
 def test_completion_uses_recorded_admission_after_target_changes() -> None:
     """Settle an admitted source call after its target becomes ordinary prose.
 
@@ -453,8 +539,9 @@ def test_free_work_preserves_bound_pending_or_stale_state(host: str, condition: 
             adapter.handle(prompt)
         else:
             required = case.root / "required.md"
-            required.write_text("original required source")
-            required.chmod(0o600)
+            # The native writer establishes safe source permissions, including Windows ACLs.
+            with core.Directory.absolute(required.parent) as parent:
+                parent.write(required.name, b"original required source")
             packet = [
                 {
                     "id": "required",
@@ -475,6 +562,8 @@ def test_free_work_preserves_bound_pending_or_stale_state(host: str, condition: 
             )
             case.call("acknowledge", packet_digest=core.sha(core.canonical(packet)))
             required.write_text("changed required source")
+            # Preserve readable ownership: later staleness must reflect changed bytes.
+            assert core.external_source(str(required)) == b"changed required source"
         before = {
             str(p.relative_to(case.root)): p.read_bytes()
             for p in (case.root / ".task").rglob("*")

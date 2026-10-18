@@ -257,7 +257,7 @@ def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
                 ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
             ):
                 targets.append(line.split(": ", 1)[1])
-            elif line.startswith("*** "):
+            elif line.startswith("*** ") and line != "*** End of File":
                 return None
         return targets or None
     return None

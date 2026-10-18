@@ -491,25 +491,9 @@ def handle(event: core.JSONObject) -> core.JSONObject:
             if startup_lookup_state(event, ".lookup-required.json"):
                 return denial("TICKET_READ_REQUIRED")
             return {}
-        # Provider gates validate pending external reads before ordinary work.
-        try:
-            # Allow the exact pending archive provider call only after gate validation.
-            if provider_gate(event):
-                # Admit only the correlated provider call.
-                return {}
-        except core.WorkspaceError:
-            # Ordinary readiness evaluation supplies the final denial.
-            pass
         tool = event.get("tool_name", "")
-        # Native launch receipts admit readers only; coordinator scope remains explicit.
-        if tool in codex_children.SPAWN_TOOLS:
-            codex_children.admit_spawn(codex_children.identity(event))
-            return {}
-        if tool in codex_children.CONTROLS:
-            codex_children.admit_control(codex_children.identity(event))
-            return {}
         # Deny covered child creation until host child identity can be verified.
-        if any(
+        if tool not in codex_children.SPAWN_TOOLS | codex_children.CONTROLS and any(
             s in tool
             for s in (
                 "multi_agent_v1",
@@ -539,6 +523,22 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         core.require("control" not in roles, "NOT_OWNER")
         if startup_lookup_state(event, ".lookup-required.json"):
             return denial("TICKET_READ_REQUIRED")
+        # Specialized mutation admission must also respect the pending ticket fence.
+        try:
+            # Allow the exact pending archive provider call only after gate validation.
+            if provider_gate(event):
+                # Admit only the correlated provider call.
+                return {}
+        except core.WorkspaceError:
+            # Ordinary readiness evaluation supplies the final denial.
+            pass
+        # Native launch receipts admit readers only; coordinator scope remains explicit.
+        if tool in codex_children.SPAWN_TOOLS:
+            codex_children.admit_spawn(codex_children.identity(event))
+            return {}
+        if tool in codex_children.CONTROLS:
+            codex_children.admit_control(codex_children.identity(event))
+            return {}
         # Build the request from explicit caller or observed session identities.
         request = request_for(event, "ready")
         result = core.execute(request)

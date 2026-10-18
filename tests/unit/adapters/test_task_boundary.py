@@ -641,6 +641,22 @@ def test_file_edit_shapes_enumerate_all_targets() -> None:
     )
 
 
+def test_update_patch_end_of_file_marker_preserves_exact_targets() -> None:
+    """Recognize the valid update marker without ignoring unknown patch headers."""
+    # The native patch parser accepts this exact end-of-file update syntax.
+    patch = (
+        "*** Begin Patch\n*** Update File: notes/note.md\n@@\n-old\n+new\n"
+        "*** End of File\n*** End Patch"
+    )
+    assert boundary.edit_targets("apply_patch", {"command": patch}) == ["notes/note.md"]
+    assert (
+        boundary.edit_targets(
+            "apply_patch", {"command": patch.replace("*** End of File", "*** Unknown Header")}
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     "words",
     [

@@ -598,6 +598,49 @@ def test_codex_pretool_admits_exact_provider_gate_without_tool_start(
     )
 
 
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "mcp__codex_apps__linear_save_document",
+        "spawn_agent",
+        "collaborationlist_agents",
+        "multi_agent_v1send_input",
+    ],
+)
+def test_pending_ticket_fences_special_mutation_routes_before_admission(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    """Prevent special archive and collaboration routes bypassing the new Task fence.
+
+    Args:
+        monkeypatch: Isolate route admission while retaining the real dispatch order.
+        tool: Protected route that previously returned before the lookup fence.
+    """
+    from unittest.mock import Mock
+
+    # A new Task awaits its exact ticket; no special mutation admission may run.
+    monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
+    monkeypatch.setattr(codex.common, "preparation_tool", lambda *_args: False)
+    monkeypatch.setattr(codex, "diagnostic_bootstrap", lambda *_args: False)
+    monkeypatch.setattr(codex, "bootstrap", lambda *_args, **_kwargs: False)
+    provider = Mock(return_value=True)
+    spawn, control = Mock(), Mock()
+    monkeypatch.setattr(codex, "provider_gate", provider)
+    monkeypatch.setattr(codex.codex_children, "admit_spawn", spawn)
+    monkeypatch.setattr(codex.codex_children, "admit_control", control)
+    observed = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "parent",
+        "tool_use_id": "protected",
+        "tool_name": tool,
+        "tool_input": {},
+    }
+    assert codex.handle(observed) == codex.denial("TICKET_READ_REQUIRED")
+    provider.assert_not_called()
+    spawn.assert_not_called()
+    control.assert_not_called()
+
+
 def test_codex_pretool_records_ready_tool_or_exact_core_denial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
