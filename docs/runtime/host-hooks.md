@@ -646,6 +646,13 @@ and source acknowledgment. Old callbacks cannot revive its earlier authority.
 Missing or unsupported results remain unresolved; neither elapsed time nor an idle
 UI establishes completion. Existing issue transactions provide crash recovery.
 
+When a retained version-2 child index exists, its known raw-session children are
+rejected before parent fallback, regardless of retained status. The adapter reads
+that index without rewriting or retiring it. Malformed index data fails closed.
+This guard does not identify unclaimed returned children missing from the index,
+preserve old child operations, or establish safe installation over a legacy runtime.
+A supported transition remains necessary before live cutover.
+
 Native classification still searches registered issue metadata when the envelope
 cannot directly locate its parent-qualified child binding. Consequently an unrelated
 unreadable issue can still block the whole hook path, even though reconciliation's

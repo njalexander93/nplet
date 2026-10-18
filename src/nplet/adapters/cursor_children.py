@@ -273,6 +273,25 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
         store.control.child("cursor-children", True) as mutex,
         mutex.lock(),
     ):
+        # Retained raw-session children must not acquire ordinary parent authority.
+        if mutex.exists("index.json"):
+            legacy = mutex.json("index.json")
+            core.require(
+                isinstance(legacy, dict)
+                and type(legacy.get("schema_version")) is int
+                and legacy["schema_version"] == 2
+                and isinstance(legacy.get("children"), dict)
+                and all(
+                    core.DIGEST.fullmatch(key) and isinstance(value, dict)
+                    for key, value in legacy["children"].items()
+                ),
+                "INTEGRITY_ERROR",
+            )
+            core.require(
+                core.participant_key({"host": "cursor", "session_id": conversation})
+                not in legacy["children"],
+                "HOST_UNSUPPORTED_CHILD_IDENTITY",
+            )
         # Explicit parent call selects one retained invocation, including retired attempts.
         if parent_call is not None:
             token = call_token(parent_call)

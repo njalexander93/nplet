@@ -218,6 +218,7 @@ def cursor_mock_store(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, Magic
     store.issues.child.return_value.__enter__.return_value = control
     mutex = MagicMock()
     mutex.lock.return_value = nullcontext()
+    mutex.exists.return_value = False
     store.control.child.return_value.__enter__.return_value = mutex
     manager = MagicMock()
     manager.__enter__.return_value = store
@@ -1462,3 +1463,41 @@ def test_reconcile_module_entrypoint_rejects_unsupported_argv(
         capsys.readouterr().out
         == core.canonical({"ok": False, "code": "INVALID_REQUEST"}).decode() + "\n"
     )
+
+
+@pytest.mark.parametrize(
+    "legacy",
+    [
+        [],
+        {"schema_version": 1, "children": {}},
+        {"schema_version": 2, "children": []},
+        {"schema_version": 2, "children": {"bad-key": {}}},
+        {"schema_version": 2, "children": {"a" * 64: None}},
+    ],
+)
+def test_malformed_retained_index_cannot_allow_parent_fallback(
+    monkeypatch: pytest.MonkeyPatch, legacy: object
+) -> None:
+    """Reject malformed retained identity controls before discovery or new authority.
+
+    Args:
+        monkeypatch: Isolates the retained filesystem snapshot boundary.
+        legacy: Invalid persisted child-index structure.
+    """
+    store, _ = cursor_mock_store(monkeypatch)
+    mutex = store.control.child.return_value.__enter__.return_value
+    mutex.exists.return_value = True
+    mutex.json.return_value = legacy
+    monkeypatch.setattr(children, "registration", lambda _cwd: {"repo_id": "repo"})
+    monkeypatch.setattr(
+        children.common,
+        "native_identity",
+        lambda event, _host: {**event, "session_id": event["conversation_id"]},
+    )
+    census = MagicMock()
+    monkeypatch.setattr(children, "census", census)
+    # A bad index is not equivalent to an absent index or an unknown parent.
+    with pytest.raises(core.WorkspaceError, match="INTEGRITY_ERROR"):
+        children.normalize({"conversation_id": "parent", "cwd": "/checkout"}, time.monotonic() + 1)
+    census.assert_not_called()
+    mutex.put.assert_not_called()

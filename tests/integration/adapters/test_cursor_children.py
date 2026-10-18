@@ -660,3 +660,62 @@ def test_issue_local_reconcile_refuses_foreign_issue_and_unknown_call(
         children.reconcile(str(case.root), issue_id, unknown, time.monotonic() + 10)
     assert case.state() == before
     assert token in before["participants"][case.base["coordinator"]]["pending"]
+
+
+@pytest.mark.parametrize("status", ["claimed", "closed"])
+def test_retained_raw_child_cannot_fall_through_to_parent(
+    cursor_case: Fixture, status: str
+) -> None:
+    """Preserve legacy identity fences without changing retained state or granting effects.
+
+    Args:
+        cursor_case: Disposable current-core repository with a raw-session legacy participant.
+        status: Retained status cannot make a known child eligible for parent authority.
+    """
+    case = cursor_case
+    key = core.participant_key({"host": "cursor", "session_id": CHILD})
+    # Model the old binding shape through supported core operations in this disposable store.
+    case.call(
+        "scope",
+        expected_revision=case.state()["revision"],
+        target_participant=key,
+        packet=[],
+        owned_paths=["context/legacy.md"],
+    )
+    joined = case.call(
+        "attach",
+        session_id=CHILD,
+        binding_generation=None,
+        expected_revision=case.state()["revision"],
+    )
+    case.call(
+        "acknowledge",
+        session_id=CHILD,
+        binding_generation=joined["binding_generation"],
+        packet_digest=core.sha(core.canonical([])),
+    )
+    directory = case.root / ".task/.control/cursor-children"
+    directory.mkdir(exist_ok=True)
+    index = directory / "index.json"
+    retained = core.canonical(
+        {
+            "schema_version": 2,
+            "children": {key: {"call_id": children.call_token("legacy-task"), "status": status}},
+        }
+    )
+    index.write_bytes(retained)
+    before = case.state()
+    # Omitted native child markers must not turn the ready raw binding into a parent Read.
+    event = cursor_native(
+        case,
+        "preToolUse",
+        child=True,
+        tool_name="Read",
+        tool_use_id="legacy-outside-read",
+        tool_input={"file_path": "/outside/assigned/packet"},
+    )
+    decision = cursor.handle(event)
+    assert decision["permission"] == "deny"
+    assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in decision["user_message"]
+    assert case.state() == before
+    assert index.read_bytes() == retained
