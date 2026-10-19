@@ -377,7 +377,7 @@ def existing_admission(event: core.JSONObject, host: str) -> core.JSONObject | N
     # Translate native polling shape; storage and lock ownership remain inside the core.
     tool_id = native_token(event.get("tool_use_id"))
     polling = event.get("tool_name") == "write_stdin"
-    return core._existing_tool_request(
+    return core.existing_tool_request(
         {
             "schema_version": 1,
             "operation": "tool-complete",
@@ -1437,6 +1437,34 @@ def native_tool(event: core.JSONObject, host: str) -> str:
     return tool
 
 
+def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
+    """Validate native inputs and expose only documented shell effects to policy.
+
+    Args:
+        event: Identity-validated native envelope, retained unchanged for correlation.
+        host: Explicit adapter identity. Codex retains its exact command-only policy.
+
+    Returns:
+        A copied canonical Bash effect for validated Claude Bash or Cursor Shell;
+        otherwise the original event, including all Codex input metadata.
+
+    Raises:
+        core.WorkspaceError: If Claude or Cursor native tool validation fails.
+    """
+    # Codex has its own admission boundary; do not strip its unsupported shell metadata.
+    if host == "codex":
+        return event
+    tool = native_tool(event, host)
+    # Normalize only the foreground shell shape verified by the selected native host.
+    if (host, tool) in {("claude-code", "Bash"), ("cursor", "Shell")}:
+        return {
+            **event,
+            "tool_name": "Bash",
+            "tool_input": {"command": event["tool_input"]["command"]},
+        }
+    return event
+
+
 def native_pre(event: core.JSONObject, host: str) -> None:
     """Enforce readiness and record supported native tool admission.
 
@@ -1459,7 +1487,8 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         result = core.execute(request_for(event, "ready", host))
         core.require(result["ok"], result["code"])
         return
-    tool = native_tool(event, host)
+    effect = native_effect(event, host)
+    tool = event["tool_name"]
     # Validated parent reads, planning and notes need no task lifecycle admission.
     operation = (
         tool[4:]
@@ -1467,16 +1496,6 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         else _linear_provider_tool(event, host)
     )
     roles = task_boundary.edit_roles(event)
-    # Strip only native shell metadata already validated for foreground/configuration/checkout.
-    effect = (
-        {
-            **event,
-            "tool_name": "Bash",
-            "tool_input": {"command": event["tool_input"]["command"]},
-        }
-        if tool in {"Bash", "Shell"}
-        else event
-    )
     if (
         host == "claude-code"
         and tool

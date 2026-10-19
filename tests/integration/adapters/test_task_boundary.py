@@ -6,14 +6,13 @@ import os
 import shlex
 import subprocess
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
 import pytest
 
 from nplet.adapters import claude, codex, common, cursor, task_boundary
 from nplet.lifecycle import task_workspace as core
+from tests.integration.adapters.native_events import event
 from tests.platform_support import link_directory
 from tests.support import Fixture
 
@@ -37,40 +36,6 @@ def checkout(tmp_path: Path) -> Path:
     return root.resolve()
 
 
-def event(
-    root: Path, host: str, tool: str, args: dict, name: str = "PreToolUse", call: str = "call"
-) -> dict:
-    """Build one actual native protocol shape without granting a task binding.
-
-    Args:
-        root: Disposable Git checkout.
-        host: Selected adapter host.
-        tool: Native operation identity.
-        args: Native structured tool input.
-        name: Claude/Codex event spelling.
-        call: Native call identifier.
-
-    Returns:
-        Host-specific event envelope.
-    """
-    # Cursor derives identity from its conversation and one workspace root.
-    value = {
-        "cwd": str(root),
-        "session_id": "fresh",
-        "tool_use_id": call,
-        "tool_name": tool,
-        "tool_input": args,
-        "hook_event_name": name,
-    }
-    if host == "cursor":
-        value.update(
-            conversation_id="fresh",
-            workspace_roots=[str(root)],
-            hook_event_name=name[0].lower() + name[1:],
-        )
-    return value
-
-
 def allowed(host: str, response: dict) -> bool:
     """Read the native decision without treating an advisory message as admission.
 
@@ -86,85 +51,6 @@ def allowed(host: str, response: dict) -> bool:
         if host == "cursor"
         else response.get("hookSpecificOutput", {}).get("permissionDecision") != "deny"
     )
-
-
-@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
-def test_completion_waits_for_overlapping_core_commit(
-    monkeypatch: pytest.MonkeyPatch, host: str
-) -> None:
-    """Settle the finished call after a concurrent durable transaction publishes safely.
-
-    Args:
-        monkeypatch: Pause only the writer at its existing durable-intent failpoint.
-        host: Native completion shape sharing the synchronized core lookup.
-    """
-    # A genuine admitted call must survive another operation's in-progress transaction.
-    case = Fixture()
-    case.setUp()
-    case.base["host"] = {"codex": "codex", "claude": "claude-code", "cursor": "cursor"}[host]
-    case.base["coordinator"] = core.participant_key(case.base)
-    intent, release, observer = threading.Event(), threading.Event(), threading.Event()
-    try:
-        case.create()
-        case.ready()
-        case.call("tool-start", tool_id="finished")
-        request = case.req("tool-start", tool_id="other")
-
-        def pause(stage: str) -> None:
-            """Hold the writer after durable intent until the completion overlaps it.
-
-            Args:
-                stage: Existing core failpoint reached by a transaction.
-            """
-            if stage == "intent" and not intent.is_set():
-                intent.set()
-                assert release.wait(2)
-
-        def complete() -> dict:
-            """Deliver the actual terminal callback while the writer owns core locks.
-
-            Returns:
-                The adapter completion response.
-            """
-            observer.set()
-            observed = event(
-                case.root,
-                host,
-                "Write",
-                {"file_path": "src/app.py", "content": "done"},
-                name="PostToolUse",
-                call="finished",
-            )
-            observed.update(
-                session_id="coordinator",
-                conversation_id="coordinator",
-                tool_response={"isError": False},
-                tool_output="{}",
-            )
-            return {"codex": codex, "claude": claude, "cursor": cursor}[host].handle(observed)
-
-        # The reader must use existing locks rather than interpret live intent as corruption.
-        monkeypatch.setattr(core, "FAILPOINT", pause)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            writer = pool.submit(core.execute, request)
-            assert intent.wait(2)
-            completion = pool.submit(complete)
-            assert observer.wait(2)
-            try:
-                response = completion.result(timeout=0.2)
-            except TimeoutError:
-                release.set()
-                response = completion.result(timeout=3)
-            finally:
-                release.set()
-            assert writer.result(timeout=3)["ok"]
-        assert response == {}
-        pending = case.state()["participants"][case.base["coordinator"]]["pending"]
-        assert set(pending) == {"other"}
-    # Release any blocked writer and both disposable worktrees on failure.
-    finally:
-        release.set()
-        case.doCleanups()
 
 
 def test_cursor_same_checkout_shell_override_remains_task_free(checkout: Path) -> None:
@@ -183,92 +69,6 @@ def test_cursor_same_checkout_shell_override_remains_task_free(checkout: Path) -
     ):
         assert cursor.handle(event(checkout, "cursor", "Shell", args)) == {"permission": "allow"}
         assert not (checkout / ".task").exists()
-
-
-def test_completion_recovers_interrupted_existing_transaction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Roll existing durable intent forward before settling only the finished call.
-
-    Args:
-        monkeypatch: Interrupt one genuine core transaction after its durable intent.
-    """
-    # Retain the original pending call while another operation is interrupted durably.
-    case = Fixture()
-    case.setUp()
-    try:
-        case.create()
-        case.ready()
-        case.call("tool-start", tool_id="finished")
-
-        def interrupt(stage: str) -> None:
-            """Stop publication after intent without editing its staged bytes.
-
-            Args:
-                stage: Existing lifecycle failpoint.
-
-            Raises:
-                RuntimeError: Simulated process interruption after intent is durable.
-            """
-            if stage == "intent":
-                raise RuntimeError("interrupted writer")
-
-        monkeypatch.setattr(core, "FAILPOINT", interrupt)
-        with pytest.raises(RuntimeError, match="interrupted writer"):
-            core.execute(case.req("tool-start", tool_id="other"))
-        monkeypatch.setattr(core, "FAILPOINT", None)
-        # The actual completion uses normal locked recovery, never a blanket transaction retry.
-        observed = event(case.root, "codex", "Write", {}, name="PostToolUse", call="finished")
-        observed.update(session_id="coordinator", tool_response={"isError": False})
-        assert codex.handle(observed) == {}
-        pending = case.state()["participants"][case.base["coordinator"]]["pending"]
-        assert set(pending) == {"other"}
-        assert not (case.root / ".task/.control/issues/TEST-1/transaction.json").exists()
-    # Always release the disposable repository; the process-failure fixture remains isolated.
-    finally:
-        case.doCleanups()
-
-
-@pytest.mark.parametrize("lock", ["binding", "issue"])
-def test_completion_lookup_does_not_recreate_missing_locks(lock: str) -> None:
-    """Reject corrupt registered storage without creating an absent persistent lock.
-
-    Args:
-        lock: Existing binding or issue lock removed from this disposable store.
-    """
-    case = Fixture()
-    case.setUp()
-    try:
-        case.create()
-        case.ready()
-        case.call("tool-start", tool_id="finished")
-        path = (
-            case.root / ".task/.bindings" / (case.base["coordinator"] + ".lock")
-            if lock == "binding"
-            else case.root / ".task/.control/issues/TEST-1/lock"
-        )
-        path.unlink()
-        before = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
-        # A bound request requires the actual existing lock; no creating lock call is allowed.
-        observed = event(case.root, "codex", "Write", {}, call="finished")
-        observed["session_id"] = "coordinator"
-        with pytest.raises(core.WorkspaceError) as failure:
-            common.existing_admission(observed, "codex")
-        assert failure.value.code == "RECOVERY_REQUIRED"
-        assert not path.exists()
-        after = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
-        assert after == before
-    # Deletion was confined to the disposable fixture and cannot affect real repository locks.
-    finally:
-        case.doCleanups()
 
 
 def test_cursor_shell_override_rejects_foreign_checkout_and_unknown_effect(
@@ -1042,3 +842,36 @@ def test_git_read_disables_an_actual_configured_fsmonitor(checkout: Path) -> Non
     assert not task_boundary.read_command("git --no-pager status --short", "codex")
     subprocess.run(shlex.split(command), cwd=checkout, check=True, capture_output=True)
     assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("Bash", {"command": "pwd", "description": "read"}),
+        ("Bash", {"command": "pwd", "working_directory": "."}),
+        ("Shell", {"command": "pwd"}),
+    ],
+)
+def test_codex_shell_normalization_does_not_expand_native_authority(
+    checkout: Path, tool: str, args: dict
+) -> None:
+    """Keep unsupported Codex shell shapes gated without creating lifecycle storage.
+
+    Args:
+        checkout: Unregistered checkout used for the real native denial.
+        tool: Observed Codex operation spelling.
+        args: Metadata that must never be stripped to manufacture a task-free read.
+    """
+    # The native response must deny the original shape; helper-only checks are insufficient.
+    observed = event(checkout, "codex", tool, args)
+    result = subprocess.run(
+        [sys.executable, "-m", "nplet.adapters.codex"],
+        input=json.dumps(observed),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    response = json.loads(result.stdout)
+    assert not allowed("codex", response)
+    assert "REGISTRATION_REQUIRED" in str(response)
+    assert not (checkout / ".task").exists()

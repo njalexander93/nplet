@@ -247,23 +247,28 @@ class Directory:
         entry_name(name)
         # Set the monotonic deadline for bounded lock acquisition.
         end = time.monotonic() + timeout
-        # Read-only admission lookup must never publish a missing persistent lock.
-        if not create:
-            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
-        # Retry until success or the bounded deadline is reached.
-        while create:
-            try:
-                fd = os.open(
-                    name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd
-                )
-                os.fsync(self.fd)
-                break
-            except FileExistsError:
+        # Creating operations retry racing opens; admission lookup cannot publish a lock.
+        if create:
+            while True:
                 try:
-                    fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+                    fd = os.open(
+                        name,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=self.fd,
+                    )
+                    os.fsync(self.fd)
                     break
-                except FileNotFoundError:
-                    require(time.monotonic() < end, "BUSY")
+                except FileExistsError:
+                    try:
+                        fd = os.open(
+                            name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd
+                        )
+                        break
+                    except FileNotFoundError:
+                        require(time.monotonic() < end, "BUSY")
+        else:
+            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
         try:
             s = os.fstat(fd)
             require(

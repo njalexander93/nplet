@@ -539,6 +539,28 @@ def register(request: JSONObject) -> JSONObject:
     return {"ok": True, "code": "REGISTERED", **identity}
 
 
+def _validate_registration_identity(
+    registration: JSONObject, common: Path, trees: list[Path]
+) -> None:
+    """Require registration to name this checkout's actual shared Git repository.
+
+    Args:
+        registration: Parsed registration from the validated local task directory.
+        common: Actual shared Git metadata directory.
+        trees: Canonical worktrees discovered from Git, main worktree first.
+
+    Raises:
+        WorkspaceError: If shared metadata or main-worktree identity differs.
+        KeyError: If required registration fields are missing.
+    """
+    require(
+        str(common) == registration["common"]
+        and fs_identity(common) == registration["common_identity"]
+        and Path(registration["main"]) == trees[0],
+        "REPOSITORY_MISMATCH",
+    )
+
+
 class Store:
     """Own validated descriptors connecting one worktree to its shared task store."""
 
@@ -566,12 +588,7 @@ class Store:
             self.registration = self.local.json(".repository.json")
             reg = self.registration
             require(request.get("repo_id") == reg["repo_id"], "REPOSITORY_MISMATCH")
-            require(
-                str(common) == reg["common"]
-                and fs_identity(common) == reg["common_identity"]
-                and Path(reg["main"]) == trees[0],
-                "REPOSITORY_MISMATCH",
-            )
+            _validate_registration_identity(reg, common, trees)
             self.main = self.keep(Directory.absolute(reg["main"]))
             require(self.main.identity == reg["main_identity"], "REPOSITORY_MISMATCH")
             self.task = self.keep(self.main.child(".task"))
@@ -2903,7 +2920,7 @@ def permission_paths(request: JSONObject) -> list[str]:
     return paths
 
 
-def _existing_tool_request(
+def existing_tool_request(
     request: JSONObject, tool_id: str, *, polling: bool = False, poll_handle: object = None
 ) -> JSONObject | None:
     """Select existing admission under core locks without creating absent storage.
@@ -2937,12 +2954,7 @@ def _existing_tool_request(
                 return None
             registration = local.json(".repository.json")
             # Even an unbound registered session must reject foreign repository identity.
-            require(
-                str(common) == registration["common"]
-                and fs_identity(common) == registration["common_identity"]
-                and Path(registration["main"]) == trees[0],
-                "REPOSITORY_MISMATCH",
-            )
+            _validate_registration_identity(registration, common, trees)
             if not local.exists(".bindings"):
                 return None
             with local.child(".bindings") as bindings:
@@ -2958,6 +2970,7 @@ def _existing_tool_request(
             if binding is None:
                 return None
             request.update(binding)
+            # Binding JSON also carries repo_id; retain the canonical registered identity.
             request["repo_id"] = store.registration["repo_id"]
             identifier = issue_id(request["issue_id"])
             require(store.issues.exists(identifier), "RECOVERY_REQUIRED")

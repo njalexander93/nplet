@@ -1013,3 +1013,69 @@ def test_native_pre_records_only_eligible_tool_after_readiness(
     assert common.native_pre({**event(), "tool_name": "Write", "tool_input": {}}, "cursor") is None
     assert [call["operation"] for call in calls] == ["ready", "tool-start"]
     assert calls[-1]["request_id"] == "pre:tool-1"
+
+
+@pytest.mark.parametrize(
+    ("host", "tool", "args", "free"),
+    [
+        ("claude-code", "Bash", {"command": "pwd", "description": "read", "timeout": 10}, True),
+        ("cursor", "Shell", {"command": "pwd", "working_directory": str(CHECKOUT)}, True),
+        ("cursor", "Read", {"file_path": "notes/plan.md"}, True),
+        ("codex", "Bash", {"command": "pwd"}, True),
+        ("codex", "Bash", {"command": "pwd", "description": "read"}, False),
+        ("codex", "Shell", {"command": "pwd"}, False),
+    ],
+)
+def test_native_effect_preserves_original_and_exact_host_authority(
+    monkeypatch: pytest.MonkeyPatch, host: str, tool: str, args: dict, free: bool
+) -> None:
+    """Normalize verified native metadata without expanding Codex shell admission.
+
+    Args:
+        monkeypatch: Supply only validated checkout and foreground host configuration.
+        host: Native adapter whose input schema controls normalization.
+        tool: Observed native operation.
+        args: Original native payload, including metadata when documented.
+        free: Expected task-free read decision after normalization.
+    """
+    # Count real native validation and preserve original input for later correlation.
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
+    monkeypatch.setattr(core, "repository", lambda _path: (CHECKOUT, CHECKOUT, [CHECKOUT]))
+    validate = common.native_tool
+    calls = []
+
+    def checked(observed: dict, native_host: str) -> str:
+        """Retain real shape validation and count boundary calls.
+
+        Args:
+            observed: Original native envelope.
+            native_host: Selected adapter identity.
+
+        Returns:
+            The validated native operation.
+        """
+        calls.append(native_host)
+        return validate(observed, native_host)
+
+    monkeypatch.setattr(common, "native_tool", checked)
+    original = {**event(), "tool_name": tool, "tool_input": args.copy()}
+    effect = common.native_effect(original, host)
+    # Shared policy sees canonical known shells; unsupported Codex shapes remain untouched.
+    assert common.task_boundary.task_free(effect, host) is free
+    assert original["tool_name"] == tool
+    assert original["tool_input"] == args
+    assert calls == ([] if host == "codex" else [host])
+    if host == "codex" or tool == "Read":
+        assert effect is original
+    else:
+        assert effect["tool_name"] == "Bash"
+        assert effect["tool_input"] == {"command": "pwd"}
+
+
+def test_native_effect_rejects_unvalidated_cursor_metadata() -> None:
+    """Keep unsupported native metadata out of the shared effect policy."""
+    # Validation must fail before stripping a background flag from the shell effect.
+    observed = {**event(), "tool_input": {"command": "pwd", "background": True}}
+    with pytest.raises(core.WorkspaceError) as failure:
+        common.native_effect(observed, "cursor")
+    assert failure.value.code == "HOST_UNSUPPORTED_ASYNC"
