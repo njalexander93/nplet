@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 import uuid
 from collections.abc import Iterator
@@ -663,14 +664,16 @@ def test_issue_local_reconcile_refuses_foreign_issue_and_unknown_call(
 
 
 @pytest.mark.parametrize("status", ["claimed", "closed"])
+@pytest.mark.parametrize("missing_bindings", [False, True])
 def test_retained_raw_child_cannot_fall_through_to_parent(
-    cursor_case: Fixture, status: str
+    cursor_case: Fixture, status: str, missing_bindings: bool
 ) -> None:
     """Preserve legacy identity fences without changing retained state or granting effects.
 
     Args:
         cursor_case: Disposable current-core repository with a raw-session legacy participant.
         status: Retained status cannot make a known child eligible for parent authority.
+        missing_bindings: Remove local bindings while retaining the canonical legacy index.
     """
     case = cursor_case
     key = core.participant_key({"host": "cursor", "session_id": CHILD})
@@ -704,6 +707,9 @@ def test_retained_raw_child_cannot_fall_through_to_parent(
         }
     )
     index.write_bytes(retained)
+    # Local binding loss must not hide canonical raw-session classification evidence.
+    if missing_bindings:
+        shutil.rmtree(case.root / ".task" / ".bindings")
     before = case.state()
     # Omitted native child markers must not turn the ready raw binding into a parent Read.
     event = cursor_native(
@@ -719,6 +725,66 @@ def test_retained_raw_child_cannot_fall_through_to_parent(
     assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in decision["user_message"]
     assert case.state() == before
     assert index.read_bytes() == retained
+    if missing_bindings:
+        assert not (case.root / ".task" / ".bindings").exists()
+
+
+@pytest.mark.parametrize("missing_mutex", [False, True])
+def test_retained_child_without_local_bindings_cannot_become_parent(
+    cursor_case: Fixture, missing_mutex: bool
+) -> None:
+    """Reject retained terminal children even after local classification storage is lost.
+
+    Args:
+        cursor_case: Disposable real repository with retained child invocation evidence.
+        missing_mutex: Also remove the optional repository classification mutex.
+    """
+    # Retain a genuine invocation and its terminal child pointer in canonical issue state.
+    case = cursor_case
+    raw_call = "retained-child-without-bindings"
+    planned_task(case, "retained-child", raw_call)
+    path = read_pre(case, raw_call, "retained-source")
+    read_complete(case, raw_call, "retained-source", path)
+    case.require_ok(reconcile_native(case, raw_call))
+    bindings = case.root / ".task" / ".bindings"
+    shutil.rmtree(bindings)
+    mutex = case.root / ".task" / ".control" / "cursor-children"
+    if missing_mutex:
+        shutil.rmtree(mutex)
+    before = case.state()
+    # An omitted marker still discovers the retained child and cannot receive parent authority.
+    with pytest.raises(core.WorkspaceError) as error:
+        children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", child=True), time.monotonic() + 10
+        )
+    assert error.value.code == ("RECOVERY_REQUIRED" if missing_mutex else "STALE_BINDING")
+    assert case.state() == before
+    assert not bindings.exists()
+    assert mutex.exists() is not missing_mutex
+
+
+def test_parent_classification_does_not_recreate_local_storage(cursor_case: Fixture) -> None:
+    """Discover no child using existing issue locks without publishing bindings or a mutex.
+
+    Args:
+        cursor_case: Disposable real repository whose parent has no Cursor child invocation.
+    """
+    # A registered parent with canonical issue state does not need local participant bindings.
+    case = cursor_case
+    bindings = case.root / ".task" / ".bindings"
+    shutil.rmtree(bindings)
+    mutex = case.root / ".task" / ".control" / "cursor-children"
+    assert not mutex.exists()
+    before = case.state()
+    observed = children.normalize(
+        cursor_native(case, "postToolUse", tool_name="Read", tool_use_id="unbound-read"),
+        time.monotonic() + 10,
+    )
+    assert observed.get("child") is not True
+    assert observed["session_id"] == case.base["session_id"]
+    assert case.state() == before
+    assert not bindings.exists()
+    assert not mutex.exists()
 
 
 def test_rendered_child_templates_preserve_receipts_and_recover_revision(

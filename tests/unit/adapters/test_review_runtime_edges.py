@@ -221,6 +221,12 @@ def test_cursor_ordinary_provider_specific_hook_validates_provenance_and_object_
     monkeypatch.setattr(
         common, "native_ticket_lookup", lambda *_args, **_kwargs: pytest.fail("reserved ticket")
     )
+    # Child classification has separate store tests; retain real native identity validation here.
+    monkeypatch.setattr(
+        cursor.cursor_children,
+        "normalize",
+        lambda observed, _deadline: common.native_identity(observed, "cursor"),
+    )
     monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("started lifecycle work"))
     observed = cursor_specific(
         hook_event_name="beforeMCPExecution",

@@ -8,8 +8,10 @@ import shlex
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 from nplet.adapters import common, cursor_results
 from nplet.lifecycle import task_workspace as core
@@ -78,18 +80,60 @@ def registration(worktree: str) -> core.JSONObject:
     return {**request, "repo_id": result["repo_id"]}
 
 
+class ClassificationSnapshot(NamedTuple):
+    """Expose existing canonical controls without opening local participant bindings."""
+
+    root: Path
+    registration: core.JSONObject
+    control: core.Directory
+    issues: core.Directory | None
+
+
+@contextmanager
+def classification_snapshot(request: core.JSONObject) -> Iterator[ClassificationSnapshot]:
+    """Open verified existing classification storage without creating any directory.
+
+    Args:
+        request: Registration lookup selected by the actual native checkout.
+
+    Yields:
+        Canonical controls and an optional existing issue collection.
+
+    Raises:
+        core.WorkspaceError: Repository identities or safe directory boundaries differ.
+        OSError: Existing storage cannot be safely opened.
+    """
+    # Match Store's registration/main checks, omitting its mutation-owned bindings collection.
+    root, common, trees = core.repository(request["worktree"])
+    with ExitStack() as stack:
+        local_root = stack.enter_context(core.Directory.absolute(root))
+        local = stack.enter_context(local_root.child(".task"))
+        registered = local.json(".repository.json")
+        core.require(request["repo_id"] == registered["repo_id"], "REPOSITORY_MISMATCH")
+        core._validate_registration_identity(registered, common, trees)
+        main = stack.enter_context(core.Directory.absolute(registered["main"]))
+        core.require(main.identity == registered["main_identity"], "REPOSITORY_MISMATCH")
+        task = stack.enter_context(main.child(".task"))
+        control = stack.enter_context(task.child(".control"))
+        core.require(control.json("repository.json") == registered, "REPOSITORY_MISMATCH")
+        # Registration alone has no issue collection; its absence does not hide a legacy index.
+        issues = stack.enter_context(control.child("issues")) if control.exists("issues") else None
+        yield ClassificationSnapshot(root, registered, control, issues)
+
+
 def census(
-    store: core.Store,
+    store: core.Store | ClassificationSnapshot,
     deadline: float,
     select: Callable[[core.JSONObject], bool],
     issue: str | None = None,
 ) -> list[core.JSONObject]:
     """Inspect bounded no-follow issue snapshots and return only selected invocation metadata.
 
-    Caller holds the shared repository mutex. Snapshot locks are released before any core.execute.
+    Writers hold the shared repository mutex; classification may inspect its absence.
+    Snapshot locks are released before any core.execute.
 
     Args:
-        store: Registered repository store under its outer cursor-children mutex.
+        store: Verified repository controls, with the outer mutex held when it exists.
         deadline: Shared hook deadline.
         select: Adapter-selected exact identity predicate; never reads task prose.
         issue: Validated issue selector, or None when native identity requires discovery.
@@ -102,6 +146,9 @@ def census(
         OSError: Any registered control is inaccessible; no partial census is returned.
     """
     # Known-issue operations avoid unrelated controls; discovery still checks the whole namespace.
+    if store.issues is None:
+        core.require(issue is None, "UNKNOWN_OPERATION")
+        return []
     names = store.issues.names() if issue is None else [core.issue_id(issue)]
     core.require(len(names) <= CENSUS_ISSUES, "SIZE_LIMIT")
     total = 0
@@ -110,7 +157,7 @@ def census(
         cursor_results.check_deadline(deadline)
         core.issue_id(identifier)
         # One snapshot lock at a time preserves repository -> binding -> issue order.
-        with store.issues.child(identifier) as control, control.lock():
+        with store.issues.child(identifier) as control, control.lock(create=False):
             core.require(
                 not control.exists("transaction.json") and not control.exists("cleanup.json"),
                 "RECOVERY_REQUIRED",
@@ -168,7 +215,9 @@ def one(records: list[core.JSONObject]) -> core.JSONObject:
     return records[0]
 
 
-def parent_request(store: core.Store, record: core.JSONObject) -> core.JSONObject:
+def parent_request(
+    store: core.Store | ClassificationSnapshot, record: core.JSONObject
+) -> core.JSONObject:
     """Construct parent authority only from one committed native invocation record.
 
     Args:
@@ -268,13 +317,17 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
         if error.code == "REGISTRATION_REQUIRED" and parent_call is None:
             return observed
         raise
-    with (
-        core.Store(configured) as store,
-        store.control.child("cursor-children", True) as mutex,
-        mutex.lock(),
-    ):
+    with classification_snapshot(configured) as store, ExitStack() as locks:
+        # Classification never creates the shared mutation mutex or its persistent lock.
+        mutex = None
+        locked = False
+        if store.control.exists("cursor-children"):
+            mutex = locks.enter_context(store.control.child("cursor-children"))
+            if mutex.exists("lock"):
+                locks.enter_context(mutex.lock(create=False))
+                locked = True
         # Retained raw-session children must not acquire ordinary parent authority.
-        if mutex.exists("index.json"):
+        if mutex is not None and mutex.exists("index.json"):
             legacy = mutex.json("index.json")
             core.require(
                 isinstance(legacy, dict)
@@ -316,8 +369,12 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
                 ),
             )
             if not records:
+                # A concurrently published mutex requires another complete, serialized snapshot.
+                core.require(locked or not store.control.exists("cursor-children"), "BUSY")
                 return observed
             record = one(records)
+        # Missing mutation synchronization cannot grant a retained child parent authority.
+        core.require(locked, "RECOVERY_REQUIRED")
         invocation = record["invocation"]
         core.require(
             conversation != invocation["parent_conversation"], "HOST_UNSUPPORTED_CHILD_IDENTITY"

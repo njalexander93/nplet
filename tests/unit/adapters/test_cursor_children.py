@@ -226,11 +226,12 @@ def cursor_mock_store(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, Magic
     store.issues.child.return_value.__enter__.return_value = control
     mutex = MagicMock()
     mutex.lock.return_value = nullcontext()
-    mutex.exists.return_value = False
+    mutex.exists.side_effect = lambda name: name == "lock"
     store.control.child.return_value.__enter__.return_value = mutex
     manager = MagicMock()
     manager.__enter__.return_value = store
     monkeypatch.setattr(children.core, "Store", lambda _request: manager)
+    monkeypatch.setattr(children, "classification_snapshot", lambda _request: nullcontext(store))
     return store, control
 
 
@@ -1504,6 +1505,7 @@ def test_malformed_retained_index_cannot_allow_parent_fallback(
     """
     store, _ = cursor_mock_store(monkeypatch)
     mutex = store.control.child.return_value.__enter__.return_value
+    mutex.exists.side_effect = None
     mutex.exists.return_value = True
     mutex.json.return_value = legacy
     monkeypatch.setattr(children, "registration", lambda _cwd: {"repo_id": "repo"})
@@ -1519,3 +1521,27 @@ def test_malformed_retained_index_cannot_allow_parent_fallback(
         children.normalize({"conversation_id": "parent", "cwd": "/checkout"}, time.monotonic() + 1)
     census.assert_not_called()
     mutex.put.assert_not_called()
+
+
+def test_normalize_retries_when_admission_publishes_mutex_during_census(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An initially empty namespace cannot bypass a concurrently published admission.
+
+    Args:
+        monkeypatch: Simulate namespace publication between census and parent fallback.
+    """
+    # Admission publishes its mutex before any child invocation can become visible.
+    store, _ = cursor_mock_store(monkeypatch)
+    store.control.exists.side_effect = [False, True]
+    monkeypatch.setattr(children, "registration", lambda _cwd: {"repo_id": "repo"})
+    monkeypatch.setattr(
+        children.common,
+        "native_identity",
+        lambda event, _host: {**event, "session_id": event["conversation_id"]},
+    )
+    monkeypatch.setattr(children, "census", lambda *_args: [])
+    # Retry a serialized classification instead of allowing an unverified parent.
+    with pytest.raises(core.WorkspaceError, match="BUSY"):
+        children.normalize({"conversation_id": "parent", "cwd": "/checkout"}, time.monotonic() + 1)
+    store.control.child.assert_not_called()
