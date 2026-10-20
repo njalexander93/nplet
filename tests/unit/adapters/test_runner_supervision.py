@@ -5,12 +5,13 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from nplet.adapters import hook_capture, runner
+from nplet.adapters import cursor, hook_capture, runner
 
 pytestmark = pytest.mark.unit
 
@@ -367,13 +368,13 @@ def test_worker_main_returns_translated_result(monkeypatch: pytest.MonkeyPatch) 
     """
     # Bind in-memory stdin/stdout around a cursor handler selected by import.
     output = io.BytesIO()
-    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", "cursor"])
+    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", "cursor", "--deadline", "123.0"])
     monkeypatch.setattr(runner.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b'{"a":1}')))
     monkeypatch.setattr(runner.sys, "stdout", SimpleNamespace(buffer=output))
     monkeypatch.setattr(
         runner.importlib,
         "import_module",
-        lambda name: SimpleNamespace(handle=lambda event: {"a": event["a"] + 1}),
+        lambda name: SimpleNamespace(handle=lambda event, **_kwargs: {"a": event["a"] + 1}),
     )
     # The worker emits exactly one translated JSON line.
     assert runner.main() == 0
@@ -439,7 +440,7 @@ def test_worker_main_renders_bounded_handler_exception(
     """
     # Make the adapter handler raise private details inside the worker process.
     output = io.BytesIO()
-    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", "cursor"])
+    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", "cursor", "--deadline", "123.0"])
     monkeypatch.setattr(
         runner.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b'{"hook_event_name":"preToolUse"}'))
     )
@@ -448,7 +449,7 @@ def test_worker_main_renders_bounded_handler_exception(
         runner.importlib,
         "import_module",
         lambda _name: SimpleNamespace(
-            handle=lambda _event: (_ for _ in ()).throw(OSError("private detail")),
+            handle=lambda _event, **_kwargs: (_ for _ in ()).throw(OSError("private detail")),
             failure=lambda name, code: {"name": name, "code": code},
         ),
     )
@@ -467,7 +468,7 @@ def test_worker_main_bounds_oversized_handler_output(
     """
     # Force a handler response beyond the native output limit.
     output = io.BytesIO()
-    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", "cursor"])
+    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", "cursor", "--deadline", "123.0"])
     monkeypatch.setattr(
         runner.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b'{"hook_event_name":"preToolUse"}'))
     )
@@ -476,7 +477,7 @@ def test_worker_main_bounds_oversized_handler_output(
         runner.importlib,
         "import_module",
         lambda _name: SimpleNamespace(
-            handle=lambda _event: {"text": "x" * (runner.INPUT_LIMIT + 1)},
+            handle=lambda _event, **_kwargs: {"text": "x" * (runner.INPUT_LIMIT + 1)},
             failure=lambda name, code: {"name": name, "code": code},
         ),
     )
@@ -528,10 +529,14 @@ def test_content_input_budget_requires_fixed_entry_mode(
     result = json.loads(capsys.readouterr().out)
     if observer:
         assert result == {"permission": "deny"}
-        assert starts[0][-3:] == ["--worker", "cursor", "--observe-read-content"]
+        argv = starts[0]
+        assert argv[-1] == "--observe-read-content"
+        assert argv[-5:-2] == ["--worker", "cursor", "--deadline"]
+        assert float(argv[-2]) > 0
         forwarded = json.loads(worker.calls[0])
         assert forwarded["content"] == "x" * 200
-        assert forwarded["_cursor_deadline"] != 999999999999
+        assert worker.calls == [raw]
+        assert forwarded["_cursor_deadline"] == 999999999999
     else:
         assert result["code"] == "SIZE_LIMIT"
         assert starts == []
@@ -570,7 +575,14 @@ def test_content_overflow_drains_without_starting_mutation_worker(
     monkeypatch.setattr(runner.os, "read", read)
     monkeypatch.setattr(runner.sys.stdin, "fileno", lambda: 0)
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kw: pytest.fail("worker"))
-    assert runner.run(cursor_content_handler, failure, content_observer=True) == 0
+    assert (
+        runner.run(
+            cursor_content_handler,
+            partial(cursor.failure, content_observer=True),
+            content_observer=True,
+        )
+        == 0
+    )
     assert json.loads(capsys.readouterr().out) == {"permission": "allow"}
     assert reads == ([129] if drain_deadline else [129, 65536, 65536])
 
@@ -617,7 +629,14 @@ def test_content_worker_timeout_reaps_before_observational_allow(
     input_bytes(monkeypatch, b'{"hook_event_name":"beforeReadFile"}')
     worker = Worker(timeout=True)
     install_worker(monkeypatch, worker)
-    assert runner.run(cursor_content_handler, failure, content_observer=True) == 0
+    assert (
+        runner.run(
+            cursor_content_handler,
+            partial(cursor.failure, content_observer=True),
+            content_observer=True,
+        )
+        == 0
+    )
     assert worker.killed and worker.calls[-1] is None
     assert json.loads(capsys.readouterr().out) == {"permission": "allow"}
 
@@ -649,7 +668,9 @@ def test_worker_content_mode_uses_its_own_input_cap(
     """
     monkeypatch.setattr(runner, "INPUT_LIMIT", 128)
     monkeypatch.setattr(runner, "CONTENT_INPUT_LIMIT", 1024)
-    argv = ["runner", "--worker", "cursor"] + (["--observe-read-content"] if observer else [])
+    argv = ["runner", "--worker", "cursor", "--deadline", "123.0"] + (
+        ["--observe-read-content"] if observer else []
+    )
     monkeypatch.setattr(runner.sys, "argv", argv)
     raw = json.dumps({"hook_event_name": "beforeReadFile", "content": "x" * 400}).encode()
     output = io.BytesIO()
@@ -657,16 +678,18 @@ def test_worker_content_mode_uses_its_own_input_cap(
     monkeypatch.setattr(runner.sys, "stdout", SimpleNamespace(buffer=output))
     received = []
 
-    def content(event: dict) -> dict:
+    def content(event: dict, *, deadline: float) -> dict:
         """Record the actual parsed input without creating lifecycle evidence.
 
         Args:
             event: Worker-decoded event.
+            deadline: Absolute supervisor deadline, unchanged during worker startup.
 
         Returns:
             Non-authorizing observation result.
         """
         received.append(event)
+        assert deadline == 123.0
         return {"permission": "allow"}
 
     monkeypatch.setattr(
@@ -685,42 +708,162 @@ def test_worker_content_mode_uses_its_own_input_cap(
 
 
 @pytest.mark.parametrize("observer", [False, True])
-def test_runner_does_not_spawn_after_serialization_deadline(
+def test_runner_does_not_spawn_after_input_parsing_deadline(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], observer: bool
 ) -> None:
     """Do not grant a worker a new time budget after synchronous input processing.
 
     Args:
-        monkeypatch: Input, clock, serialization and process boundaries.
+        monkeypatch: Input, clock, parsing and process boundaries.
         capsys: Public response capture.
         observer: Fixed observer fallback or ordinary authorizing hook.
     """
-    # Simulate expensive canonicalization without a slow or large timing test.
+    # Simulate expensive input parsing without a slow or large timing test.
     clock = [0.0]
     monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
-    original = runner.core.canonical
+    original = runner.core.strict_json
 
-    def serialize(event: object) -> bytes:
-        """Serialize exactly while advancing the modeled shared deadline.
+    def parse(raw: bytes) -> object:
+        """Parse exactly while advancing the modeled shared deadline.
 
         Args:
-            event: Parsed event with supervisor-owned deadline.
+            raw: Native event bytes, without an injected supervisor field.
 
         Returns:
-            Canonical bytes after the simulated processing time.
+            Parsed event after the simulated processing time.
         """
-        result = original(event)
+        result = original(raw)
         clock[0] = runner.DEADLINE_SECONDS + 1
         return result
 
-    monkeypatch.setattr(runner.core, "canonical", serialize)
+    monkeypatch.setattr(runner.core, "strict_json", parse)
     event = "beforeReadFile" if observer else "preToolUse"
     input_bytes(monkeypatch, json.dumps({"hook_event_name": event}).encode())
     monkeypatch.setattr(
         runner.subprocess, "Popen", lambda *_args, **_kw: pytest.fail("late worker")
     )
-    assert runner.run(cursor_content_handler, failure, content_observer=observer) == (
+    renderer = partial(cursor.failure, content_observer=True) if observer else failure
+    assert runner.run(cursor_content_handler, renderer, content_observer=observer) == (
         0 if observer else 2
     )
     result = json.loads(capsys.readouterr().out)
     assert result == ({"permission": "allow"} if observer else {"name": event, "code": "BUSY"})
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "not-a-number"])
+def test_worker_rejects_nonfinite_or_invalid_deadline_before_import(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A malformed trusted argv budget cannot establish a usable worker invocation.
+
+    Args:
+        monkeypatch: Worker process arguments and import boundary.
+        value: Invalid absolute monotonic deadline spelling.
+    """
+    # Reject malformed transport before reading stdin or importing a host adapter.
+    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", "cursor", "--deadline", value])
+    monkeypatch.setattr(
+        runner.importlib, "import_module", lambda _name: pytest.fail("invalid worker import")
+    )
+    assert runner.main() == 2
+
+
+def test_supervisor_forwards_original_bytes_and_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Worker startup cannot extend the original budget or trust an event deadline.
+
+    Args:
+        monkeypatch: Input, process and monotonic clock boundaries.
+        capsys: Native supervisor response capture.
+    """
+    # Preserve native bytes, including an untrusted field that cannot select the argv budget.
+    raw = b'{"hook_event_name":"preToolUse","_cursor_deadline":999999999999}'
+    input_bytes(monkeypatch, raw)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: 10.0)
+    worker = Worker(output=b'{"permission":"allow"}')
+    starts = install_worker(monkeypatch, worker)
+    assert runner.run(cursor_content_handler, failure) == 0
+    assert starts[0][-4:] == [
+        "--worker",
+        "cursor",
+        "--deadline",
+        repr(10.0 + runner.DEADLINE_SECONDS),
+    ]
+    assert worker.calls == [raw]
+    assert json.loads(capsys.readouterr().out) == {"permission": "allow"}
+
+
+def test_worker_uses_absolute_deadline_without_restarting_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass the supervisor deadline unchanged even when worker startup consumed its budget.
+
+    Args:
+        monkeypatch: Worker arguments, process streams and adapter import boundary.
+    """
+    # The selected adapter, rather than native event JSON, receives the exact trusted deadline.
+    raw = b'{"hook_event_name":"beforeReadFile","_cursor_deadline":999999999999}'
+    output = io.BytesIO()
+    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", "cursor", "--deadline", "12.0"])
+    monkeypatch.setattr(runner.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
+    monkeypatch.setattr(runner.sys, "stdout", SimpleNamespace(buffer=output))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: 13.0)
+    called = []
+
+    def expired(event: dict, *, deadline: float) -> dict:
+        """Use the unchanged deadline to reject work after supervisor budget expiry.
+
+        Args:
+            event: Untrusted native bytes decoded without supervisor metadata injection.
+            deadline: Trusted absolute argv deadline.
+
+        Returns:
+            No result; the real deadline check rejects the expired worker.
+
+        Raises:
+            core.WorkspaceError: The original execution budget expired during startup.
+        """
+        called.append((event, deadline))
+        runner.core.require(deadline < runner.time.monotonic(), "INVALID_REQUEST")
+        cursor.cursor_children.cursor_results.check_deadline(deadline)
+        pytest.fail("expired adapter continued")
+
+    monkeypatch.setattr(
+        runner.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(handle=expired, failure=cursor.failure),
+    )
+    assert runner.main() == 2
+    assert called == [
+        ({"hook_event_name": "beforeReadFile", "_cursor_deadline": 999999999999}, 12.0)
+    ]
+    assert json.loads(output.getvalue())["permission"] == "deny"
+
+
+@pytest.mark.parametrize("code", ["BUSY", "SIZE_LIMIT"])
+def test_observer_keeps_precise_worker_denial(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], code: str
+) -> None:
+    """Trusted supervisor fallback must not turn a completed worker's denial into allow.
+
+    Args:
+        monkeypatch: Supervisor input and already-completed worker boundary.
+        capsys: Native response capture.
+        code: A worker diagnostic also used by transport fallback.
+    """
+    # Render the ordinary worker failure, then relay it through the trusted observer supervisor.
+    input_bytes(monkeypatch, b'{"hook_event_name":"beforeReadFile"}')
+    denied = cursor.failure("beforeReadFile", code)
+    worker = Worker(output=runner.core.canonical(denied), returncode=2)
+    install_worker(monkeypatch, worker)
+    assert (
+        runner.run(
+            cursor_content_handler,
+            partial(cursor.failure, content_observer=True),
+            content_observer=True,
+        )
+        == 2
+    )
+    assert json.loads(capsys.readouterr().out) == denied
+    assert not worker.killed

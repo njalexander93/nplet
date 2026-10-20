@@ -65,3 +65,24 @@ print(json.dumps(found))
         self.assertEqual(observed, expected)
         for folder in FOLDERS:
             self.assertIn(f"{folder}/README.md", observed)
+
+    def test_cursor_guidance_loads_as_exact_installed_markdown(self) -> None:
+        """Read the child guidance from installed resources outside the repository cwd.
+
+        Raises:
+            AssertionError: Isolated resource loading fails or differs from source bytes.
+        """
+        # Load the new prose through the same package boundary used by the adapter.
+        script = (
+            "import json; from importlib.resources import files; "
+            "print(json.dumps(files('nplet').joinpath("
+            "'resources/task_workspace/cursor_child.md').read_text(encoding='utf-8')))"
+        )
+        result = subprocess.run(
+            [hook.PYTHON, "-I", "-c", script], cwd=self.root, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = json.loads(result.stdout)
+        expected = (RESOURCES / "task_workspace/cursor_child.md").read_text(encoding="utf-8")
+        self.assertEqual(observed, expected)
+        self.assertIn("templates grant no authority.", observed)

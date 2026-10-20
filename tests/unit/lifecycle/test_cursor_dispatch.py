@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from nplet.lifecycle import task_workspace as core
-from tests.unit.lifecycle.test_operate_contracts import (
+from tests.unit.lifecycle.cursor_support import (
     cursor_apply,
     cursor_binding_request,
     cursor_launch,

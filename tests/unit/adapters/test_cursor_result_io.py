@@ -211,6 +211,7 @@ def test_pinned_source_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
         ("sqlite-size", "SIZE_LIMIT"),
         ("sqlite-busy", "RESULT_NOT_AVAILABLE"),
         ("decode-expired", "BUSY"),
+        ("projection-pin", "INVALID_REQUEST"),
     ],
 )
 def test_terminal_reader_closes_external_connection(
@@ -227,6 +228,8 @@ def test_terminal_reader_closes_external_connection(
     clock = [0]
     monkeypatch.setattr(reader.time, "monotonic", lambda: clock[0])
     pins = {"executor_sha256": "a" * 64, "workbench_sha256": "b" * 64}
+    if failure == "projection-pin":
+        pins["workbench_sha256"] = "invalid-digest"
     monkeypatch.setattr(reader, "pinned_sources", lambda deadline: pins)
     connection = MagicMock(spec=sqlite3.Connection)
     connect = MagicMock(return_value=connection)

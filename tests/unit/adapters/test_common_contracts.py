@@ -858,3 +858,129 @@ def test_codex_preparation_contains_governing_path_failures(
     path_check.assert_called_once_with(event, "/checkout/AGENTS.md", exact=True)
     execute.assert_not_called()
     assert event == original
+
+
+@pytest.mark.parametrize("code", ["BUSY", "REVISION_CONFLICT"])
+@pytest.mark.parametrize("raised", [False, True])
+def test_shared_retry_preserves_retryable_result_and_snapshot_failures(
+    monkeypatch: pytest.MonkeyPatch, code: str, raised: bool
+) -> None:
+    """Both snapshot contention and returned lifecycle contention may retry to exact success.
+
+    Args:
+        monkeypatch: Deterministic clock and backoff boundaries.
+        code: Retryable lifecycle or snapshot diagnostic.
+        raised: Snapshot exception rather than a returned lifecycle failure.
+    """
+    # Only the first attempt fails; the helper returns the successful metadata unchanged.
+    monkeypatch.setattr(common.time, "monotonic", lambda: 0.0)
+    sleep = Mock()
+    monkeypatch.setattr(common.time, "sleep", sleep)
+    calls = []
+    success = {"ok": True, "code": "OK", "revision": 12}
+
+    def attempt() -> dict:
+        """Report one contention result and then the exact successful response.
+
+        Returns:
+            Failure response on the first attempt, otherwise authoritative success.
+
+        Raises:
+            core.WorkspaceError: Modeled snapshot contention on the first attempt.
+        """
+        calls.append(len(calls))
+        if len(calls) == 1:
+            if raised:
+                raise core.WorkspaceError(code)
+            return {"ok": False, "code": code}
+        return success
+
+    assert common.retry_on_contention(attempt, 1.0) is success
+    assert len(calls) == 2
+    sleep.assert_called_once_with(0.02)
+
+
+@pytest.mark.parametrize("raised", [False, True])
+def test_shared_retry_propagates_foreign_authority_without_retry(
+    monkeypatch: pytest.MonkeyPatch, raised: bool
+) -> None:
+    """A stale or foreign binding cannot be repaired by retrying its mutation.
+
+    Args:
+        monkeypatch: Clock and backoff boundaries.
+        raised: Raised boundary error rather than returned failure.
+    """
+    monkeypatch.setattr(common.time, "monotonic", lambda: 0.0)
+    sleep = Mock()
+    monkeypatch.setattr(common.time, "sleep", sleep)
+    error = core.WorkspaceError("NOT_OWNER")
+    attempt = (
+        Mock(side_effect=error) if raised else Mock(return_value={"ok": False, "code": "NOT_OWNER"})
+    )
+    with pytest.raises(core.WorkspaceError) as captured:
+        common.retry_on_contention(attempt, 1.0)
+    assert captured.value.code == "NOT_OWNER"
+    if raised:
+        assert captured.value is error
+    attempt.assert_called_once()
+    sleep.assert_not_called()
+
+
+def test_shared_retry_enforces_attempt_limit_and_operation_specific_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bound retry count and preserve a callback's stricter Busy-only replay policy.
+
+    Args:
+        monkeypatch: Deterministic clock and backoff boundaries.
+    """
+    # Eight Busy results permit only seven bounded sleeps.
+    monkeypatch.setattr(common.time, "monotonic", lambda: 0.0)
+    sleep = Mock()
+    monkeypatch.setattr(common.time, "sleep", sleep)
+    busy = Mock(return_value={"ok": False, "code": "BUSY"})
+    with pytest.raises(core.WorkspaceError, match="BUSY"):
+        common.retry_on_contention(busy, 2.0)
+    assert busy.call_count == common.CHILD_JOIN_ATTEMPTS == 8
+    assert [call.args[0] for call in sleep.call_args_list] == [0.02 * n for n in range(1, 8)]
+    # Source callbacks cannot change body/revision in response to a conflict.
+    conflict = Mock(return_value={"ok": False, "code": "REVISION_CONFLICT"})
+    sleep.reset_mock()
+    with pytest.raises(core.WorkspaceError, match="REVISION_CONFLICT"):
+        common.retry_on_contention(conflict, 2.0, retry_codes=frozenset({"BUSY"}))
+    conflict.assert_called_once()
+    sleep.assert_not_called()
+
+
+def test_shared_retry_never_starts_expired_work_or_extends_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired initial budget starts nothing, and clipped backoff cannot restart work.
+
+    Args:
+        monkeypatch: Deterministic monotonic clock and advancing backoff.
+    """
+    clock = [1.0]
+    monkeypatch.setattr(common.time, "monotonic", lambda: clock[0])
+    attempt = Mock(return_value={"ok": False, "code": "BUSY"})
+    with pytest.raises(core.WorkspaceError, match="BUSY"):
+        common.retry_on_contention(attempt, 1.0)
+    attempt.assert_not_called()
+    # Advancing by the final remaining budget leaves no time for another attempt.
+    clock[0] = 0.0
+    delays = []
+
+    def sleep(delay: float) -> None:
+        """Consume exactly the selected backoff budget.
+
+        Args:
+            delay: Bounded interval selected by the shared retry helper.
+        """
+        delays.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr(common.time, "sleep", sleep)
+    with pytest.raises(core.WorkspaceError, match="BUSY"):
+        common.retry_on_contention(attempt, 0.01)
+    attempt.assert_called_once()
+    assert delays == [0.01]

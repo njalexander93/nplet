@@ -12,6 +12,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
+from nplet.lifecycle import _invocation_records as records
 from nplet.lifecycle import task_workspace as core
 
 BINARY_LIMIT = 8 * 1024 * 1024
@@ -270,7 +271,7 @@ def exact_row(
     # Query only the recorded parent's header; do not fetch unrelated conversation values.
     check_deadline(deadline)
     parent = core.token(invocation["parent_conversation"])
-    native_call = core.cursor_text(invocation["native_call"])
+    native_call = records.native_text(invocation["native_call"])
     row = connection.execute(
         "SELECT json_extract(value, '$.composerId'), "
         "json_extract(value, '$.fullConversationHeadersOnly') "
@@ -296,7 +297,7 @@ def exact_row(
             matches.append(bubble)
     core.require(matches, "RESULT_NOT_AVAILABLE")
     core.require(len(matches) == 1, "RESULT_SCHEMA_MISMATCH")
-    key = core.cursor_text("bubbleId:" + parent + ":" + matches[0])
+    key = records.native_text("bubbleId:" + parent + ":" + matches[0])
     row = connection.execute(
         "SELECT value FROM cursorDiskKV WHERE key=? AND length(value)<=?",
         (key, ROW_LIMIT),
@@ -315,7 +316,7 @@ def exact_row(
     return key, tool
 
 
-def read_terminal(invocation: core.JSONObject, deadline: float) -> core.JSONObject:
+def read_terminal(invocation: core.JSONObject, deadline: float) -> records.TerminalEvidence:
     """Independently project one pinned original-call foreground return.
 
     Args:
@@ -364,11 +365,13 @@ def read_terminal(invocation: core.JSONObject, deadline: float) -> core.JSONObje
         "RESULT_SCHEMA_MISMATCH",
     )
     # Revalidation under the issue lock belongs to core cursor-retire after this read.
-    return {
-        **terminal,
-        **pin,
-        "parent_conversation": invocation["parent_conversation"],
-        "native_call": invocation["native_call"],
-        "storage_key": key,
-        "binary_sha256": hashlib.sha256(raw).hexdigest(),
-    }
+    return records.terminal_evidence(
+        {
+            **terminal,
+            **pin,
+            "parent_conversation": invocation["parent_conversation"],
+            "native_call": invocation["native_call"],
+            "storage_key": key,
+            "binary_sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    )

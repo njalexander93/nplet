@@ -1,33 +1,23 @@
-"""Correlate Cursor native children through retained issue invocations, without a second index."""
+"""Classify Cursor children through exact issue routes and revalidated retained invocations."""
 
 from __future__ import annotations
 
 import copy
 import hashlib
+import math
 import shlex
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable
+from importlib import resources
 from pathlib import Path
-from typing import NamedTuple
 
-from nplet.adapters import common, cursor_results
+from nplet.adapters import common, cursor_results, runner
+from nplet.adapters import cursor_routing as routing
 from nplet.lifecycle import task_workspace as core
 
 ENTRY = Path(__file__).resolve()
-CENSUS_ISSUES = 64
-CENSUS_BYTES = 32 * 1024 * 1024
-INTERNAL = frozenset(
-    {
-        "cursor-admit",
-        "cursor-bind-child",
-        "cursor-retire",
-        "cursor-source-callback",
-        "cursor-source-callback",
-    }
-)
 TASK_FIELDS = frozenset(
     {"description", "environment", "model", "prompt", "run_in_background", "subagent_type"}
 )
@@ -80,129 +70,70 @@ def registration(worktree: str) -> core.JSONObject:
     return {**request, "repo_id": result["repo_id"]}
 
 
-class ClassificationSnapshot(NamedTuple):
-    """Expose existing canonical controls without opening local participant bindings."""
-
-    root: Path
-    registration: core.JSONObject
-    control: core.Directory
-    issues: core.Directory | None
-
-
-@contextmanager
-def classification_snapshot(request: core.JSONObject) -> Iterator[ClassificationSnapshot]:
-    """Open verified existing classification storage without creating any directory.
-
-    Args:
-        request: Registration lookup selected by the actual native checkout.
-
-    Yields:
-        Canonical controls and an optional existing issue collection.
-
-    Raises:
-        core.WorkspaceError: Repository identities or safe directory boundaries differ.
-        OSError: Existing storage cannot be safely opened.
-    """
-    # Match Store's registration/main checks, omitting its mutation-owned bindings collection.
-    root, common, trees = core.repository(request["worktree"])
-    with ExitStack() as stack:
-        local_root = stack.enter_context(core.Directory.absolute(root))
-        local = stack.enter_context(local_root.child(".task"))
-        registered = local.json(".repository.json")
-        core.require(request["repo_id"] == registered["repo_id"], "REPOSITORY_MISMATCH")
-        core._validate_registration_identity(registered, common, trees)
-        main = stack.enter_context(core.Directory.absolute(registered["main"]))
-        core.require(main.identity == registered["main_identity"], "REPOSITORY_MISMATCH")
-        task = stack.enter_context(main.child(".task"))
-        control = stack.enter_context(task.child(".control"))
-        core.require(control.json("repository.json") == registered, "REPOSITORY_MISMATCH")
-        # Registration alone has no issue collection; its absence does not hide a legacy index.
-        issues = stack.enter_context(control.child("issues")) if control.exists("issues") else None
-        yield ClassificationSnapshot(root, registered, control, issues)
-
-
-def census(
-    store: core.Store | ClassificationSnapshot,
+def issue_records(
+    store: core.Store,
     deadline: float,
     select: Callable[[core.JSONObject], bool],
-    issue: str | None = None,
+    issue: str,
 ) -> list[core.JSONObject]:
-    """Inspect bounded no-follow issue snapshots and return only selected invocation metadata.
-
-    Writers hold the shared repository mutex; classification may inspect its absence.
-    Snapshot locks are released before any core.execute.
+    """Recover one explicit issue and copy matching native invocation metadata.
 
     Args:
-        store: Verified repository controls, with the outer mutex held when it exists.
-        deadline: Shared hook deadline.
-        select: Adapter-selected exact identity predicate; never reads task prose.
-        issue: Validated issue selector, or None when native identity requires discovery.
+        store: Verified controls; caller holds the existing registry mutex.
+        deadline: Shared operation deadline.
+        select: Exact identity predicate, independent of task prose.
+        issue: Explicit selector from a durable route or verified native parent.
 
     Returns:
-        Matching committed records with issue, revision and parent request identity.
+        Matching committed metadata from this issue alone.
 
     Raises:
-        core.WorkspaceError: Bounds, snapshots, identity or unfinished transactions are invalid.
-        OSError: Any registered control is inaccessible; no partial census is returned.
+        core.WorkspaceError: Selected state or invocation metadata is invalid.
+        OSError: Selected storage cannot be safely recovered or read.
     """
-    # Known-issue operations avoid unrelated controls; discovery still checks the whole namespace.
-    if store.issues is None:
-        core.require(issue is None, "UNKNOWN_OPERATION")
-        return []
-    names = store.issues.names() if issue is None else [core.issue_id(issue)]
-    core.require(len(names) <= CENSUS_ISSUES, "SIZE_LIMIT")
-    total = 0
-    matches = []
-    for identifier in names:
-        cursor_results.check_deadline(deadline)
-        core.issue_id(identifier)
-        # One snapshot lock at a time preserves repository -> binding -> issue order.
-        with store.issues.child(identifier) as control, control.lock(create=False):
+    # Recover only the selected issue under its existing lock.
+    identifier = core.issue_id(issue)
+    core.require(store.issues_present, "RECOVERY_REQUIRED")
+    cursor_results.check_deadline(deadline)
+    with store.issues.child(identifier) as control, control.lock(create=False):
+        current = core.Issue(store, control, identifier)
+        current.recover()
+        state = current.committed_state()
+        core.require(state.get("issue_id") == identifier, "INTEGRITY_ERROR")
+        invocations = state.get("cursor_invocations", {})
+        core.require(
+            isinstance(invocations, dict) and isinstance(state.get("participants"), dict),
+            "INTEGRITY_ERROR",
+        )
+        # Invalid selected records fail; never return an incomplete filtered snapshot.
+        matches = []
+        for invocation_id, invocation in invocations.items():
+            cursor_results.check_deadline(deadline)
+            core.require(isinstance(invocation, dict), "INTEGRITY_ERROR")
             core.require(
-                not control.exists("transaction.json") and not control.exists("cleanup.json"),
-                "RECOVERY_REQUIRED",
-            )
-            data = control.read("state.json")
-            total += len(data)
-            core.require(total <= CENSUS_BYTES, "SIZE_LIMIT")
-            state = core.strict_json(data)
-            core.require(
-                isinstance(state, dict) and state.get("issue_id") == identifier, "INTEGRITY_ERROR"
-            )
-            invocations = state.get("cursor_invocations", {})
-            core.require(
-                isinstance(invocations, dict) and isinstance(state.get("participants"), dict),
+                call_token(invocation["native_call"]) == invocation["tool_id"]
+                and invocation["phase"] in {"admitted", "bound", "retired"},
                 "INTEGRITY_ERROR",
             )
-            # Copy only matching correlation records; never read managed payload/prose.
-            for invocation_id, invocation in invocations.items():
-                cursor_results.check_deadline(deadline)
-                core.require(isinstance(invocation, dict), "INTEGRITY_ERROR")
-                core.require(
-                    call_token(invocation["native_call"]) == invocation["tool_id"],
-                    "INTEGRITY_ERROR",
-                )
-                core.require(
-                    invocation["phase"] in {"admitted", "bound", "retired"}, "INTEGRITY_ERROR"
-                )
-                record = {
-                    "invocation_id": invocation_id,
-                    "invocation": invocation,
-                    "issue_id": identifier,
-                    "issue_uuid": state["issue_uuid"],
-                    "revision": state["revision"],
-                    "member": state["participants"].get(invocation.get("child_participant")),
-                }
-                if select(record):
-                    matches.append(copy.deepcopy(record))
-    return matches
+            child_key = invocation.get("child_participant")
+            record = {
+                "invocation_id": invocation_id,
+                "invocation": invocation,
+                "issue_id": identifier,
+                "issue_uuid": state["issue_uuid"],
+                "revision": state["revision"],
+                "member": state["participants"].get(child_key) if child_key is not None else None,
+            }
+            if select(record):
+                matches.append(copy.deepcopy(record))
+        return matches
 
 
 def one(records: list[core.JSONObject]) -> core.JSONObject:
     """Require one exact retained invocation rather than selecting by arrival order.
 
     Args:
-        records: Complete bounded census result.
+        records: Complete selected-issue result.
 
     Returns:
         Its sole matching record.
@@ -215,9 +146,7 @@ def one(records: list[core.JSONObject]) -> core.JSONObject:
     return records[0]
 
 
-def parent_request(
-    store: core.Store | ClassificationSnapshot, record: core.JSONObject
-) -> core.JSONObject:
+def parent_request(store: core.Store, record: core.JSONObject) -> core.JSONObject:
     """Construct parent authority only from one committed native invocation record.
 
     Args:
@@ -242,61 +171,62 @@ def parent_request(
 
 
 def execute_current(request: core.JSONObject, deadline: float) -> core.JSONObject:
-    """Retry only actual contention against a freshly observed issue revision.
-
-    Caller holds the repository mutex, never an issue/binding lock across this call.
+    """Retry internal transitions after recovering the selected issue revision.
 
     Args:
-        request: Exact internal transition with immutable invocation identity fields.
-        deadline: Shared hook deadline.
+        request: Exact internal transition with immutable invocation identity.
+        deadline: Shared deadline; caller holds only the registry mutex.
 
     Returns:
-        Successful core transition response.
+        Successful internal transition response.
 
     Raises:
-        core.WorkspaceError: Nonretryable transition failure or exhausted contention budget.
+        core.WorkspaceError: Nonretryable failure, contention exhaustion or expired deadline.
     """
-    # Each attempt releases the snapshot lock before core acquires binding then issue locks.
-    code = "BUSY"
-    for _ in range(8):
-        cursor_results.check_deadline(deadline)
+
+    def attempt() -> core.JSONObject:
+        """Release the recovered issue snapshot before the internal transition.
+
+        Returns:
+            Internal core result at the recovered revision.
+
+        Raises:
+            core.WorkspaceError: Recovery fails or the deadline expires.
+            OSError: Selected storage cannot be opened safely.
+        """
+        # Snapshot recovery precedes binding/issue lock acquisition inside the core.
         with (
-            core.Store(request) as store,
+            core.Store(request, create=False, bindings=False) as store,
             store.issues.child(request["issue_id"]) as control,
-            control.lock(),
+            control.lock(create=False),
         ):
-            core.require(
-                not control.exists("transaction.json") and not control.exists("cleanup.json"),
-                "RECOVERY_REQUIRED",
-            )
-            state = control.json("state.json")
-            revision = state["revision"]
-        # Never start a transition after snapshot work exhausted the shared budget.
+            issue = core.Issue(store, control, request["issue_id"])
+            issue.recover()
+            revision = issue.committed_state()["revision"]
+        # Snapshot work must not start a transition after the shared deadline.
         cursor_results.check_deadline(deadline)
-        result = core.execute(
+        return core.execute_internal(
             {**request, "request_id": str(uuid.uuid4()), "expected_revision": revision}
         )
-        if result["ok"]:
-            return result
-        code = result["code"]
-        core.require(code in {"REVISION_CONFLICT", "BUSY"}, code)
-    raise core.WorkspaceError(code)
+
+    return common.retry_on_contention(attempt, deadline)
 
 
 def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
-    """Classify actual child conversations before any ordinary parent startup route.
+    """Classify exact native identities before any ordinary parent startup route.
 
     Args:
-        event: Native Cursor envelope; derived/private markers are discarded.
+        event: Native envelope; derived private markers are discarded.
         deadline: Shared hook deadline.
 
     Returns:
-        Validated parent or independently bound child envelope with normalized call IDs.
+        Validated parent or independently bound child with normalized call IDs.
 
     Raises:
-        core.WorkspaceError: Native markers, lookup, generation or exact child binding fail.
+        core.WorkspaceError: Identity, population, selected state or generation fails.
+        OSError: Selected controls cannot be safely read or recovered.
     """
-    # The actual child marker is parent_tool_call_id, never the opaque subagentStart token.
+    # Parent-call bytes are the native child marker; unsupported shapes remain denied.
     core.require(
         event.get("agent_id") is None
         and event.get("subagent_id") is None
@@ -310,108 +240,94 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
     if "tool_use_id" in event:
         observed["_cursor_native_call"] = event["tool_use_id"]
         observed["tool_use_id"] = call_token(event["tool_use_id"])
-    # Unregistered ordinary parent startup stays available; an unbound child never gets it.
+    # Registration-only and ordinary parent paths never enumerate issue histories.
     try:
         configured = registration(observed["cwd"])
     except core.WorkspaceError as error:
         if error.code == "REGISTRATION_REQUIRED" and parent_call is None:
             return observed
         raise
-    with classification_snapshot(configured) as store, ExitStack() as locks:
-        # Classification never creates the shared mutation mutex or its persistent lock.
-        mutex = None
-        locked = False
-        if store.control.exists("cursor-children"):
-            mutex = locks.enter_context(store.control.child("cursor-children"))
-            if mutex.exists("lock"):
-                locks.enter_context(mutex.lock(create=False))
-                locked = True
-        # Retained raw-session children must not acquire ordinary parent authority.
-        if mutex is not None and mutex.exists("index.json"):
-            legacy = mutex.json("index.json")
-            core.require(
-                isinstance(legacy, dict)
-                and type(legacy.get("schema_version")) is int
-                and legacy["schema_version"] == 2
-                and isinstance(legacy.get("children"), dict)
-                and all(
-                    core.DIGEST.fullmatch(key) and isinstance(value, dict)
-                    for key, value in legacy["children"].items()
-                ),
-                "INTEGRITY_ERROR",
-            )
-            core.require(
-                core.participant_key({"host": "cursor", "session_id": conversation})
-                not in legacy["children"],
-                "HOST_UNSUPPORTED_CHILD_IDENTITY",
-            )
-        # Explicit parent call selects one retained invocation, including retired attempts.
-        if parent_call is not None:
-            token = call_token(parent_call)
-            records = census(
-                store,
-                deadline,
-                lambda record: (
-                    record["invocation"]["native_call"] == parent_call
-                    and record["invocation"]["tool_id"] == token
-                ),
-            )
-            record = one(records)
-        else:
-            # Current member pointer disambiguates historical generations after a real resume.
-            records = census(
-                store,
-                deadline,
-                lambda record: (
-                    record["invocation"].get("child_conversation") == conversation
-                    and record["member"] is not None
-                    and record["member"].get("cursor_invocation") == record["invocation_id"]
-                ),
-            )
-            if not records:
-                # A concurrently published mutex requires another complete, serialized snapshot.
-                core.require(locked or not store.control.exists("cursor-children"), "BUSY")
-                return observed
-            record = one(records)
-        # Missing mutation synchronization cannot grant a retained child parent authority.
-        core.require(locked, "RECOVERY_REQUIRED")
-        invocation = record["invocation"]
-        core.require(
-            conversation != invocation["parent_conversation"], "HOST_UNSUPPORTED_CHILD_IDENTITY"
-        )
-        # Canonical native child UUIDs are independent from parent/session/subagent tokens.
-        try:
-            core.require(
-                str(uuid.UUID(conversation)) == conversation, "HOST_UNSUPPORTED_CHILD_IDENTITY"
-            )
-        except (ValueError, UnicodeError) as error:
-            raise core.WorkspaceError("HOST_UNSUPPORTED_CHILD_IDENTITY") from error
-        core.require(invocation["phase"] in {"admitted", "bound"}, "STALE_BINDING")
-        generation = common.native_token(event.get("generation_id"))
-        session = invocation["parent_session"] + "/agent/" + conversation
-        child = {**parent_request(store, record), "session_id": session}
-        child.pop("binding_generation")
-        # Core binds/revalidates the exact native link under binding then issue locks.
-        result = execute_current(
-            {
-                **child,
-                "operation": "cursor-bind-child",
-                "invocation_id": record["invocation_id"],
-                "tool_id": invocation["tool_id"],
-                "child_conversation": conversation,
-                "native_generation": generation,
-            },
-            deadline,
-        )
-        core.require(result["ok"], result["code"])
-        observed.update(
-            child=True,
-            parent_session_id=invocation["parent_session"],
-            session_id=session,
-            _cursor_invocation=record["invocation_id"],
-            _cursor_new_child=invocation["phase"] == "admitted",
-            _cursor_conversation=conversation,
-        )
+    with core.Store(configured, create=False, bindings=False) as store:
+        if not store.control.exists("cursor-children"):
+            core.require(not store.control.exists(routing.MARKER), "RECOVERY_REQUIRED")
+            core.require(parent_call is None, "UNKNOWN_OPERATION")
+            core.require(not store.control.exists("cursor-children"), "BUSY")
+            return observed
+        # Legacy denial evidence is checked even without synchronization or population.
+        with store.control.child("cursor-children") as registry:
+            routing.legacy_guard(registry, conversation)
+            # An existing modern registry needs explicit complete population before cutover.
+            core.require(registry.exists("lock"), "RECOVERY_REQUIRED")
+            with registry.lock(create=False):
+                routing.verify(store, registry)
+                kind, native = (
+                    ("call", parent_call)
+                    if parent_call is not None
+                    else ("conversation", conversation)
+                )
+                if parent_call is not None:
+                    call_token(parent_call)
+                pointer = routing.lookup(registry, kind, native)
+                if pointer is None:
+                    core.require(parent_call is None, "UNKNOWN_OPERATION")
+                    return observed
+                # A pointer selects one recovered issue; it never supplies participant authority.
+                records = issue_records(
+                    store,
+                    deadline,
+                    lambda record: (
+                        record["invocation"]["native_call"] == parent_call
+                        if parent_call is not None
+                        else record["invocation"].get("child_conversation") == conversation
+                        and record["member"] is not None
+                        and record["member"].get("cursor_invocation") == record["invocation_id"]
+                    ),
+                    pointer["issue_id"],
+                )
+                record = one(records)
+                core.require(record["issue_uuid"] == pointer["issue_uuid"], "ISSUE_MISMATCH")
+                invocation = record["invocation"]
+                core.require(
+                    conversation != invocation["parent_conversation"],
+                    "HOST_UNSUPPORTED_CHILD_IDENTITY",
+                )
+                # Native child UUIDs remain independent of parent sessions and opaque Task tokens.
+                try:
+                    core.require(
+                        str(uuid.UUID(conversation)) == conversation,
+                        "HOST_UNSUPPORTED_CHILD_IDENTITY",
+                    )
+                except (ValueError, UnicodeError) as error:
+                    raise core.WorkspaceError("HOST_UNSUPPORTED_CHILD_IDENTITY") from error
+                core.require(invocation["phase"] in {"admitted", "bound"}, "STALE_BINDING")
+                generation = common.native_token(event.get("generation_id"))
+                session = invocation["parent_session"] + "/agent/" + conversation
+                child = {**parent_request(store, record), "session_id": session}
+                child.pop("binding_generation")
+                # Classification is durable before binding can commit any child authority.
+                routing.claim(
+                    registry, "conversation", conversation, record["issue_id"], record["issue_uuid"]
+                )
+                result = execute_current(
+                    {
+                        **child,
+                        "operation": "cursor-bind-child",
+                        "invocation_id": record["invocation_id"],
+                        "tool_id": invocation["tool_id"],
+                        "child_conversation": conversation,
+                        "native_generation": generation,
+                    },
+                    deadline,
+                )
+                core.require(result["ok"], result["code"])
+                observed.update(
+                    child=True,
+                    parent_session_id=invocation["parent_session"],
+                    session_id=session,
+                    _cursor_invocation=record["invocation_id"],
+                    _cursor_new_child=invocation["phase"] == "admitted",
+                    _cursor_conversation=conversation,
+                )
     return observed
 
 
@@ -459,66 +375,76 @@ def admit(event: core.JSONObject, deadline: float) -> core.JSONObject:
     digest = core.sha(core.canonical(args))
     cursor_results.pinned_sources(deadline)
     configured = registration(event["cwd"])
-    with (
-        core.Store(configured) as store,
-        store.control.child("cursor-children", True) as mutex,
-        mutex.lock(),
-    ):
-        # Parent readiness never grants child authority and is checked again by cursor-admit.
-        request = common.request_for(event, "ready", "cursor")
-        ready = core.execute(request)
-        core.require(ready["ok"], ready["code"])
-        key = core.participant_key(request)
-        # Read the exact issue only, preserving plan replacement-versus-admission revision checks.
-        with store.issues.child(request["issue_id"]) as control, control.lock():
-            core.require(
-                not control.exists("transaction.json") and not control.exists("cleanup.json"),
-                "RECOVERY_REQUIRED",
+    with core.Store(configured, create=False, bindings=False) as store:
+        existed = store.control.exists("cursor-children")
+        core.require(existed or not store.control.exists(routing.MARKER), "RECOVERY_REQUIRED")
+        with store.control.child("cursor-children", True) as mutex, mutex.lock():
+            routing.initialize(store, mutex, existed)
+            # Parent readiness never grants child authority and is checked again by cursor-admit.
+            request = common.request_for(event, "ready", "cursor")
+            ready = core.execute(request)
+            core.require(ready["ok"], ready["code"])
+            key = core.participant_key(request)
+            # Recover the exact issue before checking plan replacement versus admission.
+            with store.issues.child(request["issue_id"]) as control, control.lock():
+                issue = core.Issue(store, control, request["issue_id"])
+                issue.recover()
+                state = issue.committed_state()
+                plans = []
+                replays = []
+                for plan_id, plan in state.get("cursor_plans", {}).items():
+                    if (
+                        plan["parent"] != key
+                        or plan["parent_generation"] != request["binding_generation"]
+                    ):
+                        continue
+                    # Only an explicitly unconsumed plan is eligible for a fresh admission.
+                    if plan["invocation_id"] is None:
+                        if plan["task_digest"] == digest:
+                            plans.append((plan_id, plan))
+                        continue
+                    invocation = state.get("cursor_invocations", {}).get(plan["invocation_id"])
+                    core.require(isinstance(invocation, dict), "INTEGRITY_ERROR")
+                    assert isinstance(invocation, dict)
+                    if (
+                        invocation["tool_id"] == event["tool_use_id"]
+                        and invocation["native_call"] == event["_cursor_native_call"]
+                    ):
+                        core.require(plan["task_digest"] == digest, "REQUEST_CONFLICT")
+                        replays.append((plan_id, plan))
+            # A later identical plan must not make the original callback's retry ambiguous.
+            plans = replays or plans
+            core.require(plans, "SCOPE_MISSING")
+            core.require(len(plans) == 1, "REQUEST_CONFLICT")
+            plan_id, plan = plans[0]
+            # Installed source forwards optional resume UUID; the exact plan names the same child.
+            core.require(plan["resume_child"] == resume, "REQUEST_CONFLICT")
+            # Reserve exact selectors before the issue can commit an admitted native call.
+            routing.claim(
+                mutex,
+                "call",
+                event["_cursor_native_call"],
+                request["issue_id"],
+                state["issue_uuid"],
             )
-            state = control.json("state.json")
-            plans = []
-            replays = []
-            for plan_id, plan in state.get("cursor_plans", {}).items():
-                if (
-                    plan["parent"] != key
-                    or plan["parent_generation"] != request["binding_generation"]
-                ):
-                    continue
-                # Only an explicitly unconsumed plan is eligible for a fresh admission.
-                if plan["invocation_id"] is None:
-                    if plan["task_digest"] == digest:
-                        plans.append((plan_id, plan))
-                    continue
-                invocation = state.get("cursor_invocations", {}).get(plan["invocation_id"])
-                core.require(isinstance(invocation, dict), "INTEGRITY_ERROR")
-                assert isinstance(invocation, dict)
-                if (
-                    invocation["tool_id"] == event["tool_use_id"]
-                    and invocation["native_call"] == event["_cursor_native_call"]
-                ):
-                    core.require(plan["task_digest"] == digest, "REQUEST_CONFLICT")
-                    replays.append((plan_id, plan))
-        # A later identical plan must not make the original callback's retry ambiguous.
-        plans = replays or plans
-        core.require(plans, "SCOPE_MISSING")
-        core.require(len(plans) == 1, "REQUEST_CONFLICT")
-        plan_id, plan = plans[0]
-        # Installed source forwards optional resume UUID; the exact plan names the same child.
-        core.require(plan["resume_child"] == resume, "REQUEST_CONFLICT")
-        result = execute_current(
-            {
-                **request,
-                "operation": "cursor-admit",
-                "plan_id": plan_id,
-                "parent_conversation": event["conversation_id"],
-                "task_digest": digest,
-                "tool_id": event["tool_use_id"],
-                "native_call": event["_cursor_native_call"],
-            },
-            deadline,
-        )
-        core.require(result["ok"], result["code"])
-        return result
+            if resume is not None:
+                routing.claim(
+                    mutex, "conversation", resume, request["issue_id"], state["issue_uuid"]
+                )
+            result = execute_current(
+                {
+                    **request,
+                    "operation": "cursor-admit",
+                    "plan_id": plan_id,
+                    "parent_conversation": event["conversation_id"],
+                    "task_digest": digest,
+                    "tool_id": event["tool_use_id"],
+                    "native_call": event["_cursor_native_call"],
+                },
+                deadline,
+            )
+            core.require(result["ok"], result["code"])
+            return result
 
 
 def reconcile_command(issue: str, token: str) -> str:
@@ -599,12 +525,15 @@ def authorize_reconcile(event: core.JSONObject, issue: str, token: str, deadline
     core.require(ready["ok"], ready["code"])
     core.require(core.issue_id(issue) == parent["issue_id"], "NOT_OWNER")
     with (
-        core.Store(parent) as store,
-        store.control.child("cursor-children", True) as mutex,
-        mutex.lock(),
+        core.Store(parent, create=False, bindings=False) as store,
+        store.control.child("cursor-children") as mutex,
+        mutex.lock(create=False),
     ):
+        routing.verify(store, mutex)
         record = one(
-            census(store, deadline, lambda record: record["invocation"]["tool_id"] == token, issue)
+            issue_records(
+                store, deadline, lambda record: record["invocation"]["tool_id"] == token, issue
+            )
         )
         invocation = record["invocation"]
         core.require(
@@ -635,20 +564,32 @@ def reconcile(worktree: str, issue: str, token: str, deadline: float) -> core.JS
     configured = registration(worktree)
     # Snapshot identity under the shared mutex; do expensive source/database reads outside locks.
     with (
-        core.Store(configured) as store,
-        store.control.child("cursor-children", True) as mutex,
-        mutex.lock(),
+        core.Store(configured, create=False, bindings=False) as store,
+        store.control.child("cursor-children") as mutex,
+        mutex.lock(create=False),
     ):
+        routing.verify(store, mutex)
         record = one(
-            census(store, deadline, lambda record: record["invocation"]["tool_id"] == token, issue)
+            issue_records(
+                store, deadline, lambda record: record["invocation"]["tool_id"] == token, issue
+            )
         )
     result = cursor_results.read_terminal(record["invocation"], deadline)
     # Serialize terminal-only classification with every other lookup-visible candidate mutation.
     with (
-        core.Store(configured) as store,
-        store.control.child("cursor-children", True) as mutex,
-        mutex.lock(),
+        core.Store(configured, create=False, bindings=False) as store,
+        store.control.child("cursor-children") as mutex,
+        mutex.lock(create=False),
     ):
+        # A terminal-only conversation is durable before retirement can commit a retained child.
+        routing.verify(store, mutex)
+        routing.claim(
+            mutex,
+            "conversation",
+            result["child_conversation"],
+            record["issue_id"],
+            record["issue_uuid"],
+        )
         # Core revalidates the exact invocation, generation and effects under its issue lock.
         request = parent_request(store, record)
         retired = execute_current(
@@ -662,6 +603,73 @@ def reconcile(worktree: str, issue: str, token: str, deadline: float) -> core.JS
         )
         core.require(retired["ok"], retired["code"])
         return retired
+
+
+def populate_routes(worktree: str, identifiers: list[str], deadline: float) -> core.JSONObject:
+    """Explicitly populate an existing modern registry before routing cutover.
+
+    This recovery operation never runs from native classification or admission.
+    Selected issue recovery may roll a staged issue transaction forward.
+    Population never migrates authority or rewrites a retained legacy index.
+
+    Args:
+        worktree: Registered checkout selected for deliberate recovery.
+        identifiers: Complete sorted retained issue inventory supplied explicitly by the caller.
+        deadline: Shared recovery deadline; failed partial reservations remain restrictive.
+
+    Returns:
+        Complete marker after verifying the entire supplied inventory.
+
+    Raises:
+        core.WorkspaceError: Inventory, selected state, routes or legacy evidence is invalid.
+        OSError: Selected issue or durable pointer access fails.
+    """
+    # Bound the explicit inventory by the existing lifecycle request-size limit.
+    core.require(
+        isinstance(identifiers, list)
+        and len(core.canonical(identifiers)) <= core.MAX_REQUEST
+        and all(isinstance(identifier, str) for identifier in identifiers),
+        "INVALID_REQUEST",
+    )
+    for identifier in identifiers:
+        core.issue_id(identifier)
+    core.require(identifiers == sorted(set(identifiers)), "INVALID_REQUEST")
+    configured = registration(worktree)
+    with (
+        core.Store(configured, create=False, bindings=False) as store,
+        store.control.child("cursor-children") as registry,
+        registry.lock(create=False),
+    ):
+        # Coexisting legacy evidence is validated and retained byte-for-byte.
+        routing.legacy_guard(registry)
+        if store.control.exists(routing.MARKER):
+            routing.verify(store, registry)
+        actual = sorted(store.issues.names()) if store.issues_present else []
+        core.require(identifiers == actual, "REQUEST_CONFLICT")
+        if not store.control.exists(routing.MARKER):
+            routing.prepare(registry)
+        # Recover every supplied issue and publish only nonauthorizing exact selectors.
+        for identifier in identifiers:
+            records = issue_records(store, deadline, lambda _record: True, identifier)
+            for record in records:
+                invocation = record["invocation"]
+                routing.claim(
+                    registry, "call", invocation["native_call"], identifier, record["issue_uuid"]
+                )
+                for conversation in {
+                    invocation.get("child_conversation"),
+                    invocation.get("resume_child"),
+                } - {None}:
+                    routing.claim(
+                        registry, "conversation", conversation, identifier, record["issue_uuid"]
+                    )
+        # Recheck membership after recovery, then publish completion as the final durable step.
+        cursor_results.check_deadline(deadline)
+        core.require(
+            identifiers == (sorted(store.issues.names()) if store.issues_present else []),
+            "REVISION_CONFLICT",
+        )
+        return routing.complete(store, registry)
 
 
 def source_transition(
@@ -698,14 +706,12 @@ def source_transition(
     )
     if phase != "start":
         request["source_event"] = phase
-    # Exact callback retries retain the same ID/body so a lost reply cannot duplicate effects.
-    for _ in range(8):
-        cursor_results.check_deadline(deadline)
-        result = core.execute(request)
-        if result["ok"]:
-            return result
-        core.require(result["code"] == "BUSY", result["code"])
-    raise core.WorkspaceError("BUSY")
+    # Preparation is public; only native content/completion uses the Python-only core entry.
+    execute = core.execute if phase == "start" else core.execute_internal
+    # Exact retries retain this same ID/body, including after a committed reply was lost.
+    return common.retry_on_contention(
+        lambda: execute(request), deadline, retry_codes=frozenset({"BUSY"})
+    )
 
 
 def source_read_pre(event: core.JSONObject, deadline: float) -> core.JSONObject:
@@ -918,6 +924,70 @@ def child_lifecycle(event: core.JSONObject) -> bool:
     return True
 
 
+def parent_pre(event: core.JSONObject, deadline: float) -> core.JSONObject | None:
+    """Handle parent Task or exact reconciliation admission without ordinary pending work.
+
+    Args:
+        event: Independently normalized actual parent envelope.
+        deadline: Shared absolute monotonic execution deadline.
+
+    Returns:
+        Native admission response for a managed call, or None for ordinary parent admission.
+
+    Raises:
+        core.WorkspaceError: Planned Task or reconciliation authority is invalid.
+    """
+    # Only the exact planned native Task may reserve its parent's invocation charge.
+    if event.get("tool_name") == "Task":
+        admit(event, deadline)
+        return {"permission": "allow"}
+    # The exact self-managing command independently verifies result evidence before retirement.
+    selected = recognize_reconcile(event)
+    if selected is not None:
+        authorize_reconcile(event, *selected, deadline)
+        return {"permission": "allow"}
+    return None
+
+
+def parent_post(
+    event: core.JSONObject, deadline: float, *, failed: bool = False
+) -> core.JSONObject | None:
+    """Keep Task charges until reconciliation and bypass ordinary completion for that command.
+
+    Args:
+        event: Independently normalized actual parent completion.
+        deadline: Shared absolute monotonic execution deadline.
+        failed: Actual postToolUseFailure rather than successful completion.
+
+    Returns:
+        Exact reconciliation advice or an empty self-managed response; None for ordinary work.
+
+    Raises:
+        core.WorkspaceError: Completion shape or current parent binding is invalid.
+    """
+    # Native Task callbacks advise the exact issue/call command without settling its charge.
+    if event.get("tool_name") == "Task":
+        cursor_results.check_deadline(deadline)
+        if failed:
+            core.require(
+                isinstance(event.get("error_message"), str)
+                and event.get("failure_type") in {"error", "timeout", "permission_denied"},
+                "INVALID_REQUEST",
+            )
+        else:
+            core.require(isinstance(event.get("tool_output"), str), "INVALID_REQUEST")
+        parent = common.request_for(event, "ready", "cursor")
+        command = reconcile_command(parent["issue_id"], event["tool_use_id"])
+        return {
+            "additional_context": "Task remains charged until result reconciliation. Run: "
+            + command
+        }
+    # The prehook authorized this exact command; no generic pending effect was started.
+    if recognize_reconcile(event) is not None:
+        return {}
+    return None
+
+
 def child_context(event: core.JSONObject) -> str:
     """Render canonical own requests with explicit result/assignment substitutions.
 
@@ -973,57 +1043,45 @@ def child_context(event: core.JSONObject) -> str:
         )
         commands.append(operation + ":\n" + command)
     # Explain sequencing and recovery without restarting successful delivery after every denial.
-    return (
-        "Canonical own Shell templates follow. Replace every <...> before execution; "
-        "preserve the actual identity fields. Use a fresh request_id for each new or changed "
-        "request. Empty, missing, or non-JSON lifecycle output is uncertain even when "
-        "exitCode is 0. Replay the exact same request and request_id. Never follow a "
-        "terminal-file suggestion outside your assigned packet. If the replay remains "
-        "uncertain, stop and report the uncertainty.\n"
-        "Initially run read once. Retain its references and packet_digest. Use native "
-        "Read(path=...) for each exact assigned source, with no range/limit; relative locators "
-        "resolve under the issue task directory. Source Read callbacks advance revision; "
-        "refresh metadata with read or diagnose after source delivery, before acknowledgment. "
-        "Acknowledge the returned packet_digest "
-        "(not an individual file sha256), then require ready ok:true before update.\n"
-        "For expected_revision use the integer revision from the latest successful lifecycle "
-        "response, including acknowledge/update; never pin the startup revision. On "
-        "REVISION_CONFLICT, refresh metadata with read or diagnose, then retry the intended "
-        "operation with its current revision and a fresh request_id. Preserve completed "
-        "source receipts; do not repeat acknowledgment unless readiness or the packet changed.\n"
-        "For update copy the exact owned context note path from the parent's assignment; "
-        "never choose another context path. old_digest:null is only for an absent note; "
-        "for replacement use its current SHA-256, obtaining exact metadata from the "
-        "coordinator if unavailable. Copy provenance sources as exact id/locator/sha256 "
-        "triples from read references; include each applicable source. Replace content with "
-        "the requested result and choose truthful single-token applicability/status.\n"
-        "A denial does not restart packet/source reads. Follow the exact failure: missing "
-        "source delivery needs that assigned Read; changed scope/source needs coordinator "
-        "refresh. Otherwise stop the denied action and report its code. Do not try Grep, "
-        "unassigned Reads, ordinary Shell, another identity, or a replacement Task. These "
-        "templates grant no authority.\n" + "\n".join(commands)
+    guidance = (
+        resources.files("nplet")
+        .joinpath("resources/task_workspace/cursor_child.md")
+        .read_text(encoding="utf-8")
     )
+    return guidance + "\n".join(commands)
 
 
 def main() -> int:
-    """Run only the exact adapter reconciliation CLI with actual cwd and no result overrides.
+    """Run exact reconciliation or deliberately requested complete routing recovery.
 
     Returns:
-        Zero on retirement, three for a bounded unresolved/failure result.
+        Zero on success, three for a bounded unresolved or failed operation.
     """
+    # Recovery is an explicit maintenance command, never a native-hook fallback.
     try:
-        core.require(
-            len(sys.argv) == 6
-            and sys.argv[1:3] == ["cursor-reconcile", "--issue"]
-            and sys.argv[4] == "--call",
-            "INVALID_REQUEST",
-        )
-        result = reconcile(
-            str(Path.cwd()),
-            core.issue_id(sys.argv[3]),
-            core.token(sys.argv[5]),
-            time.monotonic() + 1.5,
-        )
+        if len(sys.argv) == 6 and sys.argv[1:3] == ["cursor-routing-recover", "--issues-json"]:
+            core.require(sys.argv[4] == "--budget-ms", "INVALID_REQUEST")
+            core.require(len(sys.argv[3].encode()) <= core.MAX_REQUEST, "SIZE_LIMIT")
+            budget = int(core.token(sys.argv[5]))
+            core.require(budget > 0, "INVALID_REQUEST")
+            deadline = time.monotonic() + budget / 1000
+            core.require(math.isfinite(deadline), "INVALID_REQUEST")
+            marker = populate_routes(str(Path.cwd()), core.strict_json(sys.argv[3]), deadline)
+            result = {"ok": True, "code": "OK", "routing": marker}
+        else:
+            # Native reconciliation retains the exact spelling and runner deadline.
+            core.require(
+                len(sys.argv) == 6
+                and sys.argv[1:3] == ["cursor-reconcile", "--issue"]
+                and sys.argv[4] == "--call",
+                "INVALID_REQUEST",
+            )
+            result = reconcile(
+                str(Path.cwd()),
+                core.issue_id(sys.argv[3]),
+                core.token(sys.argv[5]),
+                time.monotonic() + runner.DEADLINE_SECONDS,
+            )
     except Exception as error:
         code = error.code if isinstance(error, core.WorkspaceError) else "RECOVERY_REQUIRED"
         result = {"ok": False, "code": code}

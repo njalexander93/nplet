@@ -738,12 +738,62 @@ This guard does not identify unclaimed returned children missing from the index,
 preserve old child operations, or establish safe installation over a legacy runtime.
 A supported transition remains necessary before live cutover.
 
-Native classification still searches registered issue metadata when the envelope
-cannot directly locate its parent-qualified child binding. Consequently an unrelated
-unreadable issue can still block the whole hook path, even though reconciliation's
-own lookup is issue-local. Do not interpret isolated-store tests as proof of full
-parent usability. Source delivery, genuine resume, repeated overlapping bursts and
-failure recovery still require actual native acceptance with hooks active.
+Native classification hashes the exact raw parent call or child conversation with
+its namespace into a full 64-digit SHA-256 key. A mandatory root and at most 64
+selected descendant nodes locate one retained issue; the route grants no authority.
+Each node has at most sixteen edges or one exact terminal identity and issue selector.
+A missing edge in a valid node means an unknown identity. A missing root or referenced
+node fails closed; native hooks never recreate it or interpret it as absence.
+The adapter recovers the selected issue transaction under its existing lock and
+revalidates the committed invocation and current participant generation. Ordinary
+parents without a selected route do not enumerate retained issue histories.
+Missing local bindings cannot turn a retained routed child into a parent.
+
+The adapter publishes descendants durably before their parent references, and makes
+each exact route reachable from the root before admission, child binding or
+terminal-only retirement commits. Before the route becomes reachable, the corresponding
+authority cannot commit. Once reachable, an interrupted claim remains restrictive
+until the exact operation is retried or deliberately recovered. A root completion marker
+binds the routing directory identity, so deleting or replacing that directory does
+not establish a fresh empty registry.
+
+An existing modern registry needs explicit complete population before routing
+cutover. Run the following maintenance command from the registered repository root
+in a standalone terminal outside Cursor native hooks. Supply the complete sorted
+list of retained issue identifiers, including cleaned histories. The example list
+and positive finite budget are operator inputs, not an inferred authorization.
+
+```sh
+poetry run python src/nplet/adapters/cursor_children.py \
+  cursor-routing-recover --issues-json '["TEAM-1","TEAM-2"]' --budget-ms 30000
+```
+
+Recovery may roll selected issue transactions forward through their existing
+recovery mechanism. It bounds the explicit inventory by the lifecycle request-size limit, checks
+it against the retained issue collection, recovers every selected issue and writes
+exact modern pointers. It checks the full inventory again before publishing the
+completion marker. Markerless recovery can finish interrupted root initialization. It preserves existing
+root edges and compatible orphan descendants; it never prunes pending route claims.
+An incomplete or changed inventory, unreadable selected state,
+expired budget or interrupted population leaves cutover unverified; partial
+pointers remain restrictive and the explicit command can be retried. A coexisting
+version-2 index remains byte-for-byte unchanged and keeps its raw-child denial.
+Routing does not aggregate lifetime identities into a fixed-capacity file. Each
+node uses the existing file-byte limit, with at most sixteen edges or one bounded
+native identity. New branches therefore do not consume space reserved for an
+admitted Task's future child identity. Encoded-size checks precede atomic node
+replacement. Exact replay leaves node bytes unchanged. Nodes, routes and edges are
+never evicted, truncated or deleted by the adapter. The completion marker and
+required references detect missing storage; they do not authenticate valid-JSON
+edits. Routing files retain the cooperative protected-state trust boundary.
+
+This operation does not migrate legacy authority, retire legacy obligations or
+update installed profiles. Native hooks never run population as a fallback and do
+not admit this maintenance command as ordinary reconciliation.
+
+These protocol tests do not establish native installation or live cutover. Source
+delivery, genuine resume, repeated overlapping bursts and failure recovery still
+require actual native acceptance with hooks active.
 
 ## Avoiding duplicate imported hooks
 

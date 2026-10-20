@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from nplet.lifecycle import _invocation_records as invocation_records
+from nplet.lifecycle import _invocations as invocations
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -16,7 +18,7 @@ def test_native_text_preserves_exact_bounded_content(value: str) -> None:
     Args:
         value: Bounded exact native text.
     """
-    assert core.cursor_text(value) == value
+    assert invocation_records.native_text(value) == value
 
 
 @pytest.mark.parametrize("value", ["", "\x00", "x" * 2049, 1, None, b"call"])
@@ -31,7 +33,7 @@ def test_native_text_rejects_invalid_inputs(value: object) -> None:
     """
     # Capture only the boundary operation expected to reject input.
     with pytest.raises(core.WorkspaceError) as captured:
-        core.cursor_text(value)
+        invocation_records.native_text(value)
     assert captured.value.code == "INVALID_REQUEST"
 
 
@@ -79,13 +81,13 @@ def test_classified_child_requires_its_active_exact_generation(change: str | Non
     elif change == "wrong-generation":
         invocation["child_generation"] = 2
     if change is None:
-        core.cursor_child_active(state, "reader", member)  # type: ignore[arg-type]
+        invocations.child_active(state, "reader", member)  # type: ignore[arg-type]
     else:
         with pytest.raises(core.WorkspaceError) as captured:
-            core.cursor_child_active(state, "reader", member)  # type: ignore[arg-type]
+            invocations.child_active(state, "reader", member)  # type: ignore[arg-type]
         assert captured.value.code == "STALE_BINDING"
 
 
 def test_ordinary_participant_retains_existing_authority_contract() -> None:
     """Leave participants with no Cursor classification outside the new fence."""
-    core.cursor_child_active({}, "reader", {"generation": 1})  # type: ignore[arg-type]
+    invocations.child_active({}, "reader", {"generation": 1})  # type: ignore[arg-type]

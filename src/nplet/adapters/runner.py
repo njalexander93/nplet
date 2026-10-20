@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import os
 import queue
 import subprocess
@@ -17,7 +18,6 @@ from nplet.lifecycle import task_workspace as core
 
 INPUT_LIMIT = 1024 * 1024
 CONTENT_INPUT_LIMIT = 6 * core.MAX_FILE + INPUT_LIMIT
-CURSOR_DEADLINE_ALLOWANCE = 128
 DEADLINE_SECONDS = 2.0
 
 
@@ -107,11 +107,10 @@ def run(
         core.require(not observer or name == "beforeReadFile", "INVALID_REQUEST")
         module = host_module
         core.require(module in {"codex", "claude", "cursor"}, "INVALID_REQUEST")
-        # Override native input with the supervisor's actual remaining deadline.
-        if module == "cursor":
-            event["_cursor_deadline"] = deadline
-            raw = core.canonical(event)
         worker_args = [sys.executable, "-m", "nplet.adapters.runner", "--worker", module]
+        # Absolute monotonic transport preserves the original budget across worker startup.
+        if module == "cursor":
+            worker_args.extend(["--deadline", repr(deadline)])
         if observer:
             worker_args.append("--observe-read-content")
         # Parsing and serialization may consume the budget; do not start late mutation.
@@ -152,14 +151,9 @@ def run(
             if isinstance(error, core.WorkspaceError)
             else "RECOVERY_REQUIRED"
         )
-        # Observation timeout/overflow cannot grant proof or block an unrelated parent Read.
-        # The worker has been reaped above; already committed exact proof remains durable.
-        if observer and code in {"BUSY", "SIZE_LIMIT"}:
-            result = {"permission": "allow"}
-            status = 0
-        else:
-            result = failure(name, code)
-            status = error_status
+        # The adapter owns failure policy; a rendered native allow remains a successful response.
+        result = failure(name, code)
+        status = 0 if result.get("permission") == "allow" else error_status
         print("TASK_WORKSPACE_NOT_READY: " + code, file=sys.stderr)
     # Observe completed Codex decisions only; diagnostic failures cannot alter the result.
     if module == "codex":
@@ -179,21 +173,31 @@ def main() -> int:
     Returns:
         Zero after a valid handler response; two for an invalid worker invocation.
     """
-    # Reject any worker invocation outside the allowlisted adapter protocol.
-    observer = sys.argv[1:] == ["--worker", "cursor", "--observe-read-content"]
-    if not observer and (
-        len(sys.argv) != 3
-        or sys.argv[1] != "--worker"
-        or sys.argv[2] not in {"codex", "claude", "cursor"}
-    ):
-        # Signal a bad worker command without loading an adapter.
+    # Accept only the exact supervisor-owned argv; native event JSON cannot select a budget.
+    args = sys.argv[1:]
+    observer = (
+        len(args) == 5
+        and args[:3] == ["--worker", "cursor", "--deadline"]
+        and args[4] == "--observe-read-content"
+    )
+    cursor_worker = (
+        len(args) in {4, 5}
+        and args[:3] == ["--worker", "cursor", "--deadline"]
+        and (len(args) == 4 or observer)
+    )
+    other_worker = len(args) == 2 and args[0] == "--worker" and args[1] in {"codex", "claude"}
+    if not (cursor_worker or other_worker):
         return 2
-    # Parse one bounded event and execute only its selected adapter.
-    adapter = importlib.import_module("nplet.adapters." + sys.argv[2])
+    # Decode only finite absolute deadlines; expiration is checked inside the selected adapter.
+    deadline = None
+    if cursor_worker:
+        try:
+            deadline = float(args[3])
+            core.require(math.isfinite(deadline), "INVALID_REQUEST")
+        except (ValueError, core.WorkspaceError):
+            return 2
+    adapter = importlib.import_module("nplet.adapters." + args[1])
     input_limit = CONTENT_INPUT_LIMIT if observer else INPUT_LIMIT
-    # Internal transport carries one supervisor-generated ASCII key and finite float.
-    if sys.argv[2] == "cursor":
-        input_limit += CURSOR_DEADLINE_ALLOWANCE
     raw = sys.stdin.buffer.read(input_limit + 1)
     event: core.JSONObject = {}
     status = 0
@@ -208,7 +212,9 @@ def main() -> int:
             not observer or event.get("hook_event_name") == "beforeReadFile", "INVALID_REQUEST"
         )
         # Invoke the host adapter on the parsed event.
-        result = adapter.handle(event)
+        result = (
+            adapter.handle(event, deadline=deadline) if cursor_worker else adapter.handle(event)
+        )
     except Exception as error:
         # Render a host-specific failure without leaking the exception body.
         code = error.code if isinstance(error, core.WorkspaceError) else "RECOVERY_REQUIRED"

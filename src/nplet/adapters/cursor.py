@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import math
 import os
 import sys
 import time
+from functools import partial
 
 from nplet.adapters import common, cursor_children, runner
 from nplet.lifecycle import task_workspace as core
@@ -15,19 +15,23 @@ PYTHON = common.PYTHON
 LIFECYCLE = common.LIFECYCLE
 
 
-def failure(name: str, code: str) -> core.JSONObject:
+def failure(name: str, code: str, *, content_observer: bool = False) -> core.JSONObject:
     """Render the supported Cursor decision or diagnostic for an event.
 
     Args:
         name: Native Cursor event name.
         code: Bounded lifecycle or adapter diagnostic.
+        content_observer: Trusted fixed supervisor mode, never native event or worker-selected.
 
     Returns:
         Cursor-native JSON without an automatic follow-up or blanket permission grant.
     """
+    # A transport timeout or overflow in the fixed observer supplies no proof or completion.
+    if content_observer and code in {"BUSY", "SIZE_LIMIT"}:
+        return {"permission": "allow"}
     message = common.recovery(code, HOST)
     # Admission failures deny only the pending Cursor tool or child hook.
-    if name in {"preToolUse", "beforeMCPExecution", "subagentStart", "beforeReadFile"}:
+    if name in {"preToolUse", "beforeMCPExecution", "beforeReadFile"}:
         return {"permission": "deny", "user_message": message, "agent_message": message}
     # Prompt rejection uses Cursor's continue decision.
     if name == "beforeSubmitPrompt":
@@ -97,21 +101,21 @@ def child_event(event: core.JSONObject, name: str, deadline: float) -> core.JSON
     return failure(name, "HOST_UNSUPPORTED_EVENT")
 
 
-def handle(event: core.JSONObject) -> core.JSONObject:
+def handle(event: core.JSONObject, *, deadline: float | None = None) -> core.JSONObject:
     """Translate a native Cursor envelope into conversation-bound lifecycle actions.
 
     Args:
         event: JSON received from a local Cursor Agent hook.
+        deadline: Trusted absolute worker deadline, or the shared budget for direct invocation.
 
     Returns:
         Native decisions; session start and compaction are advisory only.
     """
     name = event.get("hook_event_name", "")
     observed: core.JSONObject = {}
-    deadline = event.get("_cursor_deadline", time.monotonic() + 1.5)
+    deadline = time.monotonic() + runner.DEADLINE_SECONDS if deadline is None else deadline
     # Reject unsupported surfaces before parent startup, and classify retained children first.
     try:
-        core.require(type(deadline) in {int, float} and math.isfinite(deadline), "INVALID_REQUEST")
         cursor_children.cursor_results.check_deadline(deadline)
         core.require(os.environ.get("CURSOR_CODE_REMOTE") != "true", "HOST_UNSUPPORTED_REMOTE")
         observed = cursor_children.normalize(event, deadline)
@@ -131,15 +135,10 @@ def handle(event: core.JSONObject) -> core.JSONObject:
                     common.native_ticket_lookup(observed, HOST) is not None, "TICKET_READ_REQUIRED"
                 )
                 return {"permission": "allow"}
-            # Only an exact planned native Task can create its existing parent pending charge.
-            if observed.get("tool_name") == "Task":
-                cursor_children.admit(observed, deadline)
-                return {"permission": "allow"}
-            # This self-managing command independently reads evidence and owns retirement.
-            reconcile = cursor_children.recognize_reconcile(observed)
-            if reconcile is not None:
-                cursor_children.authorize_reconcile(observed, *reconcile, deadline)
-                return {"permission": "allow"}
+            # Parent Task/reconciliation policy owns its own admission and pending effects.
+            managed = cursor_children.parent_pre(observed, deadline)
+            if managed is not None:
+                return managed
             common.native_pre(observed, HOST)
             return {"permission": "allow"}  # Only this validated and recorded tool call passes.
         # Verify the configured Linear server through the MCP-specific callback.
@@ -173,28 +172,12 @@ def handle(event: core.JSONObject) -> core.JSONObject:
             return {}  # No native call ID; generic postToolUse owns completion.
         # Correlate native completion facts with the exact admitted tool call.
         if name in {"postToolUse", "postToolUseFailure"}:
-            # Task callbacks keep their charge until independent result reconciliation.
-            if observed.get("tool_name") == "Task":
-                if name == "postToolUseFailure":
-                    core.require(
-                        isinstance(observed.get("error_message"), str)
-                        and observed.get("failure_type")
-                        in {"error", "timeout", "permission_denied"},
-                        "INVALID_REQUEST",
-                    )
-                else:
-                    core.require(isinstance(observed.get("tool_output"), str), "INVALID_REQUEST")
-                parent = common.request_for(observed, "ready", HOST)
-                command = cursor_children.reconcile_command(
-                    parent["issue_id"], observed["tool_use_id"]
-                )
-                return {
-                    "additional_context": "Task remains charged until result reconciliation. "
-                    "Run: " + command
-                }
-            # Native prehook authorized this exact command; it never created generic pending work.
-            if cursor_children.recognize_reconcile(observed) is not None:
-                return {}
+            # Parent Task/reconciliation completions never settle ordinary pending effects.
+            managed = cursor_children.parent_post(
+                observed, deadline, failed=name == "postToolUseFailure"
+            )
+            if managed is not None:
+                return managed
             # A ticket read must settle against the pending Task marker.
             if observed.get("tool_name") == "MCP:get_issue":
                 # Ignore unrelated completions when no ticket lookup is pending.
@@ -257,7 +240,7 @@ def main() -> int:
     """
     # Only this explicit configured CLI mode selects the dedicated full-content observer budget.
     if sys.argv[1:] == ["--observe-read-content"]:
-        return runner.run(handle, failure, content_observer=True)
+        return runner.run(handle, partial(failure, content_observer=True), content_observer=True)
     if len(sys.argv) != 1:
         print(core.canonical(failure("", "INVALID_REQUEST")).decode())
         print("TASK_WORKSPACE_NOT_READY: INVALID_REQUEST", file=sys.stderr)

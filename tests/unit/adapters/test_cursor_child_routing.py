@@ -239,3 +239,61 @@ def test_child_denial_delivers_only_available_own_recovery(
     assert "NOT_OWNER" in result["user_message"]
     assert ("own-child-command" in result.get("additional_context", "")) is context_available
     parent.assert_not_called()
+
+
+@pytest.mark.parametrize("code", ["BUSY", "SIZE_LIMIT"])
+def test_only_trusted_cursor_observer_failure_can_allow_transport_failure(code: str) -> None:
+    """Ordinary adapter failure keeps denial even for diagnostics tolerated by the supervisor.
+
+    Args:
+        code: Timeout or size diagnostic from the observer transport.
+    """
+    assert cursor.failure("beforeReadFile", code)["permission"] == "deny"
+    assert cursor.failure("beforeReadFile", code, content_observer=True) == {"permission": "allow"}
+    assert cursor.failure("subagentStart", code) == {}
+
+
+def test_cursor_handle_uses_trusted_deadline_not_native_event_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired trusted deadline is not extended by a forged native event field.
+
+    Args:
+        monkeypatch: Clock and classification boundary.
+    """
+    # Expiry is checked before classification can read or mutate lifecycle state.
+    monkeypatch.setattr(cursor.time, "monotonic", lambda: 20.0)
+    normalize = MagicMock()
+    monkeypatch.setattr(cursor.cursor_children, "normalize", normalize)
+    result = cursor.handle(
+        {"hook_event_name": "preToolUse", "_cursor_deadline": 999999999999},
+        deadline=19.0,
+    )
+    assert result["permission"] == "deny"
+    assert "BUSY" in result["user_message"]
+    normalize.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failed,fields",
+    [
+        (False, {"tool_output": None}),
+        (True, {"error_message": "failed", "failure_type": "unknown"}),
+    ],
+)
+def test_parent_post_rejects_unknown_task_completion_shape(
+    failed: bool,
+    fields: dict,
+) -> None:
+    """Moving completion dispatch cannot give malformed Task results reconciliation authority.
+
+    Args:
+        failed: Failed native completion rather than a successful result.
+        fields: Unsupported native completion shape.
+    """
+    with pytest.raises(core.WorkspaceError, match="INVALID_REQUEST"):
+        cursor.cursor_children.parent_post(
+            {"tool_name": "Task", **fields},
+            time.monotonic() + cursor.runner.DEADLINE_SECONDS,
+            failed=failed,
+        )

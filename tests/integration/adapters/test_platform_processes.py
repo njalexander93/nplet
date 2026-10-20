@@ -198,7 +198,8 @@ def test_supervisor_reaps_worker_and_preserves_failure_contract(
     marker = '\nif __name__ == "__main__":'
     assert marker in original
     path.write_text(
-        original.replace(marker, "\ndef handle(event):\n" + body + marker), encoding="utf-8"
+        original.replace(marker, "\ndef handle(event, *, deadline=None):\n" + body + marker),
+        encoding="utf-8",
     )
     environment = mutated_source_environment(source)
     environment.pop("CURSOR_VERSION", None)
@@ -322,9 +323,11 @@ def test_content_observer_bounds_oversize_and_open_pipe(tmp_path: Path, open_pip
     """
     # Lower only the fixture's byte threshold; retain the production deadline and process code.
     program = (
+        "from functools import partial\n"
         "from nplet.adapters import cursor, runner\n"
         "runner.CONTENT_INPUT_LIMIT = 2048\n"
-        "raise SystemExit(runner.run(cursor.handle, cursor.failure, content_observer=True))\n"
+        "raise SystemExit(runner.run(cursor.handle, "
+        "partial(cursor.failure, content_observer=True), content_observer=True))\n"
     )
     with subprocess.Popen(
         [sys.executable, "-c", program],

@@ -25,12 +25,10 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
+from nplet.lifecycle import _invocation_records as invocation_records
+from nplet.lifecycle import _invocations as invocations
 from nplet.lifecycle._errors import WorkspaceError, require
 from nplet.lifecycle._filesystem import Directory as NativeDirectory
-
-CURSOR_INTERNAL_OPERATIONS = frozenset(
-    {"cursor-admit", "cursor-bind-child", "cursor-retire", "cursor-source-callback"}
-)
 
 MAX_REQUEST = 96 * 1024 * 1024
 MAX_FILE = 16 * 1024 * 1024
@@ -86,7 +84,7 @@ class PendingOperation(TypedDict):
     poll_parent: NotRequired[str]
     poll_handle: NotRequired[str]
     cursor_invocation: NotRequired[str]
-    cursor_source: NotRequired[JSONObject]
+    cursor_source: NotRequired[invocation_records.SourceEffect]
 
 
 class Participant(TypedDict):
@@ -98,7 +96,7 @@ class Participant(TypedDict):
     packet: list[SourceRef] | None
     ack: str | None
     cursor_invocation: NotRequired[str]
-    cursor_sources: NotRequired[dict[str, JSONObject]]
+    cursor_sources: NotRequired[dict[str, invocation_records.SourceReceipt]]
 
 
 class RequestRecord(TypedDict):
@@ -152,8 +150,8 @@ class WorkspaceState(TypedDict):
     reconciliation: NotRequired[JSONObject]
     submitted_pr: NotRequired[str]
     provider_completion: NotRequired[JSONObject]
-    cursor_plans: NotRequired[dict[str, JSONObject]]
-    cursor_invocations: NotRequired[dict[str, JSONObject]]
+    cursor_plans: NotRequired[dict[str, invocation_records.InvocationPlan]]
+    cursor_invocations: NotRequired[dict[str, invocation_records.Invocation]]
 
 
 class DocumentRequest(TypedDict):
@@ -574,13 +572,20 @@ def _validate_registration_identity(
 class Store:
     """Own validated descriptors connecting one worktree to its shared task store."""
 
-    def __init__(self, request: JSONObject, *, create: bool = True) -> None:
+    def __init__(
+        self,
+        request: JSONObject,
+        *,
+        create: bool = True,
+        bindings: bool = True,
+    ) -> None:
         """Open the registered shared store and verify all repository identities.
 
         Args:
             request: Versioned lifecycle request with explicit repository, issue and
                 session identities.
             create: Permit creation of binding/issue collections for lifecycle operations.
+            bindings: Open local binding metadata; False supports read-only classification.
 
         Raises:
             WorkspaceError: If local and canonical registration or filesystem identities differ.
@@ -590,6 +595,8 @@ class Store:
         self.request = request
         self.root, common, trees = repository(request["worktree"])
         self.handles: list[Directory] = []
+        self._issues: Directory | None = None
+        self._bindings: Directory | None = None
         # Open and validate store descriptors within a cleanup-protected lifetime.
         try:
             self.local_root = self.keep(Directory.absolute(self.root))
@@ -604,12 +611,53 @@ class Store:
             self.task = self.keep(self.main.child(".task"))
             self.control = self.keep(self.task.child(".control"))
             require(self.control.json("repository.json") == reg, "REPOSITORY_MISMATCH")
-            self.issues = self.keep(self.control.child("issues", create))
-            self.bindings = self.keep(self.local.child(".bindings", create))
+            # Registration-only parent inspection may precede the first issue collection.
+            if create or self.control.exists("issues"):
+                self._issues = self.keep(self.control.child("issues", create))
+            # Classification must not open or create local binding metadata as a side effect.
+            if bindings:
+                self._bindings = self.keep(self.local.child(".bindings", create))
         # Release partially opened descriptors before propagating initialization failure.
         except BaseException:
             self.close()
             raise
+
+    @property
+    def issues_present(self) -> bool:
+        """Report whether the validated registered store already has an issue collection.
+
+        Returns:
+            False only for a registered store with no issue collection yet.
+        """
+        return self._issues is not None
+
+    @property
+    def issues(self) -> Directory:
+        """Expose the opened issue collection to ordinary lifecycle callers.
+
+        Returns:
+            The validated existing or explicitly created issue collection.
+
+        Raises:
+            WorkspaceError: A positive issue lookup has no retained collection.
+        """
+        require(self._issues is not None, "RECOVERY_REQUIRED")
+        assert self._issues is not None
+        return self._issues
+
+    @property
+    def bindings(self) -> Directory:
+        """Expose local binding metadata only when the caller requested that capability.
+
+        Returns:
+            The validated opened binding collection.
+
+        Raises:
+            WorkspaceError: Classification-only code attempts a binding operation.
+        """
+        require(self._bindings is not None, "RECOVERY_REQUIRED")
+        assert self._bindings is not None
+        return self._bindings
 
     def keep(self, directory: Directory) -> Directory:
         """Track a descriptor for reverse-order store cleanup.
@@ -880,20 +928,21 @@ def validate_history(files: PayloadFiles) -> tuple[int, str | None]:
     return validate_events(files.get("events.jsonl", b""), seq, head)
 
 
-def settlement_reserve(state: WorkspaceState) -> tuple[int, int]:
-    """Derive remaining Cursor settlement bytes and all pending event slots.
+def settlement_slots(state: WorkspaceState) -> int:
+    """Count unfinished event obligations without constructing byte projections.
 
     Args:
-        state: Complete post-transition state, including the current request result.
+        state: Current staged or committed issue state.
 
     Returns:
-        Conservative positive state growth and future required event count. No counter
-        is persisted; the obligation disappears only with its committed settlement.
+        Mandatory remaining transition/completion event count.
     """
-    # Count mandatory bind/content transitions separately from their final completion.
-    invocations = state.get("cursor_invocations", {})
-    active = [(key, item) for key, item in invocations.items() if item["phase"] != "retired"]
-    slots = sum(2 if item["phase"] == "admitted" else 1 for _, item in active)
+    # Invocation Tasks already account for their own binding and terminal events.
+    slots = sum(
+        2 if item["phase"] == "admitted" else 1
+        for item in state.get("cursor_invocations", {}).values()
+        if item["phase"] != "retired"
+    )
     for member in state["participants"].values():
         for pending in member["pending"].values():
             if "cursor_invocation" in pending:
@@ -902,16 +951,35 @@ def settlement_reserve(state: WorkspaceState) -> tuple[int, int]:
                 slots += 1 if pending["cursor_source"].get("provisional") is not None else 2
             else:
                 slots += 1 if pending["status"] == "unknown" else 2
-    # Bound one stored completion result using real repository identifiers and counter sizes.
+    return slots
+
+
+def settlement_reserve(state: WorkspaceState) -> tuple[int, int]:
+    """Derive conservative settlement growth from the actual retained record constructors.
+
+    Args:
+        state: Post-transition state, including its current request result.
+
+    Returns:
+        Remaining conservative state bytes and required event count.
+    """
+    # Scalar bounds use current identities/counters and the exact number of remaining facts.
+    slots = settlement_slots(state)
+    active = [
+        (identifier, item)
+        for identifier, item in state.get("cursor_invocations", {}).items()
+        if item["phase"] != "retired"
+    ]
     digest = "f" * 64
     generation = (
         max(
             [member["generation"] for member in state["participants"].values()]
-            + [item.get("resume_generation") or 0 for _, item in active],
+            + [item["resume_generation"] or 0 for _, item in active],
             default=0,
         )
         + 1
     )
+    # This fixed result-field union dominates bind, retire and both source callback responses.
     result = {
         "ok": True,
         "code": "OK",
@@ -925,79 +993,59 @@ def settlement_reserve(state: WorkspaceState) -> tuple[int, int]:
     }
     request_bytes = len(canonical({digest: {"digest": digest, "result": result}}))
     reserved = 0
-    # Token characters can need two JSON bytes; native text can need six per UTF8 byte.
-    token_bound = "\\" * 160
+    terminal_bytes, binding_bytes = invocation_records.fixed_settlement_bytes()
+    # Printable token characters need at most two JSON bytes; the terminal constructor bounds text.
+    token_bound = "\\" * invocation_records.TOKEN_LIMIT
+    claim: invocation_records.ChildClaim = {
+        "child_conversation": token_bound,
+        "child_participant": digest,
+        "child_generation": generation,
+        "native_generation": token_bound,
+    }
     for identifier, invocation in active:
-        terminal = {
-            "parent_conversation": invocation["parent_conversation"],
-            "native_call": invocation["native_call"],
-            "storage_key": "\x01" * 2048,
-            "child_conversation": token_bound,
-            "kind": "foreground-success",
-            "is_background": False,
-            "background_reason": 0,
-            "duration_ms": (1 << 64) - 1,
-            "binary_sha256": digest,
-            "executor_sha256": digest,
-            "workbench_sha256": digest,
-        }
-        projected_member = {
-            "generation": generation,
-            "status": "detached",
-            "pending": {},
-            "packet": None,
-            "ack": None,
-            "cursor_invocation": identifier,
-        }
-        identity = {
-            "phase": "retired",
-            "child_conversation": token_bound,
-            "child_participant": digest,
-            "child_generation": generation,
-            "native_generation": token_bound,
-            "terminal_result": terminal,
-        }
-        # Include terminal-only classification even when an existing bound member will shrink.
-        reserved += len(
-            canonical({"participants": {digest: projected_member}, "invocation": identity})
-        )
-        reserved += request_bytes
+        # Fixed bounded metadata is cached; only actual variable-size additions are rebuilt.
+        reserved += terminal_bytes + request_bytes
+        member = invocation_records.child_member(claim, identifier, None, status="detached")
+        reserved += len(canonical({"participants": {digest: member}}))
         if invocation["phase"] == "admitted":
-            packet = [{**ref, "reader": digest} for ref in invocation["packet"]]
-            projected_member = {**projected_member, "status": "attached", "packet": packet}
-            # Binding installs two copies and exact owned paths, not a guessed small slot.
-            additions = {
-                "assignments": {digest: {"packet": packet}},
-                "participants": {digest: projected_member},
-                "owners": {path: digest for path in invocation["owned_paths"]},
-                "invocation": {
-                    key: value for key, value in identity.items() if key != "terminal_result"
-                },
-            }
-            reserved += len(canonical(additions)) + request_bytes
-    # A source receipt uses the actual locator length; absolute locators are not token-bounded.
+            participant, assignment, owners = invocation_records.child_scope(
+                invocation,
+                claim,
+                identifier,
+            )
+            # Both packet copies and each actual path are charged at their encoded sizes.
+            reserved += len(
+                canonical(
+                    {
+                        "assignments": {digest: assignment},
+                        "participants": {digest: participant},
+                        "owners": owners,
+                    }
+                )
+            )
+            reserved += binding_bytes + request_bytes
+    # Source locators are variable-size assigned data, not token-sized guessed allowances.
     for member in state["participants"].values():
         for tool, pending in member["pending"].items():
             if "cursor_invocation" in pending or "cursor_invocation" not in member:
                 continue
             if "cursor_source" in pending:
                 source = pending["cursor_source"]
-                receipt = {
-                    "packet_digest": source["packet_digest"],
-                    "sha256": source["sha256"],
-                    "invocation_id": source["invocation_id"],
-                }
+                receipt = invocation_records.SourceReceipt(
+                    packet_digest=source["packet_digest"],
+                    sha256=source["sha256"],
+                    invocation_id=source["invocation_id"],
+                )
                 reserved += len(canonical({"cursor_sources": {source["locator"]: receipt}}))
                 reserved += request_bytes
                 if source.get("provisional") is None:
-                    proof = {"sha256": digest, "content_length": MAX_FILE}
+                    proof = invocation_records.SourceProof(sha256=digest, content_length=MAX_FILE)
                     reserved += len(canonical({"provisional": proof})) + request_bytes
             else:
-                # Ordinary child transports retain room for unknown-handle and completion facts.
                 count = 1 if pending["status"] == "unknown" else 2
                 reserved += count * request_bytes
                 reserved += len(canonical({tool: {"status": "unknown", "handle": token_bound}}))
-    # Account for growth of the shared counters/head while the reserved facts are written.
+    # Retain shared counter/head growth through the last reserved fact.
     if reserved:
         reserved += len(
             canonical(
@@ -1169,7 +1217,7 @@ class Issue:
             )
             optional = event_type == "observation"
             # Reserve async-transition and completion events for every admitted pending tool.
-            _, pending_slots = settlement_reserve(state)
+            pending_slots = settlement_slots(state)
             reserved = 8192 * (1 + pending_slots)
             # Suppress optional observations before they consume settlement reserves.
             if optional and len(files.get("events.jsonl", b"")) + reserved + 8192 > MAX_EVENTS:
@@ -1237,7 +1285,7 @@ class Issue:
             event_type is None
             and self.state is not None
             and files.get("events.jsonl", b"") == old_files.get("events.jsonl", b"")
-            and pending_slots <= settlement_reserve(self.state)[1]
+            and pending_slots <= settlement_slots(self.state)
         )
         event_reserve = (
             0
@@ -1260,664 +1308,6 @@ class Issue:
         fault("intent")
         self.recover()
         return result
-
-
-def cursor_child_active(state: WorkspaceState, key: str, member: Participant) -> None:
-    """Fence a classified child to its currently bound invocation.
-
-    Args:
-        state: Locked issue state.
-        key: Exact participant identity.
-        member: Recorded participant being authorized.
-
-    Raises:
-        WorkspaceError: The invocation retired or belongs to another generation.
-    """
-    # Ordinary participants preserve the existing lifecycle contract.
-    identifier = member.get("cursor_invocation")
-    if identifier is None:
-        return
-    # Classification survives detachment; only a new admitted binding can replace it.
-    invocation = state.get("cursor_invocations", {}).get(identifier)
-    require(
-        invocation is not None
-        and invocation["phase"] == "bound"
-        and invocation["child_participant"] == key
-        and invocation["child_generation"] == member["generation"],
-        "STALE_BINDING",
-    )
-
-
-def cursor_ready(
-    state: WorkspaceState, request: JSONObject, files: PayloadFiles
-) -> tuple[str, Participant]:
-    """Require a ready Cursor coordinator without granting child parent authority.
-
-    Args:
-        state: Locked issue state.
-        request: Explicit parent lifecycle identity.
-        files: Verified committed payload.
-
-    Returns:
-        The ready coordinator identity and record.
-
-    Raises:
-        WorkspaceError: Host, ownership, generation or current sources are invalid.
-    """
-    # Verify the parent role before checking its assigned current source bytes.
-    require(request["host"] == "cursor", "HOST_UNSUPPORTED")
-    key, member = authorize(state, request, coordinator=True)
-    require("cursor_invocation" not in member, "NOT_OWNER")
-    packet_reads(state, member, files)
-    require(
-        member["status"] == "ready" and member["ack"] == sha(canonical(member["packet"])),
-        "NOT_READY",
-    )
-    return key, member
-
-
-def cursor_text(value: object) -> str:
-    """Validate exact bounded native text without stripping newline characters.
-
-    Args:
-        value: Native call or persisted storage key.
-
-    Returns:
-        The exact input string.
-
-    Raises:
-        WorkspaceError: The value is empty, oversized or contains a NUL.
-    """
-    # Preserve native bytes represented by UTF-8 text while bounding stored metadata.
-    require(isinstance(value, str), "INVALID_REQUEST")
-    assert isinstance(value, str)
-    require(0 < len(value.encode("utf-8")) <= 2048 and "\x00" not in value, "INVALID_REQUEST")
-    return value
-
-
-def cursor_path_reserved(
-    state: WorkspaceState, path: str, excluded_plan: str | None = None
-) -> bool:
-    """Keep an output reserved until its launch binds an owner or retires.
-
-    Args:
-        state: Locked issue state containing plans and invocations.
-        path: Managed output whose reservation is being checked.
-        excluded_plan: Unconsumed plan explicitly being replaced, if any.
-
-    Returns:
-        Whether another unconsumed or admitted plan still reserves the path.
-    """
-    # Bound children use ordinary ownership; admitted children still need their reservation.
-    for identifier, plan in state.get("cursor_plans", {}).items():
-        if identifier != excluded_plan and path in plan["owned_paths"]:
-            invocation = plan["invocation_id"]
-            if invocation is None or state["cursor_invocations"][invocation]["phase"] == "admitted":
-                return True
-    return False
-
-
-def cursor_operation(
-    store: Store, issue: Issue, state: WorkspaceState, files: PayloadFiles, request: JSONObject
-) -> JSONObject:
-    """Commit one planned Cursor invocation transition through the existing writer.
-
-    Args:
-        store: Validated caller store.
-        issue: Issue held under its persistent lock.
-        state: Isolated copy of committed state.
-        files: Verified payload bytes.
-        request: Internal adapter request or coordinator plan.
-
-    Returns:
-        The committed result, or the unchanged result of a semantic duplicate.
-
-    Raises:
-        WorkspaceError: Identity, readiness, plan, ownership, result or effects conflict.
-        OSError: Durable publication or binding publication fails.
-    """
-    # Keep these internal operations restricted to Cursor and active retained issues.
-    operation = request["operation"]
-    require(request["host"] == "cursor", "HOST_UNSUPPORTED")
-    require(state["disposition"] not in TERMINAL and state["storage"] == "present", "TERMINAL")
-    plans = state.setdefault("cursor_plans", {})
-    invocations = state.setdefault("cursor_invocations", {})
-    key = participant_key(request)
-    previous = state["requests"].get(sha(request["request_id"].encode()))
-    result: JSONObject = {}
-    member: Participant | None
-    retired: Participant | None = None
-
-    # Exact plan replay has no admission or retirement effect.
-    if operation == "cursor-plan" and previous is not None:
-        cursor_ready(state, request, files)
-        return previous["result"]
-
-    # A plan describes a bounded packet template and disjoint managed-note ownership.
-    if operation == "cursor-plan":
-        cursor_ready(state, request, files)
-        expected(state, request)
-        plan_id = token(request["plan_id"])
-        existing_plan = plans.get(plan_id)
-        require(
-            existing_plan is None or existing_plan["invocation_id"] is None,
-            "REQUEST_CONFLICT",
-        )
-        packet = copy.deepcopy(validate_packet(request["packet"]))
-        require(all(ref["reader"] == "cursor-child" for ref in packet), "SCOPE_MISSING")
-        paths = request["owned_paths"]
-        require(isinstance(paths, list) and len(paths) <= 64 and len(set(paths)) == len(paths))
-        # Reserve notes against both installed owners and all still-unconsumed plans.
-        resumed = request.get("resume_child")
-        if resumed is not None:
-            token(resumed)
-        resumed_key = (
-            participant_key(
-                {"host": "cursor", "session_id": request["session_id"] + "/agent/" + resumed}
-            )
-            if resumed is not None
-            else None
-        )
-        if resumed_key is not None:
-            retired = state["participants"].get(resumed_key)
-            require(
-                retired is not None
-                and retired["status"] == "detached"
-                and "cursor_invocation" in retired
-                and not retired["pending"],
-                "STALE_BINDING",
-            )
-        if resumed is not None:
-            require(
-                not any(
-                    inv["phase"] in {"admitted", "bound"}
-                    and resumed in {inv["child_conversation"], inv["resume_child"]}
-                    for inv in invocations.values()
-                ),
-                "PENDING_OPERATION",
-            )
-        # An unconsumed plan reserves its known resume conversation too.
-        if resumed is not None:
-            require(
-                not any(
-                    other_id != plan_id
-                    and plan["resume_child"] == resumed
-                    and plan["invocation_id"] is None
-                    for other_id, plan in plans.items()
-                ),
-                "REQUEST_CONFLICT",
-            )
-        for path in paths:
-            payload_path(path)
-            require(
-                path != "roadmap.md" and state["owners"].get(path) in {None, resumed_key},
-                "NOT_OWNER",
-            )
-            require(
-                not cursor_path_reserved(state, path, plan_id),
-                "NOT_OWNER",
-            )
-        # Retain only planned metadata; Task prompt text never enters issue state.
-        require(DIGEST.fullmatch(request["task_digest"]), "INVALID_REQUEST")
-        plans[plan_id] = {
-            "parent": key,
-            "parent_generation": request["binding_generation"],
-            "parent_session": request["session_id"],
-            "parent_conversation": token(request["parent_conversation"]),
-            "task_digest": request["task_digest"],
-            "packet": packet,
-            "owned_paths": paths,
-            "resume_child": resumed,
-            "invocation_id": None,
-            "resume_generation": retired["generation"] if retired is not None else None,
-        }
-        result = {"plan_id": plan_id}
-    elif operation == "cursor-admit":
-        # Match the exact planned launch before reserving the existing parent pending slot.
-        parent_key, member = cursor_ready(state, request, files)
-        plan = plans.get(token(request["plan_id"]))
-        require(plan is not None, "SCOPE_MISSING")
-        assert plan is not None
-        tool = token(request["tool_id"])
-        native_call = cursor_text(request["native_call"])
-        identifier = sha(canonical([parent_key, member["generation"], tool]))
-        require(
-            plan["parent"] == parent_key
-            and plan["parent_generation"] == member["generation"]
-            and plan["parent_conversation"] == request["parent_conversation"]
-            and plan["task_digest"] == request["task_digest"],
-            "REQUEST_CONFLICT",
-        )
-        existing = invocations.get(identifier)
-        # An identical active admission is safe to retry; retired calls never relaunch.
-        if existing is not None:
-            require(existing["phase"] in {"admitted", "bound"}, "STALE_BINDING")
-            admitted_pending = member["pending"].get(tool)
-            require(
-                existing["plan_id"] == request["plan_id"]
-                and existing["native_call"] == native_call
-                and admitted_pending is not None
-                and admitted_pending.get("cursor_invocation") == identifier,
-                "REQUEST_CONFLICT",
-            )
-            return (
-                previous["result"]
-                if previous
-                else {
-                    "ok": True,
-                    "code": "OK",
-                    "revision": state["revision"],
-                    "invocation_id": identifier,
-                }
-            )
-        expected(state, request)
-        require(plan["invocation_id"] is None and tool not in member["pending"], "REQUEST_CONFLICT")
-        require(
-            not any(
-                inv["parent"] == parent_key
-                and inv["parent_generation"] == member["generation"]
-                and inv["native_call"] == native_call
-                for inv in invocations.values()
-            ),
-            "REQUEST_CONFLICT",
-        )
-        # Recheck a known conversation immediately before its native admission.
-        resumed = plan["resume_child"]
-        if resumed is not None:
-            require(
-                not any(
-                    inv["phase"] in {"admitted", "bound"}
-                    and resumed in {inv["child_conversation"], inv["resume_child"]}
-                    for inv in invocations.values()
-                ),
-                "PENDING_OPERATION",
-            )
-        if resumed is not None:
-            resumed_key = participant_key(
-                {"host": "cursor", "session_id": plan["parent_session"] + "/agent/" + resumed}
-            )
-            retired = state["participants"].get(resumed_key)
-            require(
-                retired is not None
-                and retired["status"] == "detached"
-                and retired["generation"] == plan["resume_generation"]
-                and not retired["pending"],
-                "STALE_BINDING",
-            )
-        # One parent pending record is the active charge; invocation phase is correlation data.
-        invocations[identifier] = {
-            **plan,
-            "plan_id": request["plan_id"],
-            "tool_id": tool,
-            "native_call": native_call,
-            "phase": "admitted",
-            "child_conversation": None,
-            "child_participant": None,
-            "child_generation": None,
-            "native_generation": None,
-            "terminal_result": None,
-        }
-        plan["invocation_id"] = identifier
-        member["pending"][tool] = {"status": "pending", "cursor_invocation": identifier}
-        result = {"invocation_id": identifier}
-    else:
-        # All remaining transitions identify one already admitted invocation.
-        identifier = token(request["invocation_id"])
-        invocation = invocations.get(identifier)
-        require(invocation is not None, "UNKNOWN_OPERATION")
-        assert invocation is not None
-        # Reject a malformed projection before inspecting its identity.
-        if operation == "cursor-retire":
-            require(isinstance(request.get("result"), dict), "INVALID_REQUEST")
-        child_conversation = token(
-            request["child_conversation"]
-            if operation == "cursor-bind-child"
-            else request["result"]["child_conversation"]
-        )
-        child_session = invocation["parent_session"] + "/agent/" + child_conversation
-        child_key = participant_key({"host": "cursor", "session_id": child_session})
-        member = state["participants"].get(child_key)
-        parent_member = state["participants"].get(invocation["parent"])
-        require(
-            parent_member is not None
-            and parent_member["generation"] == invocation["parent_generation"],
-            "STALE_BINDING",
-        )
-        assert parent_member is not None
-        parent_pending = parent_member["pending"].get(invocation["tool_id"])
-        require(
-            (parent_pending is not None and parent_pending.get("cursor_invocation") == identifier)
-            or invocation["phase"] == "retired",
-            "REQUEST_CONFLICT",
-        )
-        if operation == "cursor-bind-child":
-            # Only the genuine observed child identity may consume the admitted assignment.
-            require(key == child_key and request["session_id"] == child_session, "NOT_OWNER")
-            require(request["tool_id"] == invocation["tool_id"], "REQUEST_CONFLICT")
-            native_generation = request.get("native_generation")
-            if native_generation is not None:
-                token(native_generation)
-            if invocation["phase"] == "bound":
-                require(
-                    invocation["child_participant"] == child_key
-                    and invocation["native_generation"] == native_generation
-                    and member is not None
-                    and member["cursor_invocation"] == identifier
-                    and member["generation"] == invocation["child_generation"]
-                    and member["status"] in {"attached", "ready"},
-                    "STALE_BINDING",
-                )
-                # Binding publication is retryable after the issue transaction has committed.
-                assert member is not None
-                store.save_binding(state, child_key)
-                return (
-                    previous["result"]
-                    if previous
-                    else {
-                        "ok": True,
-                        "code": "OK",
-                        "revision": state["revision"],
-                        "binding_generation": member["generation"],
-                        "invocation_id": identifier,
-                    }
-                )
-            require(invocation["phase"] == "admitted", "STALE_BINDING")
-            require(
-                not any(
-                    other_id != identifier
-                    and other["phase"] in {"admitted", "bound"}
-                    and child_conversation in {other["child_conversation"], other["resume_child"]}
-                    for other_id, other in invocations.items()
-                ),
-                "PENDING_OPERATION",
-            )
-            require(invocation["resume_child"] in {None, child_conversation}, "REQUEST_CONFLICT")
-            # A known conversation is reusable only through an explicitly planned resume.
-            if member is not None:
-                require(
-                    invocation["resume_child"] == child_conversation
-                    and member["status"] == "detached"
-                    and not member["pending"]
-                    and "cursor_invocation" in member
-                    and member["generation"] == invocation["resume_generation"],
-                    "STALE_BINDING",
-                )
-                generation = member["generation"] + 1
-            else:
-                require(invocation["resume_child"] is None, "STALE_BINDING")
-                generation = 1
-            require(child_key != state["coordinator"], "NOT_OWNER")
-            packet = copy.deepcopy(validate_packet(invocation["packet"]))
-            # Bind the validated template to this actual independent reader.
-            for ref in packet:
-                ref["reader"] = child_key
-            # Install one fresh independent packet and its allowed note owners atomically.
-            for path in invocation["owned_paths"]:
-                require(state["owners"].get(path) in {None, child_key}, "NOT_OWNER")
-                state["owners"][path] = child_key
-            state.setdefault("assignments", {})[child_key] = {"packet": packet}
-            state["participants"][child_key] = {
-                "generation": generation,
-                "status": "attached",
-                "pending": {},
-                "packet": packet,
-                "ack": None,
-                "cursor_invocation": identifier,
-            }
-            invocation.update(
-                phase="bound",
-                child_conversation=child_conversation,
-                child_participant=child_key,
-                child_generation=generation,
-                native_generation=native_generation,
-            )
-            result = {"binding_generation": generation, "invocation_id": identifier}
-        else:
-            # Validate projected foreground metadata from the pinned result reader.
-            require(operation == "cursor-retire", "UNSUPPORTED_OPERATION")
-            parent_key, parent_member = cursor_ready(state, request, files)
-            require(
-                parent_key == invocation["parent"]
-                and request["binding_generation"] == invocation["parent_generation"],
-                "NOT_OWNER",
-            )
-            observed = request["result"]
-            require(
-                isinstance(observed, dict)
-                and set(observed)
-                == {
-                    "parent_conversation",
-                    "native_call",
-                    "storage_key",
-                    "child_conversation",
-                    "kind",
-                    "is_background",
-                    "background_reason",
-                    "duration_ms",
-                    "binary_sha256",
-                    "executor_sha256",
-                    "workbench_sha256",
-                },
-                "INVALID_REQUEST",
-            )
-            require(
-                observed["parent_conversation"] == invocation["parent_conversation"]
-                and cursor_text(observed["native_call"]) == invocation["native_call"]
-                and observed["kind"] == "foreground-success"
-                and observed["is_background"] is False
-                and type(observed["background_reason"]) is int
-                and observed["background_reason"] == 0
-                and type(observed["duration_ms"]) is int
-                and 0 <= observed["duration_ms"] < (1 << 64),
-                "RESULT_NOT_TERMINAL",
-            )
-            cursor_text(observed["storage_key"])
-            for field in ("binary_sha256", "executor_sha256", "workbench_sha256"):
-                require(DIGEST.fullmatch(observed[field]), "INVALID_REQUEST")
-            # Exact duplicate result succeeds only while it still names this child generation.
-            if invocation["phase"] == "retired":
-                require(invocation["terminal_result"] == observed, "REQUEST_CONFLICT")
-                require(
-                    member is not None
-                    and member["generation"] == invocation["child_generation"]
-                    and member.get("cursor_invocation") == identifier,
-                    "STALE_BINDING",
-                )
-                assert member is not None
-                store.save_binding(state, child_key)
-                return (
-                    previous["result"]
-                    if previous
-                    else {
-                        "ok": True,
-                        "code": "OK",
-                        "revision": state["revision"],
-                        "invocation_id": identifier,
-                        "binding_generation": member["generation"],
-                    }
-                )
-            expected(state, request)
-            require(invocation["phase"] in {"admitted", "bound"}, "STALE_BINDING")
-            if invocation["phase"] == "bound":
-                require(
-                    invocation["child_participant"] == child_key
-                    and member is not None
-                    and member["generation"] == invocation["child_generation"]
-                    and member.get("cursor_invocation") == identifier,
-                    "STALE_BINDING",
-                )
-                assert member is not None
-                require(not member["pending"], "PENDING_OPERATION")
-            else:
-                # Terminal-only identity cannot collide with another still-active invocation.
-                require(
-                    not any(
-                        other_id != identifier
-                        and other["phase"] in {"admitted", "bound"}
-                        and child_conversation
-                        in {other["child_conversation"], other["resume_child"]}
-                        for other_id, other in invocations.items()
-                    ),
-                    "PENDING_OPERATION",
-                )
-                # An early resume advances only classification; no packet or readiness is inferred.
-                if member is not None:
-                    require(
-                        invocation["resume_child"] == child_conversation
-                        and member["status"] == "detached"
-                        and not member["pending"]
-                        and "cursor_invocation" in member
-                        and member["generation"] == invocation["resume_generation"],
-                        "STALE_BINDING",
-                    )
-                    generation = member["generation"] + 1
-                else:
-                    require(invocation["resume_child"] is None, "STALE_BINDING")
-                    generation = 1
-                member = {
-                    "generation": generation,
-                    "status": "detached",
-                    "pending": {},
-                    "packet": None,
-                    "ack": None,
-                    "cursor_invocation": identifier,
-                }
-                state["participants"][child_key] = member
-                invocation.update(
-                    child_conversation=child_conversation,
-                    child_participant=child_key,
-                    child_generation=generation,
-                )
-            assert member is not None
-            # One transaction fences the generation and releases only its exact parent Task.
-            member.update({"status": "detached", "ack": None})
-            del parent_member["pending"][invocation["tool_id"]]
-            invocation.update(phase="retired", terminal_result=copy.deepcopy(observed))
-            result = {"invocation_id": identifier, "binding_generation": member["generation"]}
-    # Publish correlation, scope, effects and retirement using the existing roll-forward intent.
-    committed = issue.commit(state, files, request, result, operation)
-    if operation in {"cursor-bind-child", "cursor-retire"}:
-        store.save_binding(issue.committed_state(), child_key)
-    return committed
-
-
-def cursor_source_callback(
-    state: WorkspaceState, files: PayloadFiles, request: JSONObject, participant: Participant
-) -> JSONObject:
-    """Record verified content or settle one exact Cursor source Read callback.
-
-    Caller holds the existing issue transaction and has authorized this generation.
-
-    Args:
-        state: Current locked issue state.
-        files: Verified managed payload bytes.
-        request: Adapter-internal closed content/success/failure metadata.
-        participant: Current independently bound Cursor child.
-
-    Returns:
-        Whether this callback verified content or finalized a current-packet receipt.
-
-    Raises:
-        WorkspaceError: Unknown/foreign call, closed shape, identity or content conflicts.
-    """
-    # This narrow protocol cannot authorize a parent, another host or a generic completion.
-    require(request["host"] == "cursor" and "cursor_invocation" in participant, "NOT_OWNER")
-    phase = request.get("source_event")
-    require(phase in {"content", "success", "failure"}, "INVALID_REQUEST")
-    allowed = {
-        "schema_version",
-        "operation",
-        "request_id",
-        "worktree",
-        "host",
-        "session_id",
-        "repo_id",
-        "issue_id",
-        "issue_uuid",
-        "binding_generation",
-        "expected_revision",
-        "source_event",
-        "tool_id",
-        "source_path",
-    }
-    # Raw source content is never accepted by or persisted in lifecycle state.
-    if phase == "content":
-        allowed |= {"observed_sha256", "content_length"}
-    elif phase == "success":
-        allowed |= {"content_length"}
-    require(set(request) <= allowed, "INVALID_REQUEST")
-    tool = token(request["tool_id"])
-    pending = participant["pending"].get(tool)
-    require(pending is not None and "cursor_source" in pending, "UNKNOWN_OPERATION")
-    assert pending is not None
-    source = pending["cursor_source"]
-    require(
-        source["invocation_id"] == participant["cursor_invocation"]
-        and source["generation"] == participant["generation"]
-        and request.get("source_path") == source["file_path"],
-        "REQUEST_CONFLICT",
-    )
-    digest = sha(canonical(participant["packet"]))
-    # Content is provisional until a distinct correlated native success is observed.
-    if phase == "content":
-        refs = packet_reads(state, participant, files)
-        require(source["packet_digest"] == digest, "SOURCE_STALE")
-        require(
-            any(
-                ref["available"]
-                and ref["locator"] == source["locator"]
-                and ref["sha256"] == source["sha256"]
-                for ref in refs
-            ),
-            "SOURCE_STALE",
-        )
-        observed = request.get("observed_sha256")
-        length = request.get("content_length")
-        require(isinstance(observed, str) and DIGEST.fullmatch(observed), "INVALID_REQUEST")
-        require(type(length) is int and 0 <= length <= MAX_FILE, "INVALID_REQUEST")
-        require(observed == source["sha256"], "SOURCE_DELIVERY_REQUIRED")
-        proof = {"sha256": observed, "content_length": length}
-        require(source.get("provisional") in (None, proof), "REQUEST_CONFLICT")
-        source["provisional"] = proof
-        return {"source_content_verified": True, "source_receipt": False}
-    # Known finished failure/stale/unmatched success settles this call without credit.
-    receipt = False
-    if (
-        phase == "success"
-        and source.get("provisional") is not None
-        and source["packet_digest"] == digest
-    ):
-        proof = source["provisional"]
-        length = request.get("content_length")
-        require(type(length) is int and length >= 0, "INVALID_REQUEST")
-        # Source refresh/missing bytes must not strand an already finished file Read.
-        try:
-            refs = packet_reads(state, participant, files)
-        except (WorkspaceError, OSError):
-            refs = []
-        current = any(
-            ref["available"]
-            and ref["locator"] == source["locator"]
-            and ref["sha256"] == source["sha256"]
-            for ref in refs
-        )
-        if current and length == proof["content_length"]:
-            # Prune old-packet receipts before adding at most one of64current assigned locators.
-            receipts = {
-                locator: item
-                for locator, item in participant.get("cursor_sources", {}).items()
-                if item["packet_digest"] == digest
-            }
-            receipts[source["locator"]] = {
-                "packet_digest": digest,
-                "sha256": source["sha256"],
-                "invocation_id": participant["cursor_invocation"],
-            }
-            require(len(receipts) <= 64, "SIZE_LIMIT")
-            participant["cursor_sources"] = receipts
-            receipt = True
-    del participant["pending"][tool]
-    return {"source_content_verified": False, "source_receipt": receipt}
 
 
 def authorize(
@@ -1949,7 +1339,7 @@ def authorize(
         "STALE_BINDING",
     )
     # A classified child retains authority only while its exact invocation is active.
-    cursor_child_active(state, key, participant)
+    invocations.authorize_actor(state, key, participant, request["operation"])
     # Enforce coordinator ownership only for operations that request it.
     require(not coordinator or state["coordinator"] == key, "NOT_OWNER")
     return key, participant
@@ -2284,7 +1674,7 @@ def attach(state: WorkspaceState, request: JSONObject) -> JSONObject:
     # Preserve existing scope and require the recorded generation before resuming.
     if participant:
         # Generic attachment cannot revive a retired Cursor invocation.
-        cursor_child_active(state, key, participant)
+        invocations.child_active(state, key, participant)
         initial_create = (
             request["operation"] == "create"
             and request.get("binding_generation") is None
@@ -2745,26 +2135,24 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         # Replay only an identical request; a reused ID with different content is a conflict.
         if previous:
             require(previous["digest"] == sha(canonical(request)), "REQUEST_CONFLICT")
-            if operation not in {
-                "cursor-plan",
-                "cursor-admit",
-                "cursor-bind-child",
-                "cursor-retire",
-            }:
-                # Restore worktree visibility and binding for retried attachment operations.
-                if (
-                    operation in {"create", "adopt", "attach", "resume", "bind", "restore"}
-                    and state["storage"] != "cleaned"
-                ):
-                    store.view(issue.id)
-                    # Persist the committed participant generation for this worktree.
-                    store.save_binding(state, key)
-                result: JSONObject = previous["result"].copy()
-                reference = result.pop("result_ref", None)
-                # Load a retained immutable export result for an archive-preparation retry.
-                if reference:
-                    result.update(issue.control.json(reference))
-                return result
+        # Invocation retries revalidate generation before ordinary request replay.
+        if operation in {"cursor-plan", "cursor-admit", "cursor-bind-child", "cursor-retire"}:
+            return invocations.operate(store, issue, state, issue.files(), request)
+        if previous:
+            # Restore worktree visibility and binding for retried attachment operations.
+            if (
+                operation in {"create", "adopt", "attach", "resume", "bind", "restore"}
+                and state["storage"] != "cleaned"
+            ):
+                store.view(issue.id)
+                # Persist the committed participant generation for this worktree.
+                store.save_binding(state, key)
+            result: JSONObject = previous["result"].copy()
+            reference = result.pop("result_ref", None)
+            # Load a retained immutable export result for an archive-preparation retry.
+            if reference:
+                result.update(issue.control.json(reference))
+            return result
     # Return issue presence and storage state without changing participation.
     if operation == "diagnose":
         diagnosis: JSONObject = {
@@ -2906,18 +2294,6 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
     # Load the validated committed payload before operating on participants or notes.
     files = issue.files()
     store.view(issue.id)
-    # Internal child binding establishes its own generation; parent calls require a live binding.
-    if operation in {"cursor-plan", "cursor-admit", "cursor-bind-child", "cursor-retire"}:
-        if operation == "cursor-bind-child":
-            require(not binding or binding["issue_id"] == issue.id, "BINDING_CONFLICT")
-        else:
-            require(
-                binding
-                and binding["issue_id"] == issue.id
-                and binding["binding_generation"] == request.get("binding_generation"),
-                "BINDING_MISSING",
-            )
-        return cursor_operation(store, issue, state, files, request)
     # Attach an independently identified reader without transferring coordinator authority.
     if operation == "join":
         # A verified-ticket startup may attach a new runtime session as a reader.
@@ -3075,25 +2451,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         require(DIGEST.fullmatch(target), "SCOPE_MISSING")
         packet = validate_packet(request["packet"])
         require(all(ref["reader"] == target for ref in packet), "SCOPE_MISSING")
-        # An active child permits only digest refresh of its exact invocation packet.
-        scoped_child = state["participants"].get(target)
-        if scoped_child is not None and "cursor_invocation" in scoped_child:
-            cursor_child_active(state, target, scoped_child)
-            current_packet = scoped_child["packet"]
-            require(
-                current_packet is not None
-                and len(packet) == len(current_packet)
-                and all(
-                    new == {**old, "sha256": new["sha256"]}
-                    for old, new in zip(current_packet, packet)
-                ),
-                "SCOPE_MISSING",
-            )
-            invocation = state["cursor_invocations"][scoped_child["cursor_invocation"]]
-            require(
-                set(request.get("owned_paths", [])) <= set(invocation["owned_paths"]),
-                "NOT_OWNER",
-            )
+        # Invocation policy preserves target scope without widening it.
+        invocations.authorize_scope(state, target, packet, request.get("owned_paths", []))
         state.setdefault("assignments", {})[target] = {"packet": packet}
         # Update existing scope without reviving a detached generation.
         if target in state["participants"]:
@@ -3109,7 +2468,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
                 path != "roadmap.md" and state["owners"].get(path, target) == target, "NOT_OWNER"
             )
             require(
-                not cursor_path_reserved(state, path),
+                not invocations.path_reserved(state, path),
                 "NOT_OWNER",
             )
             state["owners"][path] = target
@@ -3121,22 +2480,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         # Record acknowledgment only for the current assigned packet digest.
         if operation == "acknowledge":
             require(request.get("packet_digest") == digest, "SOURCE_STALE")
-            # Cursor children need verified content and completed Reads for current sources.
-            if "cursor_invocation" in participant:
-                receipts = participant.get("cursor_sources", {})
-                require(
-                    all(
-                        not ref["available"]
-                        or receipts.get(ref["locator"], {})
-                        == {
-                            "packet_digest": digest,
-                            "sha256": ref["sha256"],
-                            "invocation_id": participant["cursor_invocation"],
-                        }
-                        for ref in refs
-                    ),
-                    "SOURCE_DELIVERY_REQUIRED",
-                )
+            # Available child sources need exact completed delivery receipts.
+            invocations.authorize_acknowledgment(participant, refs, digest)
             participant.update({"ack": digest, "status": "ready"})
         # Require active disposition and a current acknowledged packet.
         elif operation == "ready":
@@ -3161,17 +2506,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
     elif operation == "update":
         path = payload_path(request["path"])
         require(state["owners"].get(path) == key, "NOT_OWNER")
-        # A resumed child cannot reuse retained ownership from an older invocation.
-        if participant.get("cursor_invocation") is not None:
-            invocation = state["cursor_invocations"][participant["cursor_invocation"]]
-            require(path in invocation["owned_paths"], "NOT_OWNER")
-            # Current assigned bytes and independent acknowledgment precede every owned write.
-            packet_reads(state, participant, files)
-            require(
-                participant["status"] == "ready"
-                and participant["ack"] == sha(canonical(participant["packet"])),
-                "NOT_READY",
-            )
+        # Planned child output and readiness remain data-dependent mutation checks.
+        invocations.authorize_update(state, participant, files, path)
         require(request.get("old_digest") == state["files"].get(path), "REVISION_CONFLICT")
         data = request["content"].encode("utf-8")
         require(len(data) <= MAX_FILE, "SIZE_LIMIT")
@@ -3269,7 +2605,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         event_type = request["event_type"]
     # Only correlated native source callbacks can establish Cursor source receipts.
     elif operation == "cursor-source-callback":
-        result = cursor_source_callback(state, files, request, participant)
+        result = invocations.source_callback(state, files, request, participant)
     # Track exact source preparation before readiness without admitting ordinary work.
     elif operation in {"tool-start", "source-read-start"}:
         refs = packet_reads(state, participant, files)
@@ -3330,10 +2666,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             ]
             require(len(matches) == 1, "UNKNOWN_OPERATION")
             assert handle is not None  # token() returned a validated string above.
-            require(
-                "cursor_invocation" not in participant["pending"][matches[0]],
-                "REQUEST_CONFLICT",
-            )
+            invocations.authorize_pending(participant["pending"][matches[0]], poll=True)
             pending.update({"poll_parent": matches[0], "poll_handle": handle})
         # Reserve and persist the transport independently from its original process.
         participant["pending"][tool] = pending
@@ -3371,11 +2704,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
                 tool = matches[0]
         # Generic observations cannot settle a Task whose child must retire atomically.
         invocation_pending = participant["pending"].get(tool)
-        require(
-            invocation_pending is None
-            or not {"cursor_invocation", "cursor_source"}.intersection(invocation_pending),
-            "REQUEST_CONFLICT",
-        )
+        invocations.authorize_pending(invocation_pending)
         # An already settled parent is allowed only through its still-recorded poll transport.
         require(tool in participant["pending"] or transport is not None, "UNKNOWN_OPERATION")
         # Update or settle the original process only while its pending record exists.
@@ -3404,7 +2733,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         target = key if operation == "detach" else request["target_participant"]
         member = state["participants"][target]
         # Invocation retirement is the only path that releases a classified child generation.
-        require("cursor_invocation" not in member, "NOT_OWNER")
+        invocations.authorize_target(member)
         require(
             request.get("target_generation", request.get("binding_generation"))
             == member["generation"],
@@ -3418,7 +2747,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         target = request["target_participant"]
         require(target in state["participants"] and not participant["pending"], "PENDING_OPERATION")
         # A child assignment never grants coordinator or roadmap authority.
-        require("cursor_invocation" not in state["participants"][target], "NOT_OWNER")
+        invocations.authorize_target(state["participants"][target])
         evidence(request.get("evidence"))
         state["coordinator"] = target
         state["owners"]["roadmap.md"] = target
@@ -3944,11 +3273,12 @@ def existing_tool_request(
     return None
 
 
-def execute(request: JSONObject) -> JSONObject:
+def _execute(request: JSONObject, *, internal: bool) -> JSONObject:
     """Execute a bounded request and return safe diagnostics without exception contents.
 
     Args:
         request: Versioned lifecycle request with explicit repository, issue and session identities.
+        internal: Permit Python-only adapter operations; never read from request data.
 
     Returns:
         A success result or a structured failure with a public code and recovery action.
@@ -3959,6 +3289,9 @@ def execute(request: JSONObject) -> JSONObject:
         require(request.get("schema_version") == 1)
         token(request["request_id"])
         operation = request["operation"]
+        require(
+            internal or operation not in invocations.INTERNAL_OPERATIONS, "HOST_UNSUPPORTED_TOOL"
+        )
         # Create registration without accepting a caller-selected repository identity.
         if operation == "register":
             require("repo_id" not in request, "INVALID_REQUEST")
@@ -4026,6 +3359,30 @@ def execute(request: JSONObject) -> JSONObject:
         }
 
 
+def execute(request: JSONObject) -> JSONObject:
+    """Execute the public lifecycle contract and reject adapter-internal wire operations.
+
+    Args:
+        request: Bounded versioned public request.
+
+    Returns:
+        Structured lifecycle success or safe failure diagnostics.
+    """
+    return _execute(request, internal=False)
+
+
+def execute_internal(request: JSONObject) -> JSONObject:
+    """Execute a Python-only adapter transition through normal locks and error handling.
+
+    Args:
+        request: Internal request constructed by the trusted native adapter.
+
+    Returns:
+        The same structured lifecycle response contract as execute.
+    """
+    return _execute(request, internal=True)
+
+
 def main() -> int:
     """Read one bounded CLI request and emit one canonical result.
 
@@ -4050,7 +3407,6 @@ def main() -> int:
         request = strict_json(raw)
         require(isinstance(request, dict), "INVALID_REQUEST")
         require(isinstance(request.get("operation"), str), "INVALID_REQUEST")
-        require(request.get("operation") not in CURSOR_INTERNAL_OPERATIONS, "HOST_UNSUPPORTED_TOOL")
         result = execute(request)
     # Return the bounded lifecycle diagnostic without exposing exception contents.
     except WorkspaceError as error:

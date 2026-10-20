@@ -67,6 +67,31 @@ def test_canonical_bootstrap_allows_exact_diagnostic_and_rejects_extra_unready_f
     assert common.canonical_bootstrap(event, unknown, "codex", ready=False) is False
 
 
+@pytest.mark.parametrize("operation", [None, False, 7, [], {}])
+@pytest.mark.parametrize("ready", [False, True])
+def test_canonical_bootstrap_rejects_nonstring_operation_before_repository_access(
+    monkeypatch: pytest.MonkeyPatch, operation: object, ready: bool
+) -> None:
+    """Reject malformed lifecycle operations before any repository or binding lookup.
+
+    Args:
+        monkeypatch: Prevents malformed requests from reaching repository access.
+        operation: Non-string JSON value encoded in an otherwise canonical command.
+        ready: Whether ordinary readiness was already established.
+    """
+    # Use the real shell encoder and parser rather than injecting a decoded request.
+    request = {**base("diagnose"), "operation": operation}
+    command = common.bootstrap_command(request, "codex")
+    event = {"cwd": str(CHECKOUT), "session_id": "session"}
+    monkeypatch.setattr(
+        common.core,
+        "repository",
+        lambda _path: pytest.fail("malformed operation reached repository"),
+    )
+    # Readiness cannot authorize a malformed operation or trigger storage access.
+    assert common.canonical_bootstrap(event, command, "codex", ready=ready) is False
+
+
 def test_canonical_bootstrap_requires_issue_to_match_persisted_assignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

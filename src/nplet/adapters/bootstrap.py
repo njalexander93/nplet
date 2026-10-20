@@ -53,9 +53,6 @@ def main() -> int:
         core.require(len(sys.argv) == 3 and sys.argv[1] == "--request-base64", "INVALID_REQUEST")
         request = decode_request(sys.argv[2])
         core.require(isinstance(request.get("operation"), str), "INVALID_REQUEST")
-        core.require(
-            request.get("operation") not in core.CURSOR_INTERNAL_OPERATIONS, "HOST_UNSUPPORTED_TOOL"
-        )
         result = core.execute(request)
     except core.WorkspaceError as error:
         # Keep expected request failures inside the canonical wire response.

@@ -1141,7 +1141,7 @@ def canonical_bootstrap(
         request = bootstrap_request(command, host, python, lifecycle)
         # Select the operation-specific bootstrap field policy.
         operation = request.get("operation")
-        if not isinstance(operation, str) or operation in core.CURSOR_INTERNAL_OPERATIONS:
+        if not isinstance(operation, str):
             return False
         # Limit unready sessions to the documented recovery operation schemas.
         if not ready and (
@@ -1469,31 +1469,6 @@ def native_tool(event: core.JSONObject, host: str) -> str:
     return tool
 
 
-def cursor_internal_command(event: core.JSONObject) -> bool:
-    """Recognize a canonical raw internal request before ordinary Cursor Shell fallback.
-
-    Args:
-        event: Observed native tool envelope.
-
-    Returns:
-        True only for an exact known adapter-internal lifecycle request.
-    """
-    if event.get("tool_name") != "Shell":
-        return False
-    args = event.get("tool_input")
-    if not isinstance(args, dict) or not isinstance(args.get("command"), str):
-        return False
-    # The public CLI independently fences variants that are not this canonical spelling.
-    try:
-        request = bootstrap_request(args["command"], "cursor", PYTHON, LIFECYCLE)
-    except (core.WorkspaceError, ValueError, KeyError, TypeError):
-        return False
-    return (
-        isinstance(request.get("operation"), str)
-        and request["operation"] in core.CURSOR_INTERNAL_OPERATIONS
-    )
-
-
 def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
     """Validate native inputs and expose only documented shell effects to policy.
 
@@ -1532,9 +1507,6 @@ def native_pre(event: core.JSONObject, host: str) -> None:
     Raises:
         core.WorkspaceError: If recovery scope, readiness, or admission fails.
     """
-    # Raw internal lifecycle commands never fall through to ordinary Cursor Shell.
-    if host == "cursor":
-        core.require(not cursor_internal_command(event), "HOST_UNSUPPORTED_TOOL")
     # Recovery accepts only the assigned exact command before ordinary readiness.
     native_token(event.get("tool_use_id"))
     # An exact lifecycle recovery command is allowed before readiness.
@@ -1760,10 +1732,53 @@ def _issue_state(parent: core.JSONObject) -> core.WorkspaceState:
         return issue.committed_state()
 
 
+def retry_on_contention(
+    execute_attempt: Callable[[], core.JSONObject],
+    deadline: float,
+    *,
+    retry_codes: frozenset[str] = CHILD_RETRY_CODES,
+) -> core.JSONObject:
+    """Retry only bounded lifecycle contention without owning a caller's request policy.
+
+    Args:
+        execute_attempt: One attempt, including any fresh snapshot and request construction.
+        deadline: Absolute monotonic time after which no attempt may start.
+        retry_codes: Returned or raised diagnostics that a further attempt may resolve.
+
+    Returns:
+        The successful attempt's unchanged lifecycle result.
+
+    Raises:
+        core.WorkspaceError: Nonretryable failure, exhausted attempts, or expired budget.
+    """
+    # Expiry before the first attempt must not start a snapshot or lifecycle mutation.
+    code = "BUSY"
+    attempts = 0
+    while True:
+        core.require(time.monotonic() < deadline, code)
+        try:
+            result = execute_attempt()
+        except core.WorkspaceError as error:
+            # A lock may report contention while reading the snapshot, before execute returns.
+            if error.code not in retry_codes:
+                raise
+            code = error.code
+        else:
+            if result["ok"]:
+                return result
+            code = result["code"]
+            core.require(code in retry_codes, code)
+        # Keep the last retryable code and never sleep or execute beyond the caller's budget.
+        attempts += 1
+        remaining = deadline - time.monotonic()
+        core.require(attempts < CHILD_JOIN_ATTEMPTS and remaining > 0, code)
+        time.sleep(min(0.02 * attempts, remaining))
+
+
 def _join_child(
     event: core.JSONObject, host: str, parent: core.JSONObject, deadline: float
 ) -> None:
-    """Join the child as a reader, re-reading the issue revision before every attempt.
+    """Join a reader using a fresh revision and request identity on each bounded attempt.
 
     Args:
         event: Identity-validated SubagentStart envelope for the child.
@@ -1772,19 +1787,26 @@ def _join_child(
         deadline: Monotonic time after which no further join attempt starts.
 
     Raises:
-        core.WorkspaceError: With the last join code when attempts or the budget run out,
-            or immediately for a code that a fresh revision cannot resolve.
+        core.WorkspaceError: Nonretryable join failure, contention limit, or expired budget.
     """
-    # The child's own participant key tells whether an earlier attempt already joined it.
+    # The child key permits harmless replay when a previous attempt already published membership.
     child_key = core.participant_key({"host": host, "session_id": event["session_id"]})
-    attempt = 0
-    # Every pass ends in a return or a raise; the attempt count bounds the retries.
-    while True:
-        # Read the revision immediately before the join; an existing member needs none.
+
+    def execute_attempt() -> core.JSONObject:
+        """Read current membership and join at its revision with a fresh request identity.
+
+        Returns:
+            Existing membership success, or the exact lifecycle join response.
+
+        Raises:
+            core.WorkspaceError: Snapshot failure or budget expiry before mutation.
+        """
         state = _issue_state(parent)
         if child_key in state["participants"]:
-            return
-        joined = core.execute(
+            return {"ok": True, "code": "OK"}
+        # Snapshot work must not consume the remaining budget and then start a late join.
+        core.require(time.monotonic() < deadline, "BUSY")
+        return core.execute(
             {
                 "schema_version": 1,
                 "operation": "join",
@@ -1798,15 +1820,9 @@ def _join_child(
                 "expected_revision": state["revision"],
             }
         )
-        if joined["ok"]:
-            return
-        # Retry only revision drift or contention, while attempts and budget remain.
-        attempt += 1
-        final = attempt == CHILD_JOIN_ATTEMPTS or time.monotonic() >= deadline
-        if joined["code"] not in CHILD_RETRY_CODES or final:
-            raise core.WorkspaceError(joined["code"])
-        # Back off briefly so the competing hook process can commit and release locks.
-        time.sleep(min(0.02 * attempt, max(0.0, deadline - time.monotonic())))
+
+    # Shared backoff owns timing only; this closure owns fresh snapshots and request IDs.
+    retry_on_contention(execute_attempt, deadline)
 
 
 def _acknowledge_child(child: core.JSONObject) -> tuple[str, core.JSONObject]:

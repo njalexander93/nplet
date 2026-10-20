@@ -6,6 +6,7 @@ import copy
 
 import pytest
 
+from nplet.lifecycle import _invocations as invocations
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -59,12 +60,12 @@ def test_content_is_provisional_and_exact_replay_does_not_add_receipts(
         monkeypatch: Source availability boundary.
     """
     member, request, source = source_case(monkeypatch)
-    result = core.cursor_source_callback({}, {}, request, member)
+    result = invocations.source_callback({}, {}, request, member)
     assert result == {"source_content_verified": True, "source_receipt": False}
     assert source["provisional"] == {"sha256": "a" * 64, "content_length": 7}
     before = copy.deepcopy(member)
     # Equal evidence is harmless; no source text or readiness entry is created.
-    assert core.cursor_source_callback({}, {}, request, member) == result
+    assert invocations.source_callback({}, {}, request, member) == result
     assert member == before
     assert "cursor_sources" not in member
 
@@ -130,7 +131,7 @@ def test_invalid_source_evidence_preserves_pending(
         source["provisional"] = {"sha256": "a" * 64, "content_length": 9}
     before = copy.deepcopy(member)
     with pytest.raises(core.WorkspaceError, match=code):
-        core.cursor_source_callback({}, {}, request, member)
+        invocations.source_callback({}, {}, request, member)
     assert member == before
 
 
@@ -159,7 +160,7 @@ def test_known_finished_read_settles_only_itself(
         receipt: Whether current source evidence can credit readiness.
     """
     member, request, source = source_case(monkeypatch)
-    core.cursor_source_callback({}, {}, request, member)
+    invocations.source_callback({}, {}, request, member)
     member["pending"]["unrelated"] = {"status": "pending"}
     member["cursor_sources"] = {"old-source": {"packet_digest": "old"}}
     # Model independent completion evidence and changed source availability.
@@ -195,7 +196,7 @@ def test_known_finished_read_settles_only_itself(
             raise core.WorkspaceError("SOURCE_STALE")
 
         monkeypatch.setattr(core, "packet_reads", unavailable)
-    result = core.cursor_source_callback({}, {}, request, member)
+    result = invocations.source_callback({}, {}, request, member)
     assert result["source_receipt"] is receipt
     assert member["pending"] == {"unrelated": {"status": "pending"}}
     if receipt:

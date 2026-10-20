@@ -37,16 +37,6 @@ def test_claude_bootstrap_preserves_checkout_boundary(
     assert parsed == ([(native, "canonical", "claude-code", True)] if accepted else [])
 
 
-@pytest.mark.parametrize("args", [None, [], {}, {"command": 1}])
-def test_cursor_internal_command_ignores_noncommands(args: object) -> None:
-    """Malformed Shell inputs cannot be mistaken for reserved lifecycle commands.
-
-    Args:
-        args: Native input without a string command.
-    """
-    assert common.cursor_internal_command({"tool_name": "Shell", "tool_input": args}) is False
-
-
 CHECKOUT = Path(Path.cwd().anchor) / "checkout"
 OTHER = Path(Path.cwd().anchor) / "other"
 

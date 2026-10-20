@@ -404,14 +404,17 @@ def test_join_child_stops_at_the_deadline_or_an_unretryable_code(
         )
     assert captured.value.code == "BINDING_CONFLICT"
     assert len(calls) == 1
-    # A retryable code after the deadline is raised without another attempt.
-    calls = join_executor(monkeypatch, [{"ok": False, "code": "REVISION_CONFLICT"}])
+    # An already expired budget starts neither a snapshot read nor a join.
+    monkeypatch.setattr(
+        common, "_issue_state", lambda _parent: pytest.fail("expired join read a snapshot")
+    )
+    calls = join_executor(monkeypatch, [])
     with pytest.raises(core.WorkspaceError) as captured:
         common._join_child(
             child_event(tmp_path), HOST, parent_request(), common.time.monotonic() - 1
         )
-    assert captured.value.code == "REVISION_CONFLICT"
-    assert len(calls) == 1
+    assert captured.value.code == "BUSY"
+    assert calls == []
 
 
 def ready_executor(

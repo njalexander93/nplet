@@ -505,7 +505,7 @@ def test_claude_catches_native_failure_as_bounded_tool_denial(
 @pytest.mark.parametrize(
     ("name", "field"),
     [
-        ("subagentStart", "permission"),
+        ("beforeReadFile", "permission"),
         ("postToolUse", "additional_context"),
         ("postToolUseFailure", "additional_context"),
         ("sessionStart", "additional_context"),
@@ -525,6 +525,7 @@ def test_cursor_failure_renders_documented_event_field(name: str, field: str) ->
     if field != "permission":
         assert "SOURCE_STALE" in response[field]
     assert cursor.failure("unknown", "SOURCE_STALE") == {}
+    assert cursor.failure("subagentStart", "SOURCE_STALE") == {}
 
 
 def test_cursor_prompt_continue_and_unsupported_event_are_bounded(

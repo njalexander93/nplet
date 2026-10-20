@@ -20,17 +20,21 @@ CHILD = "11111111-1111-4111-8111-111111111111"
 
 
 @pytest.fixture
-def cursor_case(monkeypatch: pytest.MonkeyPatch) -> Iterator[Fixture]:
+def cursor_case(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Iterator[Fixture]:
     """Create a real registered disposable Cursor repository with external evidence mocked.
 
     Args:
         monkeypatch: Replaces only installed source/result reads and native remote marker.
+        request: Registers cleanup before disposable repository setup can fail.
 
     Yields:
         Ready real-core Cursor coordinator.
     """
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     case = Fixture()
+    request.addfinalizer(case.doCleanups)
     case.setUp()
     case.base["host"] = "cursor"
     case.base["coordinator"] = core.participant_key(case.base)
@@ -70,10 +74,19 @@ def cursor_case(monkeypatch: pytest.MonkeyPatch) -> Iterator[Fixture]:
         }
 
     monkeypatch.setattr(cursor_results, "read_terminal", terminal)
-    try:
-        yield case
-    finally:
-        case.doCleanups()
+    yield case
+
+
+def cursor_handle(event: dict) -> dict:
+    """Exercise the direct handler with an explicit synthetic transaction budget.
+
+    Args:
+        event: Synthetic native callback without supervisor metadata in its JSON.
+
+    Returns:
+        Actual Cursor adapter response under a widened direct-test deadline.
+    """
+    return cursor.handle(event, deadline=time.monotonic() + 10)
 
 
 def cursor_native(
@@ -96,9 +109,9 @@ def cursor_native(
         **fields: Native tool/content/completion fields.
 
     Returns:
-        Synthetic native envelope with widened test deadline for deterministic transactions.
+        Synthetic native envelope with no trusted supervisor fields.
     """
-    # The widened direct-handler budget does not establish the native2second latency requirement.
+    # Trusted direct-test deadlines are passed separately by cursor_handle, never in event JSON.
     event = {
         "hook_event_name": name,
         "conversation_id": CHILD if child else case.base["session_id"],
@@ -106,7 +119,6 @@ def cursor_native(
         "workspace_roots": [str(case.root)],
         "cwd": str(case.root),
         "cursor_version": "3.25.9",
-        "_cursor_deadline": time.monotonic() + 10,
     }
     if parent_call is not None:
         event["parent_tool_call_id"] = parent_call
@@ -158,7 +170,7 @@ def planned_task(case: Fixture, identifier: str, raw_call: str, resume: str | No
         owned_paths=["context/" + identifier + ".md"],
         resume_child=resume,
     )
-    result = cursor.handle(
+    result = cursor_handle(
         cursor_native(case, "preToolUse", tool_name="Task", tool_use_id=raw_call, tool_input=args)
     )
     assert result["permission"] == "allow", result
@@ -180,7 +192,7 @@ def read_pre(
         Exact native source file path.
     """
     path = str(case.root / ".task" / case.base["issue_id"] / "roadmap.md")
-    result = cursor.handle(
+    result = cursor_handle(
         cursor_native(
             case,
             "preToolUse",
@@ -215,7 +227,7 @@ def read_complete(
     from pathlib import Path
 
     content = Path(path).read_bytes().decode("utf-8")
-    response = cursor.handle(
+    response = cursor_handle(
         cursor_native(
             case,
             "beforeReadFile",
@@ -233,7 +245,7 @@ def read_complete(
         {"file_path": path, "content_length": len(content.encode("utf-16-le")) // 2}
     )
     assert (
-        cursor.handle(
+        cursor_handle(
             cursor_native(
                 case,
                 "postToolUse",
@@ -291,14 +303,14 @@ def own_lifecycle(
         tool_use_id=raw_tool,
         tool_input={"command": command, "cwd": "", "timeout": 30000},
     )
-    decision = cursor.handle(native)
+    decision = cursor_handle(native)
     assert decision["permission"] == "allow", decision
     result = core.execute(request)
     native.update(
         hook_event_name="postToolUse",
         tool_output=json.dumps({"exitCode": 0 if result["ok"] else 3}),
     )
-    assert cursor.handle(native) == {}
+    assert cursor_handle(native) == {}
     return result
 
 
@@ -340,11 +352,11 @@ def reconcile_native(case: Fixture, raw_call: str) -> dict:
         tool_use_id="reconcile-" + str(uuid.uuid4()),
         tool_input={"command": command, "cwd": "", "timeout": 30000},
     )
-    decision = cursor.handle(native)
+    decision = cursor_handle(native)
     assert decision["permission"] == "allow", decision
     result = children.reconcile(str(case.root), case.base["issue_id"], token, time.monotonic() + 10)
     native.update(hook_event_name="postToolUse", tool_output=json.dumps({"exitCode": 0}))
-    assert cursor.handle(native) == {}
+    assert cursor_handle(native) == {}
     return result
 
 
@@ -397,7 +409,7 @@ def test_real_cursor_store_lifecycle_owns_sources_note_and_exact_retirement(
         ("Shell", {"command": "python -m pytest"}),
     ):
         before = case.state()
-        denied = cursor.handle(
+        denied = cursor_handle(
             cursor_native(
                 case,
                 "preToolUse",
@@ -411,7 +423,7 @@ def test_real_cursor_store_lifecycle_owns_sources_note_and_exact_retirement(
         assert denied["permission"] == "deny", denied
         assert case.state() == before
     # Generic Task post does not settle the charge; exact independent reconciliation does.
-    response = cursor.handle(
+    response = cursor_handle(
         cursor_native(
             case,
             "postToolUse",
@@ -431,7 +443,7 @@ def test_real_cursor_store_lifecycle_owns_sources_note_and_exact_retirement(
     # Exact reconciliation replays have no new state; omitted child markers stay retired.
     case.require_ok(reconcile_native(case, raw_call))
     assert case.state() == state
-    denied = cursor.handle(
+    denied = cursor_handle(
         cursor_native(
             case,
             "preToolUse",
@@ -454,9 +466,9 @@ def test_real_cursor_store_lifecycle_owns_sources_note_and_exact_retirement(
         native = cursor_native(
             case, "preToolUse", tool_name=tool, tool_use_id="parent-" + tool, tool_input=tool_input
         )
-        assert cursor.handle(native)["permission"] == "allow"
+        assert cursor_handle(native)["permission"] == "allow"
         native.update(hook_event_name="postToolUse", tool_output=output)
-        assert cursor.handle(native) == {}
+        assert cursor_handle(native) == {}
     assert case.state()["participants"][parent]["pending"] == {}
 
 
@@ -482,7 +494,7 @@ def test_real_cursor_resume_fresh_scope_rejects_old_completion(cursor_case: Fixt
         error_message="synthetic failed work",
         failure_type="error",
     )
-    cursor.handle(failure)
+    cursor_handle(failure)
     case.require_ok(reconcile_native(case, first))
     second = "parent-call\ntrace-two"
     planned_task(case, "second", second, resume=CHILD)
@@ -506,7 +518,7 @@ def test_real_cursor_resume_fresh_scope_rejects_old_completion(cursor_case: Fixt
         tool_input={"file_path": path},
         tool_output=json.dumps({"file_path": path, "content_length": 1}),
     )
-    assert "STALE_BINDING" in json.dumps(cursor.handle(old_post))
+    assert "STALE_BINDING" in json.dumps(cursor_handle(old_post))
     assert case.state() == before
     with pytest.raises(core.WorkspaceError) as error:
         children.reconcile(
@@ -720,7 +732,7 @@ def test_retained_raw_child_cannot_fall_through_to_parent(
         tool_use_id="legacy-outside-read",
         tool_input={"file_path": "/outside/assigned/packet"},
     )
-    decision = cursor.handle(event)
+    decision = cursor_handle(event)
     assert decision["permission"] == "deny"
     assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in decision["user_message"]
     assert case.state() == before
@@ -913,3 +925,445 @@ def test_rendered_child_templates_preserve_receipts_and_recover_revision(
     assert execute(malformed)["code"] == "EVIDENCE_REQUIRED"
     assert "A denial does not restart packet/source reads" in guidance
     assert "never pin the startup revision" in guidance
+
+
+def test_parent_read_survives_more_than_sixty_four_non_cursor_issues(cursor_case: Fixture) -> None:
+    """Keep the same ready parent's native Read available beyond the old lifetime cutoff.
+
+    Args:
+        cursor_case: Disposable registered ready Cursor coordinator.
+    """
+    # Establish ordinary parent admission before adding unrelated retained issue histories.
+    case = cursor_case
+    before = cursor.handle(
+        cursor_native(
+            case,
+            "preToolUse",
+            tool_name="Read",
+            tool_use_id="before-history",
+            tool_input={"file_path": "/ordinary-parent-read"},
+        )
+    )
+    assert before["permission"] == "allow", before
+    # Create real non-Cursor issues through the core; do not manufacture control directories.
+    for index in range(65):
+        session = "non-cursor-history-" + str(index)
+        case.call(
+            "create",
+            host="codex",
+            session_id=session,
+            issue_id="HISTORY-" + str(index + 1),
+            issue_uuid="history-uuid-" + str(index),
+            binding_generation=None,
+            coordinator=core.participant_key({"host": "codex", "session_id": session}),
+        )
+    assert len(list((case.root / ".task/.control/issues").iterdir())) > 64
+    # The same native parent still passes without creating any Cursor registry.
+    after = cursor.handle(
+        cursor_native(
+            case,
+            "preToolUse",
+            tool_name="Read",
+            tool_use_id="after-history",
+            tool_input={"file_path": "/ordinary-parent-read"},
+        )
+    )
+    assert after["permission"] == "allow", after
+    assert not (case.root / ".task/.control/cursor-children").exists()
+
+
+@pytest.mark.parametrize("transition", ["bind", "terminal-only-retire"])
+def test_orphan_conversation_route_denies_parent_then_exact_retry_recovers(
+    cursor_case: Fixture, monkeypatch: pytest.MonkeyPatch, transition: str
+) -> None:
+    """Keep pointer-before-commit crashes restrictive and recover the original transition.
+
+    Args:
+        cursor_case: Real disposable ready Cursor coordinator.
+        monkeypatch: Injects failure at the durable routing boundary only.
+        transition: Binding or retirement before any child callback.
+    """
+    # Admit the genuine native call before interrupting its first conversation publication.
+    case = cursor_case
+    raw_call = "orphan-route-" + transition
+    planned_task(case, "orphan-route", raw_call)
+    before = case.state()
+
+    def interrupt(point: str) -> None:
+        """Simulate a crash immediately after durable conversation pointer publication.
+
+        Args:
+            point: Production persistence failpoint.
+
+        Raises:
+            RuntimeError: At the exact conversation reservation boundary.
+        """
+        if point == "cursor-route:conversation":
+            raise RuntimeError("interrupted conversation reservation")
+
+    monkeypatch.setattr(core, "FAILPOINT", interrupt)
+    # No issue transition may commit authority when its preceding reservation crashes.
+    with pytest.raises(RuntimeError, match="interrupted conversation reservation"):
+        if transition == "bind":
+            children.normalize(
+                cursor_native(case, "beforeSubmitPrompt", child=True, parent_call=raw_call),
+                time.monotonic() + 10,
+            )
+        else:
+            children.reconcile(
+                str(case.root),
+                case.base["issue_id"],
+                children.call_token(raw_call),
+                time.monotonic() + 10,
+            )
+    assert case.state() == before
+    monkeypatch.setattr(core, "FAILPOINT", None)
+    shutil.rmtree(case.root / ".task/.bindings")
+    # Missing local bindings and omitted markers must never turn the orphan into a parent.
+    with pytest.raises(core.WorkspaceError, match="UNKNOWN_OPERATION"):
+        children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", child=True), time.monotonic() + 10
+        )
+    # Retry the exact original transition; the durable selector remains idempotent.
+    if transition == "bind":
+        result = children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", child=True, parent_call=raw_call),
+            time.monotonic() + 10,
+        )
+        assert result["child"] is True
+    else:
+        # Losing all local bindings also removes the parent's required retirement binding.
+        with pytest.raises(core.WorkspaceError, match="BINDING_MISSING"):
+            children.reconcile(
+                str(case.root),
+                case.base["issue_id"],
+                children.call_token(raw_call),
+                time.monotonic() + 10,
+            )
+        # Supported attachment restores the existing parent generation without child authority.
+        case.call("bind")
+        result = children.reconcile(
+            str(case.root),
+            case.base["issue_id"],
+            children.call_token(raw_call),
+            time.monotonic() + 10,
+        )
+        assert result["ok"], result
+        with pytest.raises(core.WorkspaceError, match="STALE_BINDING"):
+            children.normalize(
+                cursor_native(case, "beforeSubmitPrompt", child=True), time.monotonic() + 10
+            )
+
+
+def test_selected_child_recovers_staged_binding_before_classification(
+    cursor_case: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recover a genuine binding intent through the exact pointer with no local binding.
+
+    Args:
+        cursor_case: Real disposable coordinator and recoverable issue transaction.
+        monkeypatch: Injects failure after the genuine issue transaction intent.
+    """
+    # Leave a durable selected binding intent, rather than hand-writing transaction state.
+    case = cursor_case
+    raw_call = "staged-selected-binding"
+    planned_task(case, "staged-selected", raw_call)
+
+    def interrupt(point: str) -> None:
+        """Stop after the real transaction intent is durable.
+
+        Args:
+            point: Production persistence boundary.
+
+        Raises:
+            RuntimeError: At the durable issue intent boundary.
+        """
+        if point == "intent":
+            raise RuntimeError("interrupted binding intent")
+
+    monkeypatch.setattr(core, "FAILPOINT", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted binding intent"):
+        children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", child=True, parent_call=raw_call),
+            time.monotonic() + 10,
+        )
+    transaction = case.root / ".task/.control/issues" / case.base["issue_id"] / "transaction.json"
+    assert transaction.exists()
+    monkeypatch.setattr(core, "FAILPOINT", None)
+    shutil.rmtree(case.root / ".task/.bindings")
+    # Even an omitted-marker callback recovers committed identity before deciding authority.
+    result = children.normalize(
+        cursor_native(case, "beforeSubmitPrompt", child=True), time.monotonic() + 10
+    )
+    assert result["child"] is True
+    assert not transaction.exists()
+
+
+@pytest.mark.parametrize("interruption", ["pointer", "inventory-change"])
+def test_explicit_modern_population_retries_without_automatic_cutover(
+    cursor_case: Fixture, monkeypatch: pytest.MonkeyPatch, interruption: str
+) -> None:
+    """Verify full explicit migration, restrictive interruption and exact recovery.
+
+    Args:
+        cursor_case: Disposable retained modern invocation history.
+        monkeypatch: Injects a publication crash or concurrent retained issue creation.
+        interruption: Boundary that prevents the completion marker.
+    """
+    # Model a pre-routing modern store by retaining real issue invocations and its mutex.
+    case = cursor_case
+    raw_call = "modern-population"
+    planned_task(case, "modern-population", raw_call)
+    case.require_ok(
+        children.reconcile(
+            str(case.root),
+            case.base["issue_id"],
+            children.call_token(raw_call),
+            time.monotonic() + 10,
+        )
+    )
+    control = case.root / ".task/.control"
+    (control / children.routing.MARKER).unlink()
+    registry = control / "cursor-children"
+    for pointer in [*registry.glob("node-*.json"), registry / children.routing.ROOT]:
+        pointer.unlink()
+    with pytest.raises(core.WorkspaceError, match="RECOVERY_REQUIRED"):
+        children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", child=True), time.monotonic() + 10
+        )
+    with pytest.raises(core.WorkspaceError, match="REQUEST_CONFLICT"):
+        children.populate_routes(str(case.root), [], time.monotonic() + 10)
+    # A partial migration must never publish a completion marker.
+    if interruption == "pointer":
+
+        def interrupt(point: str) -> None:
+            """Crash after one durable migration pointer.
+
+            Args:
+                point: Exact production persistence boundary.
+
+            Raises:
+                RuntimeError: After the call pointer is persisted.
+            """
+            if point == "cursor-route:call":
+                raise RuntimeError("interrupted population")
+
+        monkeypatch.setattr(core, "FAILPOINT", interrupt)
+        with pytest.raises(RuntimeError, match="interrupted population"):
+            children.populate_routes(str(case.root), [case.base["issue_id"]], time.monotonic() + 10)
+        monkeypatch.setattr(core, "FAILPOINT", None)
+    else:
+        original = children.issue_records
+        changed = False
+
+        def change_inventory(*args: object) -> list:
+            """Create one unrelated issue after the selected real recovered read.
+
+            Args:
+                *args: Unchanged selected issue lookup arguments.
+
+            Returns:
+                Original selected records after the controlled inventory change.
+            """
+            nonlocal changed
+            records = original(*args)
+            if not changed:
+                changed = True
+                session = "concurrent-population-parent"
+                case.call(
+                    "create",
+                    host="codex",
+                    session_id=session,
+                    issue_id="OTHER-2",
+                    issue_uuid="other-uuid",
+                    binding_generation=None,
+                    coordinator=core.participant_key({"host": "codex", "session_id": session}),
+                )
+            return records
+
+        monkeypatch.setattr(children, "issue_records", change_inventory)
+        with pytest.raises(core.WorkspaceError, match="REVISION_CONFLICT"):
+            children.populate_routes(str(case.root), [case.base["issue_id"]], time.monotonic() + 10)
+        monkeypatch.setattr(children, "issue_records", original)
+    assert not (control / children.routing.MARKER).exists()
+    with pytest.raises(core.WorkspaceError, match="RECOVERY_REQUIRED"):
+        children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", child=True), time.monotonic() + 10
+        )
+    # The explicit complete inventory can resume over already durable orphan selectors.
+    inventory = sorted(item.name for item in (control / "issues").iterdir())
+    marker = children.populate_routes(str(case.root), inventory, time.monotonic() + 10)
+    assert marker["complete"] is True
+    with pytest.raises(core.WorkspaceError, match="STALE_BINDING"):
+        children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", child=True), time.monotonic() + 10
+        )
+
+
+def test_exact_child_and_parent_ignore_unrelated_corrupt_history(cursor_case: Fixture) -> None:
+    """Read only exact routing and selected authoritative state despite unrelated corruption.
+
+    Args:
+        cursor_case: Disposable ready coordinator with one admitted native Task.
+    """
+    # Retain a real route and corrupt only an unrelated issue after admission.
+    case = cursor_case
+    raw_call = "selected-despite-corrupt-history"
+    planned_task(case, "selected-corruption", raw_call)
+    unrelated = case.root / ".task/.control/issues/UNRELATED-2"
+    unrelated.mkdir()
+    (unrelated / "state.json").write_bytes(b'{"corrupt":')
+    # Both ordinary parent Read and the genuine selected child continue independently.
+    parent = cursor.handle(
+        cursor_native(
+            case,
+            "preToolUse",
+            tool_name="Read",
+            tool_use_id="parent-with-corrupt-history",
+            tool_input={"file_path": "/ordinary-parent-read"},
+        )
+    )
+    assert parent["permission"] == "allow", parent
+    child = children.normalize(
+        cursor_native(case, "beforeSubmitPrompt", child=True, parent_call=raw_call),
+        time.monotonic() + 10,
+    )
+    assert child["child"] is True
+
+
+def test_modern_population_preserves_coexisting_legacy_denial_index(cursor_case: Fixture) -> None:
+    """Populate modern routes alongside immutable retained legacy raw-child fences.
+
+    Args:
+        cursor_case: Disposable real coordinator with modern invocation history.
+    """
+    # Retain a real modern terminal child and a distinct version-2 raw-child denial record.
+    case = cursor_case
+    raw_call = "modern-with-legacy"
+    planned_task(case, "modern-with-legacy", raw_call)
+    case.require_ok(
+        children.reconcile(
+            str(case.root),
+            case.base["issue_id"],
+            children.call_token(raw_call),
+            time.monotonic() + 10,
+        )
+    )
+    control = case.root / ".task/.control"
+    registry = control / "cursor-children"
+    (control / children.routing.MARKER).unlink()
+    for pointer in [*registry.glob("node-*.json"), registry / children.routing.ROOT]:
+        pointer.unlink()
+    legacy_child = "22222222-2222-4222-8222-222222222222"
+    legacy_key = core.participant_key({"host": "cursor", "session_id": legacy_child})
+    original = core.canonical(
+        {
+            "schema_version": 2,
+            "children": {legacy_key: {"status": "closed", "call_id": "retained-legacy-call"}},
+        }
+    )
+    legacy = registry / "index.json"
+    legacy.write_bytes(original)
+    # Complete modern population must not reinterpret or rewrite any legacy bytes.
+    result = children.populate_routes(
+        str(case.root), [case.base["issue_id"]], time.monotonic() + 10
+    )
+    assert result["complete"] is True
+    assert legacy.read_bytes() == original
+    with pytest.raises(core.WorkspaceError, match="HOST_UNSUPPORTED_CHILD_IDENTITY"):
+        children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", conversation_id=legacy_child),
+            time.monotonic() + 10,
+        )
+    with pytest.raises(core.WorkspaceError, match="STALE_BINDING"):
+        children.normalize(
+            cursor_native(case, "beforeSubmitPrompt", child=True), time.monotonic() + 10
+        )
+    # An ordinary modern parent stays available without changing retained legacy controls.
+    parent = children.normalize(cursor_native(case, "beforeSubmitPrompt"), time.monotonic() + 10)
+    assert parent.get("child") is not True
+    assert legacy.read_bytes() == original
+
+
+def test_deleted_referenced_child_node_cannot_restore_parent_authority(
+    cursor_case: Fixture,
+) -> None:
+    """Deny omitted-marker fallback when a referenced node disappears after completion.
+
+    Args:
+        cursor_case: Disposable genuine bound child and complete registry.
+    """
+    # Bind through the actual adapter before deleting only its selected referenced node.
+    case = cursor_case
+    raw_call = "deleted-selected-node"
+    planned_task(case, "deleted-selected-node", raw_call)
+    children.normalize(
+        cursor_native(case, "beforeSubmitPrompt", child=True, parent_call=raw_call),
+        time.monotonic() + 10,
+    )
+    registry = case.root / ".task/.control/cursor-children"
+    digest = core.sha(core.canonical(["conversation", CHILD]))
+    selected = registry / ("node-" + digest + ".json")
+    selected.unlink()
+    shutil.rmtree(case.root / ".task/.bindings")
+    before = case.state()
+    # The marker stays intact; a missing referenced node is uncertainty, never parent permission.
+    decision = cursor.handle(
+        cursor_native(
+            case,
+            "preToolUse",
+            child=True,
+            tool_name="Read",
+            tool_use_id="deleted-node-read",
+            tool_input={"file_path": "/outside-assigned-packet"},
+        )
+    )
+    assert decision["permission"] == "deny", decision
+    assert "RECOVERY_REQUIRED" in decision["user_message"]
+    assert not selected.exists()
+    assert case.state() == before
+
+
+def test_interrupted_root_initialization_needs_explicit_complete_recovery(
+    cursor_case: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep partial initialization restrictive until explicit verified recovery.
+
+    Args:
+        cursor_case: Disposable coordinator without child routing.
+        monkeypatch: Interrupts mandatory root publication.
+    """
+    case = cursor_case
+    configured = children.registration(str(case.root))
+
+    def interrupt(point: str) -> None:
+        """Stop during required file initialization before any completion marker.
+
+        Args:
+            point: Production persistence failpoint.
+
+        Raises:
+            RuntimeError: After the durable mandatory root.
+        """
+        if point == "cursor-radix-after:root":
+            raise RuntimeError("interrupted root initialization")
+
+    monkeypatch.setattr(core, "FAILPOINT", interrupt)
+    with (
+        core.Store(configured, create=False, bindings=False) as store,
+        store.control.child("cursor-children", True) as registry,
+        registry.lock(),
+    ):
+        with pytest.raises(RuntimeError, match="interrupted root initialization"):
+            children.routing.initialize(store, registry, False)
+    monkeypatch.setattr(core, "FAILPOINT", None)
+    control = case.root / ".task/.control"
+    assert not (control / children.routing.MARKER).exists()
+    with pytest.raises(core.WorkspaceError, match="RECOVERY_REQUIRED"):
+        children.normalize(cursor_native(case, "beforeSubmitPrompt"), time.monotonic() + 10)
+    # Only complete explicit recovery fills partial markerless initialization.
+    result = children.populate_routes(
+        str(case.root), [case.base["issue_id"]], time.monotonic() + 10
+    )
+    assert result["complete"] is True
+    assert (control / "cursor-children" / children.routing.ROOT).exists()

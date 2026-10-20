@@ -583,12 +583,13 @@ def test_child_handback_and_parent_message_record_no_pending_work(case: Fixture)
     assert case.state() == before
 
 
-def test_cursor_subagent_start_is_unchanged(case: Fixture) -> None:
-    """Keep Cursor's subagentStart denial independent of the Claude child route.
+def test_cursor_unregistered_subagent_start_has_no_effect(case: Fixture) -> None:
+    """Ignore Cursor's unregistered child hook without changing lifecycle state.
 
     Args:
         case: Disposable repository fixture.
     """
+    before = case.state()
     response = cursor.handle(
         {
             "hook_event_name": "subagentStart",
@@ -597,8 +598,8 @@ def test_cursor_subagent_start_is_unchanged(case: Fixture) -> None:
             "agent_id": AGENT,
         }
     )
-    assert response["permission"] == "deny"
-    assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in response["user_message"]
+    assert response == {}
+    assert case.state() == before
 
 
 def parent_mutation(case: Fixture, tool_id: str) -> JsonObject:
@@ -734,7 +735,7 @@ def test_child_acknowledge_tolerates_revision_drift(
     [
         ("REVISION_CONFLICT", 60.0, common.CHILD_JOIN_ATTEMPTS),
         ("BUSY", 60.0, common.CHILD_JOIN_ATTEMPTS),
-        ("REVISION_CONFLICT", 0.0, 1),
+        ("BUSY", 0.0, 0),
         ("ISSUE_MISMATCH", 60.0, 1),
     ],
 )
