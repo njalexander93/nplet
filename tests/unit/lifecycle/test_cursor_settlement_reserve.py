@@ -8,6 +8,8 @@ import pytest
 
 from nplet.lifecycle import task_workspace as core
 
+pytestmark = pytest.mark.unit
+
 
 def reserve_state() -> dict:
     """Build a minimal bound invocation with no pending ordinary effects.

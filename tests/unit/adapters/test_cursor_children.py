@@ -1311,16 +1311,17 @@ def test_source_transition_exhausts_contention_without_changing_request(
 
 @pytest.mark.parametrize("relative", [False, True])
 def test_source_read_pre_admits_only_exact_available_packet_locator(
-    monkeypatch: pytest.MonkeyPatch, relative: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, relative: bool
 ) -> None:
     """Translate exact assigned paths without widening the retained locator.
 
     Args:
         monkeypatch: Replaces packet and mutation boundaries.
+        tmp_path: Native absolute fixture root.
         relative: Whether the locator resolves inside the managed task directory.
     """
-    locator = "context/source.md" if relative else "/source.md"
-    path = "/checkout/.task/TEST-1/context/source.md" if relative else locator
+    locator = "context/source.md" if relative else str(tmp_path / "source.md")
+    path = str(tmp_path / ".task/TEST-1/context/source.md") if relative else locator
     bound = {"issue_id": "TEST-1"}
     monkeypatch.setattr(children.common, "request_for", lambda *_args: bound)
     read = MagicMock(
@@ -1335,14 +1336,14 @@ def test_source_read_pre_admits_only_exact_available_packet_locator(
         }
     )
     monkeypatch.setattr(children.core, "execute", read)
-    monkeypatch.setattr(children.core, "repository", lambda _path: (Path("/checkout"), None, []))
+    monkeypatch.setattr(children.core, "repository", lambda _path: (tmp_path, None, []))
     transition = MagicMock(return_value={"ok": True, "code": "OK"})
     monkeypatch.setattr(children, "source_transition", transition)
     event = {
         "child": True,
         "tool_name": "Read",
         "tool_input": {"file_path": path},
-        "cwd": "/checkout",
+        "cwd": str(tmp_path),
     }
     assert children.source_read_pre(event, time.monotonic() + 1)["ok"] is True
     assert transition.call_args.args[:2] == (event, "start")
@@ -1365,12 +1366,13 @@ def test_source_read_pre_admits_only_exact_available_packet_locator(
     ],
 )
 def test_source_read_pre_denies_without_starting_unassigned_read(
-    monkeypatch: pytest.MonkeyPatch, alteration: str, code: str, reads: int
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, alteration: str, code: str, reads: int
 ) -> None:
     """Malformed input and unavailable/foreign sources cannot create pending Reads.
 
     Args:
         monkeypatch: Replaces packet and mutation boundaries.
+        tmp_path: Native absolute fixture root.
         alteration: Native input or packet violation.
         code: Expected bounded rejection.
         reads: Expected current packet lookups.
@@ -1378,15 +1380,15 @@ def test_source_read_pre_denies_without_starting_unassigned_read(
     event = {
         "child": True,
         "tool_name": "Read",
-        "tool_input": {"file_path": "/source"},
-        "cwd": "/checkout",
+        "tool_input": {"file_path": str(tmp_path / "source")},
+        "cwd": str(tmp_path),
     }
     if alteration == "parent":
         event["child"] = False
     elif alteration == "tool":
         event["tool_name"] = "Write"
     elif alteration == "model-path":
-        event["tool_input"] = {"path": "/source"}
+        event["tool_input"] = {"path": str(tmp_path / "source")}
     elif alteration == "extra":
         event["tool_input"]["limit"] = 10
     elif alteration == "relative":
@@ -1400,7 +1402,9 @@ def test_source_read_pre_denies_without_starting_unassigned_read(
             "code": "STALE_BINDING",
             "references": [
                 {
-                    "locator": "/foreign" if alteration == "foreign" else "/source",
+                    "locator": str(tmp_path / "foreign")
+                    if alteration == "foreign"
+                    else str(tmp_path / "source"),
                     "available": alteration != "unavailable",
                 }
             ],
@@ -1408,7 +1412,7 @@ def test_source_read_pre_denies_without_starting_unassigned_read(
         }
     )
     monkeypatch.setattr(children.core, "execute", read)
-    monkeypatch.setattr(children.core, "repository", lambda _path: (Path("/checkout"), None, []))
+    monkeypatch.setattr(children.core, "repository", lambda _path: (tmp_path, None, []))
     transition = MagicMock()
     monkeypatch.setattr(children, "source_transition", transition)
     with pytest.raises(core.WorkspaceError, match=code):

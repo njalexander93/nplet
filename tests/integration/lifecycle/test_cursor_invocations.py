@@ -890,7 +890,9 @@ class CursorInvocationTests(Fixture):
         path = self.root / ".task" / self.base["issue_id"] / locator
         if text is not None:
             path = self.root / "unicode-source.md"
-            path.write_text(text, encoding="utf-8")
+            # Use the owned source permissions required on POSIX and Windows.
+            with core.Directory.absolute(path.parent) as parent:
+                parent.write(path.name, text.encode("utf-8"))
             locator = str(path)
         data = path.read_bytes()
         packet = [
