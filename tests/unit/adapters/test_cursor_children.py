@@ -19,6 +19,117 @@ from nplet.lifecycle import task_workspace as core
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize(
+    "issues_present,mismatch", [(False, ""), (True, ""), (True, "main"), (True, "control")]
+)
+def test_classification_snapshot_opens_only_verified_existing_controls(
+    monkeypatch: pytest.MonkeyPatch, issues_present: bool, mismatch: str
+) -> None:
+    """Read canonical controls without creating local bindings or trusting changed identity.
+
+    Args:
+        monkeypatch: Replaces safe directory handles and Git identity discovery.
+        issues_present: Whether the registered repository already has an issue collection.
+        mismatch: Canonical main identity or control registration mismatch.
+    """
+    # Model only the external directory graph; exercise the actual context and identity checks.
+    root = Path("checkout")
+    registered = {"repo_id": "repo", "main": "canonical", "main_identity": "main-identity"}
+    local_root, local, main, task, control, issues = [MagicMock() for _ in range(6)]
+    local_root.child.return_value = nullcontext(local)
+    local.json.return_value = registered
+    main.child.return_value = nullcontext(task)
+    main.identity = "foreign" if mismatch == "main" else "main-identity"
+    task.child.return_value = nullcontext(control)
+    control.json.return_value = {} if mismatch == "control" else registered
+    control.exists.return_value = issues_present
+    control.child.return_value = nullcontext(issues)
+    monkeypatch.setattr(children.core, "repository", lambda _path: (root, "common", ["canonical"]))
+    validate = MagicMock()
+    monkeypatch.setattr(children.core, "_validate_registration_identity", validate)
+    monkeypatch.setattr(
+        children.core.Directory,
+        "absolute",
+        lambda path: nullcontext(local_root if path == root else main),
+    )
+    # Failed boundaries must not yield usable controls; success preserves optional absent storage.
+    if mismatch:
+        with pytest.raises(core.WorkspaceError, match="REPOSITORY_MISMATCH"):
+            with children.classification_snapshot({"worktree": "checkout", "repo_id": "repo"}):
+                pytest.fail("yielded foreign controls")
+    else:
+        with children.classification_snapshot(
+            {"worktree": "checkout", "repo_id": "repo"}
+        ) as snapshot:
+            assert snapshot.root == root
+            assert snapshot.registration == registered
+            assert snapshot.control is control
+            assert snapshot.issues is (issues if issues_present else None)
+        local_root.child.assert_called_once_with(".task")
+        main.child.assert_called_once_with(".task")
+        task.child.assert_called_once_with(".control")
+        assert control.child.call_args_list == ([(("issues",), {})] if issues_present else [])
+    validate.assert_called_once_with(registered, "common", ["canonical"])
+
+
+def test_census_absent_collection_and_unselected_records_do_not_invent_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty discovery stays empty while explicit issue lookup requires existing storage.
+
+    Args:
+        monkeypatch: Replaces the safe issue snapshot boundary.
+    """
+    # An absent collection is valid for discovery, never for a caller-selected issue.
+    absent = SimpleNamespace(issues=None)
+    assert children.census(absent, time.monotonic() + 1, lambda _record: True) == []
+    with pytest.raises(core.WorkspaceError, match="UNKNOWN_OPERATION"):
+        children.census(absent, time.monotonic() + 1, lambda _record: True, "TEST-1")
+    # A complete snapshot can contain only unrelated calls; do not select its first record.
+    store, control = cursor_mock_store(monkeypatch)
+    record = cursor_record()
+    control.read.return_value = core.canonical(
+        {
+            "issue_id": "TEST-1",
+            "issue_uuid": "uuid",
+            "revision": 1,
+            "participants": {},
+            "cursor_invocations": {"invocation": record["invocation"]},
+        }
+    )
+    assert children.census(store, time.monotonic() + 1, lambda _record: False) == []
+    control.lock.assert_called_once_with(create=False)
+
+
+@pytest.mark.parametrize("known_child", [False, True])
+def test_normalize_checks_retained_index_even_without_mutex_lock(
+    monkeypatch: pytest.MonkeyPatch, known_child: bool
+) -> None:
+    """Missing mutex synchronization never hides an indexed child or grants a parent shortcut.
+
+    Args:
+        monkeypatch: Replaces persisted snapshot and native identity boundaries.
+        known_child: Whether the retained index names this actual conversation.
+    """
+    store, _control = cursor_mock_store(monkeypatch)
+    mutex = store.control.child.return_value.__enter__.return_value
+    mutex.exists.side_effect = lambda name: name == "index.json"
+    key = core.participant_key(
+        {"host": "cursor", "session_id": "actual" if known_child else "other"}
+    )
+    mutex.json.return_value = {"schema_version": 2, "children": {key: {"status": "closed"}}}
+    monkeypatch.setattr(
+        children.common, "native_identity", lambda raw, _host: {**raw, "session_id": "actual"}
+    )
+    monkeypatch.setattr(children, "registration", lambda _cwd: {})
+    monkeypatch.setattr(children, "census", lambda *_args: [])
+    with pytest.raises(
+        core.WorkspaceError, match="HOST_UNSUPPORTED_CHILD_IDENTITY" if known_child else "BUSY"
+    ):
+        children.normalize({"cwd": "checkout"}, time.monotonic() + 1)
+    mutex.lock.assert_not_called()
+
+
 @pytest.mark.parametrize("raw", ["call", "call\nfc", "x" * 160, "é" * 80])
 def test_call_token_preserves_exact_domain_separated_bytes(raw: str) -> None:
     """Use the verified namespace and preserve every native newline/UTF8byte.
@@ -507,6 +618,12 @@ def test_task_admission_consumes_only_exact_ready_parent_plan(
         }
     state["cursor_plans"]["foreign-parent-plan"] = {**plan, "parent": "foreign-parent"}
     state["cursor_plans"]["foreign-generation-plan"] = {**plan, "parent_generation": 6}
+    # Another consumed call from this parent must not hijack fresh admission or exact replay.
+    state["cursor_plans"]["other-call-plan"] = {**plan, "invocation_id": "other-invocation"}
+    state.setdefault("cursor_invocations", {})["other-invocation"] = {
+        "tool_id": children.call_token("other-native-call"),
+        "native_call": "other-native-call",
+    }
     control.json.return_value = state
     monkeypatch.setattr(
         children, "registration", lambda _cwd: {"repo_id": "repo", "worktree": "/checkout"}
@@ -913,11 +1030,15 @@ def test_source_post_uses_closed_native_success_or_failure(
     )
 
 
-def test_source_transition_replay_keeps_exact_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("phase", ["start", "failure"])
+def test_source_transition_replay_keeps_exact_request_id(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
     """Busy and duplicate callback retries cannot create another pending or receipt event.
 
     Args:
         monkeypatch: Replaces bound identity and core execution boundaries.
+        phase: Read admission has no source_event; completion uses the closed callback phase.
     """
     bound = {
         "schema_version": 1,
@@ -931,7 +1052,11 @@ def test_source_transition_replay_keeps_exact_request_id(monkeypatch: pytest.Mon
         "binding_generation": 1,
         "participant_id": "private-binding-extra",
     }
-    monkeypatch.setattr(children.common, "request_for", lambda *_args: bound)
+    monkeypatch.setattr(
+        children.common,
+        "request_for",
+        lambda _event, operation, _host: {**bound, "operation": operation},
+    )
     observed = []
 
     def execute(request: dict) -> dict:
@@ -949,12 +1074,19 @@ def test_source_transition_replay_keeps_exact_request_id(monkeypatch: pytest.Mon
     monkeypatch.setattr(children.core, "execute", execute)
     children.source_transition(
         {"child": True, "tool_use_id": "native-token"},
-        "failure",
+        phase,
         time.monotonic() + 1,
-        source_path="/source",
+        **(
+            {"source_locator": "context/source.md", "packet_digest": "a" * 64}
+            if phase == "start"
+            else {"source_path": "/source"}
+        ),
     )
     assert observed[0] == observed[1]
-    assert observed[0]["source_event"] == "failure"
+    assert observed[0]["operation"] == (
+        "source-read-start" if phase == "start" else "cursor-source-callback"
+    )
+    assert observed[0].get("source_event") == (None if phase == "start" else "failure")
     assert "participant_id" not in observed[0]
     assert "content" not in observed[0]
 

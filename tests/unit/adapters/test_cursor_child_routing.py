@@ -14,6 +14,70 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.parametrize(
+    "route", ["content", "task-pre", "reconcile-pre", "task-post", "task-failure", "reconcile-post"]
+)
+def test_parent_task_routes_keep_settlement_independent(
+    monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Task callbacks give exact reconciliation advice without ordinary effect settlement.
+
+    Args:
+        monkeypatch: Replaces classification and final effect boundaries.
+        route: Parent content, admission or completion protocol boundary.
+    """
+    # Classify one actual parent and retain its selected issue/call in all downstream requests.
+    name = (
+        "beforeReadFile"
+        if route == "content"
+        else "preToolUse"
+        if route.endswith("pre")
+        else "postToolUseFailure"
+        if route == "task-failure"
+        else "postToolUse"
+    )
+    event = {
+        "hook_event_name": name,
+        "tool_name": "Task" if route.startswith("task") else "Shell",
+        "tool_use_id": "native-token",
+        "tool_output": "{}",
+        "error_message": "failed",
+        "failure_type": "error",
+    }
+    monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
+    monkeypatch.setattr(cursor.cursor_children, "normalize", lambda *_args: event)
+    monkeypatch.setattr(cursor.common, "request_for", lambda *_args: {"issue_id": "TEST-1"})
+    admit, authorize = MagicMock(), MagicMock()
+    monkeypatch.setattr(cursor.cursor_children, "admit", admit)
+    monkeypatch.setattr(cursor.cursor_children, "authorize_reconcile", authorize)
+    monkeypatch.setattr(
+        cursor.cursor_children,
+        "recognize_reconcile",
+        lambda _event: ("TEST-1", "native-token") if route.startswith("reconcile") else None,
+    )
+    ordinary_pre, ordinary_post = MagicMock(), MagicMock()
+    monkeypatch.setattr(cursor.common, "native_pre", ordinary_pre)
+    monkeypatch.setattr(cursor.common, "native_post", ordinary_post)
+    result = cursor.handle(event)
+    # Only prehooks admit; posthooks neither settle the Task nor create generic pending work.
+    if route in {"task-pre", "reconcile-pre"}:
+        assert result == {"permission": "allow"}
+    elif route.startswith("task"):
+        command = cursor.cursor_children.reconcile_command("TEST-1", "native-token")
+        assert result == {
+            "additional_context": "Task remains charged until result reconciliation. Run: "
+            + command
+        }
+    else:
+        assert result == {}
+    assert admit.call_count == int(route == "task-pre")
+    assert authorize.call_count == int(route == "reconcile-pre")
+    if route == "reconcile-pre":
+        assert authorize.call_args.args[:3] == (event, "TEST-1", "native-token")
+    ordinary_pre.assert_not_called()
+    ordinary_post.assert_not_called()
+
+
+@pytest.mark.parametrize(
     "lifecycle,new_child", [(True, False), (True, True), (False, False), (False, True)]
 )
 def test_child_pre_routes_own_lifecycle_or_assigned_read(

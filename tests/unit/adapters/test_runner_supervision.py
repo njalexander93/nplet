@@ -537,18 +537,22 @@ def test_content_input_budget_requires_fixed_entry_mode(
         assert starts == []
 
 
+@pytest.mark.parametrize("drain_deadline", [False, True])
 def test_content_overflow_drains_without_starting_mutation_worker(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], drain_deadline: bool
 ) -> None:
     """Discard an oversized observation and return no source verification metadata.
 
     Args:
         monkeypatch: Input cap, pipe and process boundary replacements.
         capsys: Public response capture.
+        drain_deadline: Stop draining at the same deadline rather than waiting for EOF.
     """
     monkeypatch.setattr(runner, "CONTENT_INPUT_LIMIT", 128)
     chunks = iter([b"x" * 129, b"rest", b""])
     reads = []
+    # Keep time deterministic: the drain consumes no fresh supervisor budget.
+    monkeypatch.setattr(runner.time, "monotonic", lambda: 3.0 if drain_deadline and reads else 0.0)
 
     def read(_fd: int, size: int) -> bytes:
         """Supply bounded pipe segments and record drain requests.
@@ -568,7 +572,37 @@ def test_content_overflow_drains_without_starting_mutation_worker(
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kw: pytest.fail("worker"))
     assert runner.run(cursor_content_handler, failure, content_observer=True) == 0
     assert json.loads(capsys.readouterr().out) == {"permission": "allow"}
-    assert reads == [129, 65536, 65536]
+    assert reads == ([129] if drain_deadline else [129, 65536, 65536])
+
+
+@pytest.mark.parametrize("host", ["codex", "claude"])
+def test_non_cursor_worker_keeps_original_input_limit(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """Non-Cursor workers receive no allowance for Cursor's private deadline transport.
+
+    Args:
+        monkeypatch: Replaces process streams, adapter import and the ordinary cap.
+        host: Supported non-Cursor worker protocol.
+    """
+    # Send an otherwise valid event one byte beyond the unchanged ordinary input cap.
+    raw = b'{"hook_event_name":"preToolUse"}'
+    monkeypatch.setattr(runner, "INPUT_LIMIT", len(raw) - 1)
+    monkeypatch.setattr(runner.sys, "argv", ["runner", "--worker", host])
+    output = io.BytesIO()
+    monkeypatch.setattr(runner.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
+    monkeypatch.setattr(runner.sys, "stdout", SimpleNamespace(buffer=output))
+    received = []
+    monkeypatch.setattr(
+        runner.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(
+            handle=lambda event: received.append(event) or {}, failure=failure
+        ),
+    )
+    assert runner.main() == 2
+    assert json.loads(output.getvalue())["code"] == "SIZE_LIMIT"
+    assert received == []
 
 
 def test_content_worker_timeout_reaps_before_observational_allow(

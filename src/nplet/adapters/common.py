@@ -1340,11 +1340,6 @@ def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> 
         # Reject working-directory redirects to another repository.
         if host == "cursor":
             cursor_lifecycle_shell(event, args)
-        elif "working_directory" in args and (
-            not isinstance(args["working_directory"], str)
-            or core.repository(args["working_directory"])[0] != core.repository(event["cwd"])[0]
-        ):
-            return False
         return canonical_bootstrap(event, args.get("command"), host, ready)
     # Unverifiable shell details cannot establish canonical bootstrap.
     except (core.WorkspaceError, OSError, ValueError, KeyError, TypeError):

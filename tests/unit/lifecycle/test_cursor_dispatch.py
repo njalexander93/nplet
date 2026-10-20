@@ -1,6 +1,7 @@
 """Verify Cursor transitions enter shared dispatch without bypassing binding or scope."""
 
 import copy
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +16,123 @@ from tests.unit.lifecycle.test_operate_contracts import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_source_receipts_gate_child_acknowledgment_through_dispatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, absolute: bool
+) -> None:
+    """Dispatch exact source admission and both proofs before granting child readiness.
+
+    Args:
+        monkeypatch: Replaces only source-byte lookup and the current binding boundary.
+        tmp_path: Native absolute root used for modeled source paths.
+        absolute: External source locator versus a managed relative locator.
+    """
+    # Establish a real modeled invocation and assignment, with byte lookup isolated from storage.
+    store, issue, _ = cursor_model()
+    store.root = tmp_path
+    locator = str(tmp_path / "source.md") if absolute else "roadmap.md"
+    template = [
+        {
+            "id": "source",
+            "locator": locator,
+            "sha256": core.sha(b"approved roadmap"),
+            "reader": "cursor-child",
+            "required": True,
+            "authority": "task-workspace",
+            "reason": "assigned-source",
+            "stage": "execution",
+        }
+    ]
+    invocation, _ = cursor_launch(store, issue, packet=template)
+    binding = cursor_binding_request(issue, invocation)
+    core.operate(store, issue, binding)
+    identity = {"session_id": binding["session_id"], "binding_generation": 1}
+    key = core.participant_key(binding)
+    packet = issue.state["participants"][key]["packet"]
+    digest = core.sha(core.canonical(packet))
+    ref = {**packet[0], "available": True}
+    monkeypatch.setattr(core, "packet_reads", lambda *_args: [ref])
+    monkeypatch.setattr(store, "binding", lambda: {"issue_id": issue.id, "binding_generation": 1})
+    # An exact digest alone cannot acknowledge source delivery; failed checks commit nothing.
+    before = copy.deepcopy(issue.state)
+    with pytest.raises(core.WorkspaceError, match="SOURCE_DELIVERY_REQUIRED"):
+        core.operate(
+            store, issue, cursor_request(issue, "acknowledge", **identity, packet_digest=digest)
+        )
+    assert issue.state == before
+    core.operate(
+        store,
+        issue,
+        cursor_request(
+            issue,
+            "source-read-start",
+            **identity,
+            tool_id="read",
+            source_locator=locator,
+            packet_digest=digest,
+        ),
+    )
+    pending = issue.state["participants"][key]["pending"]["read"]["cursor_source"]
+    path = str(Path(locator) if absolute else tmp_path / ".task" / issue.id / locator)
+    assert pending == {
+        "invocation_id": invocation["invocation_id"],
+        "generation": 1,
+        "packet_digest": digest,
+        "locator": locator,
+        "sha256": ref["sha256"],
+        "file_path": path,
+        "provisional": None,
+    }
+    # Actual content remains provisional; only the same successful Read settles this pending call.
+    core.operate(
+        store,
+        issue,
+        cursor_request(
+            issue,
+            "cursor-source-callback",
+            **identity,
+            tool_id="read",
+            source_event="content",
+            source_path=path,
+            observed_sha256=ref["sha256"],
+            content_length=16,
+        ),
+    )
+    assert "read" in issue.state["participants"][key]["pending"]
+    assert issue.state["participants"][key].get("cursor_sources", {}) == {}
+    with pytest.raises(core.WorkspaceError, match="SOURCE_DELIVERY_REQUIRED"):
+        core.operate(
+            store, issue, cursor_request(issue, "acknowledge", **identity, packet_digest=digest)
+        )
+    core.operate(
+        store,
+        issue,
+        cursor_request(
+            issue,
+            "cursor-source-callback",
+            **identity,
+            tool_id="read",
+            source_event="success",
+            source_path=path,
+            content_length=16,
+        ),
+    )
+    member = issue.state["participants"][key]
+    assert member["pending"] == {}
+    assert member["cursor_sources"] == {
+        locator: {
+            "packet_digest": digest,
+            "sha256": ref["sha256"],
+            "invocation_id": invocation["invocation_id"],
+        }
+    }
+    core.operate(
+        store, issue, cursor_request(issue, "acknowledge", **identity, packet_digest=digest)
+    )
+    assert issue.state["participants"][key]["ack"] == digest
+    assert issue.state["participants"][key]["status"] == "ready"
 
 
 def test_cursor_dispatch_revalidates_exact_plan_replay_and_child_binding() -> None:

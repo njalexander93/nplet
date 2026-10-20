@@ -12,6 +12,41 @@ from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.mark.parametrize(
+    "directory,accepted", [(None, True), ("same", False), ("foreign", False), (1, False)]
+)
+def test_claude_bootstrap_preserves_checkout_boundary(
+    monkeypatch: pytest.MonkeyPatch, directory: object, accepted: bool
+) -> None:
+    """Claude's documented native arguments exclude every working-directory override.
+
+    Args:
+        monkeypatch: Replaces repository lookup and the canonical parser boundary.
+        directory: Absent, matching, foreign or malformed unsupported native override.
+        accepted: Whether the parser may inspect this command.
+    """
+    # Keep host shell selection real while isolating repository discovery.
+    native = {"tool_name": "Bash", "cwd": "same", "tool_input": {"command": "canonical"}}
+    if directory is not None:
+        native["tool_input"]["working_directory"] = directory
+    monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
+    parsed = []
+    monkeypatch.setattr(common, "canonical_bootstrap", lambda *args: parsed.append(args) or True)
+    assert common.native_bootstrap(native, "claude-code", ready=True) is accepted
+    assert parsed == ([(native, "canonical", "claude-code", True)] if accepted else [])
+
+
+@pytest.mark.parametrize("args", [None, [], {}, {"command": 1}])
+def test_cursor_internal_command_ignores_noncommands(args: object) -> None:
+    """Malformed Shell inputs cannot be mistaken for reserved lifecycle commands.
+
+    Args:
+        args: Native input without a string command.
+    """
+    assert common.cursor_internal_command({"tool_name": "Shell", "tool_input": args}) is False
+
+
 CHECKOUT = Path(Path.cwd().anchor) / "checkout"
 OTHER = Path(Path.cwd().anchor) / "other"
 
