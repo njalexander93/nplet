@@ -186,6 +186,58 @@ def cursor_specific(**changes: object) -> dict[str, Any]:
     return base
 
 
+@pytest.mark.parametrize(
+    "changes,expected_code",
+    [
+        ({}, None),
+        (
+            {
+                "mcp_server_name": "linear-server",
+                "mcp_server_url": "https://mcp.linear.app/mcp/readonly",
+            },
+            None,
+        ),
+        ({"mcp_server_name": "unconfigured"}, "HOST_UNSUPPORTED_PROVIDER"),
+        ({"mcp_server_url": "https://unconfigured.invalid/mcp"}, "HOST_UNSUPPORTED_PROVIDER"),
+        ({"tool_input": {}}, "INVALID_REQUEST"),
+        ({"tool_input": "[]"}, "INVALID_REQUEST"),
+        ({"tool_input": "{"}, "INVALID_REQUEST"),
+    ],
+)
+def test_cursor_ordinary_provider_specific_hook_validates_provenance_and_object_input(
+    monkeypatch: pytest.MonkeyPatch, changes: dict, expected_code: str | None
+) -> None:
+    """Admit only configured ordinary MCP calls without starting lookup or lifecycle work.
+
+    Args:
+        monkeypatch: Isolate Git discovery and prohibit task/provider state changes.
+        changes: Server provenance or serialized native input varied by this case.
+        expected_code: Exact denial diagnostic, or an admitted specific callback.
+    """
+    # Exercise actual native identity and the ordinary provider branch, without ticket startup.
+    monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
+    monkeypatch.setattr(core, "repository", lambda _cwd: (ROOT, None, [ROOT]))
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args: pytest.fail("looked up Task"))
+    monkeypatch.setattr(
+        common, "native_ticket_lookup", lambda *_args, **_kwargs: pytest.fail("reserved ticket")
+    )
+    monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("started lifecycle work"))
+    observed = cursor_specific(
+        hook_event_name="beforeMCPExecution",
+        conversation_id="session",
+        workspace_roots=[str(ROOT)],
+        tool_name="save_issue",
+        tool_input='{"title":"independent administration"}',
+    )
+    observed.update(changes)
+    # Preserve exact provider/argument diagnostics and Cursor's native decision shape.
+    assert cursor.handle(observed) == (
+        {"permission": "allow"}
+        if expected_code is None
+        else cursor.failure("beforeMCPExecution", expected_code)
+    )
+
+
 def code(error: pytest.ExceptionInfo[core.WorkspaceError]) -> str:
     """Read the contractual diagnostic from a caught workspace error.
 
@@ -964,6 +1016,8 @@ def test_native_handlers_gate_ticket_first_and_route_completion(
         failed: Native failed completion event name.
     """
     # Isolate host routing while keeping the ticket gate active for every callback.
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(common, "_linear_tool", lambda *_args: ("call", {}))
     monkeypatch.delenv("CURSOR_VERSION", raising=False)
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(adapter.common, "native_identity", lambda observed, _host: observed)
@@ -995,7 +1049,9 @@ def test_native_handlers_gate_ticket_first_and_route_completion(
         adapter.common, "native_ticket_failed", lambda _event, _host: failures.append(_host)
     )
     monkeypatch.setattr(
-        adapter.common, "native_pre", lambda *_args: pytest.fail("ordinary tool admitted")
+        adapter.common,
+        "native_pre",
+        lambda *_args: (_ for _ in ()).throw(core.WorkspaceError("TICKET_READ_REQUIRED")),
     )
     monkeypatch.setattr(
         adapter.common, "native_post", lambda *_args, **_kwargs: pytest.fail("ordinary completion")
@@ -1032,6 +1088,8 @@ def test_cursor_mcp_specific_admission_requires_ticket_server(
         monkeypatch: Replaces Cursor identity and ticket helper dispatch boundaries.
     """
     # Route the MCP server callback through ticket admission during bootstrap.
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(common, "_linear_tool", lambda *_args: ("call", {}))
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(cursor.cursor_children, "normalize", lambda observed, _deadline: observed)
     monkeypatch.setattr(cursor.common, "lookup_required", lambda *_args: True)
@@ -1052,12 +1110,14 @@ def test_cursor_mcp_specific_admission_requires_ticket_server(
         return {}
 
     monkeypatch.setattr(cursor.common, "native_ticket_lookup", lookup)
-    assert cursor.handle({"hook_event_name": "beforeMCPExecution"}) == {"permission": "allow"}
+    assert cursor.handle({"hook_event_name": "beforeMCPExecution", "tool_name": "get_issue"}) == {
+        "permission": "allow"
+    }
     assert seen == [True]
     assert cursor.handle({"hook_event_name": "afterMCPExecution"}) == {}
     # Missing provider identity must deny the same server callback.
     monkeypatch.setattr(cursor.common, "native_ticket_lookup", lambda *_args, **_kwargs: None)
-    denied = cursor.handle({"hook_event_name": "beforeMCPExecution"})
+    denied = cursor.handle({"hook_event_name": "beforeMCPExecution", "tool_name": "get_issue"})
     assert denied["permission"] == "deny"
 
 
@@ -1070,6 +1130,8 @@ def test_native_completion_without_verified_ticket_stays_unready(
         monkeypatch: Replaces native ticket verification while the bootstrap gate is active.
     """
     # Keep the lookup gate active while the native helper rejects the callback.
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(common, "_linear_tool", lambda *_args: ("call", {}))
     monkeypatch.delenv("CURSOR_VERSION", raising=False)
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(common, "native_identity", lambda observed, _host: observed)
@@ -1109,7 +1171,7 @@ def test_cursor_unselected_mcp_callbacks_cannot_complete_ticket(
         "native_post",
         lambda _event, _host, failed: settled.append(failed),
     )
-    assert cursor.handle({"hook_event_name": "beforeMCPExecution"}) == {}
+    assert cursor.handle({"hook_event_name": "beforeMCPExecution"})["permission"] == "deny"
     assert cursor.handle({"hook_event_name": "afterMCPExecution"}) == {}
     # Without a pending Task, the generic posthook enters ordinary settlement.
     assert cursor.handle({"hook_event_name": "postToolUse", "tool_name": "MCP:get_issue"}) == {}

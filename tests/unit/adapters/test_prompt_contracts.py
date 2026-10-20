@@ -172,8 +172,44 @@ def test_prompt_records_exact_lookup_marker_for_codex(
     assert bindings[key + ".assignment.json"] == {"issue_id": "TEST-30"}
     assert bindings[key + ".lookup-required.json"] == {"issue_id": "TEST-30"}
     assert (
-        "Read the requested Linear ticket first"
+        "Before protected implementation, read the requested Linear ticket"
         in result["hookSpecificOutput"]["additionalContext"]
+    )
+
+
+@pytest.mark.parametrize("host", ["codex", "claude-code", "cursor"])
+def test_task_with_explicit_stop_records_identity_without_startup(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """Keep Task selection compatible with an explicit instruction to stop before tools.
+
+    Args:
+        monkeypatch: Isolate assignment storage and reject any lifecycle bootstrap.
+        host: Explicit adapter identity using the shared prompt contract.
+    """
+    # Record identity only; no lifecycle operation may start from the prompt callback.
+    data = setup_prompt(monkeypatch)
+    monkeypatch.setattr(common.core, "execute", lambda _request: pytest.fail("started setup"))
+    event = {
+        "cwd": str(ROOT),
+        "session_id": "session",
+        "prompt": "Task: TEST-30\nDo not call tools or start setup. Record this identity and stop.",
+    }
+    result = common.prompt(event, host)
+    key = core.participant_key({"host": host, "session_id": "session"})
+    assert data == {
+        BINDINGS: {
+            key + ".assignment.json": {"issue_id": "TEST-30"},
+            key + ".lookup-required.json": {"issue_id": "TEST-30"},
+        }
+    }
+    # The same context preserves implementation prerequisites and the user's stop scope.
+    assert result["hookSpecificOutput"]["additionalContext"] == (
+        "Task identity recorded. Before protected implementation, read the requested Linear "
+        "ticket, complete scoped workspace setup and verify readiness. "
+        "Independent authorized task-free work remains available. "
+        "Recording Task does not require immediate startup. "
+        "Honor the user's scope, pause or stop instructions."
     )
 
 
@@ -219,7 +255,7 @@ def test_prompt_records_pending_switch_for_bound_session_without_touching_bindin
         key + ".lookup-required.json": {"issue_id": "TEST-31"},
     }
     context = result["hookSpecificOutput"]["additionalContext"]
-    assert "Read the requested Linear ticket first" in context
+    assert "Before protected implementation, read the requested Linear ticket" in context
     assert "rebinds this session from TEST-30" in context
 
 

@@ -508,11 +508,11 @@ def test_child_provider_writes_are_denied(case: Fixture, operation: str) -> None
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
     assert "HOST_UNSUPPORTED_PROVIDER" in reason
     assert case.state() == before
-    # The same write from the ready parent remains admitted as pending work.
+    # The same administrative write from the parent leaves task state unchanged.
     parent = provider_call(case, operation, "parent-write")
     del parent["agent_id"], parent["agent_type"]
     assert not denied(claude.handle(parent))
-    assert "parent-write" in case.state()["participants"][case.base["coordinator"]]["pending"]
+    assert case.state() == before
 
 
 @pytest.mark.parametrize("operation", ["get_status", "set_monitor"])
@@ -601,22 +601,22 @@ def test_cursor_subagent_start_is_unchanged(case: Fixture) -> None:
     assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in response["user_message"]
 
 
-def parent_read(case: Fixture, tool_id: str) -> JsonObject:
-    """Build a parent Read PreToolUse envelope whose tool-start advances the revision.
+def parent_mutation(case: Fixture, tool_id: str) -> JsonObject:
+    """Build a parent mutation PreToolUse envelope whose tool-start advances the revision.
 
     Args:
         case: Disposable repository fixture.
         tool_id: Native tool-use ID of the parent's call.
 
     Returns:
-        A parent Read tool event for the issue roadmap.
+        A parent source-file mutation that advances the issue revision.
     """
     return event(
         case,
         "PreToolUse",
-        tool_name="Read",
+        tool_name="Write",
         tool_use_id=tool_id,
-        tool_input={"file_path": str(case.root / ".task/TEST-1/roadmap.md")},
+        tool_input={"file_path": str(case.root / "src/drift.py"), "content": "drift"},
     )
 
 
@@ -653,7 +653,7 @@ def drift_before(
             return original(request)
         # The first matching call sees a revision another hook has just advanced.
         if not results:
-            assert not denied(claude.handle(parent_read(case, "parent-drift")))
+            assert not denied(claude.handle(parent_mutation(case, "parent-drift")))
         result = original(request)
         results.append(result)
         return result

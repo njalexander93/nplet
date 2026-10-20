@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from nplet.adapters import claude, codex, cursor
+from nplet.adapters import claude, codex, common, cursor
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -41,7 +41,13 @@ def test_codex_pretool_denies_unsupported_child_control_before_request_or_core_c
     monkeypatch.setattr(codex, "bootstrap", lambda _event, ready=False: False)
     monkeypatch.setattr(codex, "provider_gate", lambda _event: False)
     monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("unexpected binding read"))
-    event = {"hook_event_name": "PreToolUse", "tool_name": "multi_agent_v1resume_agent"}
+    event = {
+        "session_id": "unit-session",
+        "tool_use_id": "unit-tool",
+        "tool_input": {},
+        "hook_event_name": "PreToolUse",
+        "tool_name": "multi_agent_v1resume_agent",
+    }
     result = codex.handle(event)
     assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert (
@@ -82,6 +88,7 @@ def test_codex_pretool_records_exact_poll_handle_only_after_ready(
 
     monkeypatch.setattr(codex.core, "execute", execute)
     event = {
+        "session_id": "unit-session",
         "hook_event_name": "PreToolUse",
         "tool_name": "write_stdin",
         "tool_use_id": "tool-1",
@@ -121,6 +128,7 @@ def test_codex_pretool_invalid_poll_handle_has_no_tool_start(
 
     monkeypatch.setattr(codex.core, "execute", execute)
     event = {
+        "session_id": "unit-session",
         "hook_event_name": "PreToolUse",
         "tool_name": "write_stdin",
         "tool_use_id": "tool-1",
@@ -142,6 +150,9 @@ def test_codex_posttool_keeps_unproven_completion_pending(
     """
     monkeypatch.setattr(codex, "startup_lookup_state", lambda _event, _suffix: False)
     monkeypatch.setattr(codex, "request_for", lambda _event, operation: {"operation": operation})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     monkeypatch.setattr(codex.core, "execute", lambda _request: pytest.fail("unproven completion"))
     event = {
         "hook_event_name": "PostToolUse",
@@ -163,6 +174,9 @@ def test_codex_posttool_records_typed_completion_and_handle(
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(codex, "startup_lookup_state", lambda _event, _suffix: False)
     monkeypatch.setattr(codex, "request_for", lambda _event, operation: {"operation": operation})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
 
     def execute(request: dict[str, object]) -> dict[str, object]:
         """Execute.
@@ -200,6 +214,9 @@ def test_codex_posttool_rejects_conflicting_poll_handle_without_settlement(
     """
     monkeypatch.setattr(codex, "startup_lookup_state", lambda _event, _suffix: False)
     monkeypatch.setattr(codex, "request_for", lambda _event, operation: {"operation": operation})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     monkeypatch.setattr(codex.core, "execute", lambda _request: pytest.fail("conflicting handle"))
     event = {
         "hook_event_name": "PostToolUse",
@@ -277,7 +294,17 @@ def test_claude_cursor_import_has_no_duplicate_effect(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         claude.common, "native_identity", lambda *_args: pytest.fail("duplicate hook")
     )
-    assert claude.handle({"hook_event_name": "PreToolUse"}) == {}
+    assert (
+        claude.handle(
+            {
+                "session_id": "unit-session",
+                "tool_use_id": "unit-tool",
+                "tool_input": {},
+                "hook_event_name": "PreToolUse",
+            }
+        )
+        == {}
+    )
     assert claude.main() == 0
 
 
@@ -462,7 +489,14 @@ def test_claude_catches_native_failure_as_bounded_tool_denial(
         "native_identity",
         lambda *_args: (_ for _ in ()).throw(error),
     )
-    response = claude.handle({"hook_event_name": "PreToolUse"})
+    response = claude.handle(
+        {
+            "session_id": "unit-session",
+            "tool_use_id": "unit-tool",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+        }
+    )
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
     assert code in reason
     assert "private detail" not in reason
@@ -562,7 +596,18 @@ def test_claude_preparation_reads_pass_through_a_pending_ticket_lookup(
     monkeypatch.setattr(claude.common, "native_pre", lambda *_args: pytest.fail("pre"))
     monkeypatch.setattr(claude.common, "native_post", lambda *_args, **_kwargs: pytest.fail("post"))
     # Neither the start nor the completion of a preparation read is recorded or settled.
-    assert claude.handle({"hook_event_name": "PreToolUse", "tool_name": "Read"}) == {}
+    assert (
+        claude.handle(
+            {
+                "session_id": "unit-session",
+                "tool_use_id": "unit-tool",
+                "tool_input": {},
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Read",
+            }
+        )
+        == {}
+    )
     assert claude.handle({"hook_event_name": "PostToolUse", "tool_name": "Read"}) == {}
 
 

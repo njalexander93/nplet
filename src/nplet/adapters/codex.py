@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from nplet.adapters import codex_children, common, runner, startup
+from nplet.adapters import codex_children, common, runner, startup, task_boundary
 from nplet.lifecycle import task_workspace as core
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -469,20 +469,13 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         return {}  # Never grant host permissions.
     # Require readiness or an exact recovery route before admitting tool work.
     if name == "PreToolUse":
+        # Governing reads and read-only diagnostics remain available during startup.
+        if startup_lookup_state(event, ".lookup-required.json"):
+            if common.preparation_tool(event, "codex") or diagnostic_bootstrap(event):
+                return {}
         # A pending ticket read takes precedence over ordinary tool admission.
         # Keep recovery read-only until the assigned direct issue call succeeds.
-        if startup_lookup_state(event, ".lookup-required.json"):
-            # Governing reads do not consume the first-provider-operation marker.
-            if common.preparation_tool(event, "codex"):
-                return {}
-            # A bounded read-only diagnosis must remain reachable to explain startup failures.
-            if diagnostic_bootstrap(event):
-                return {}
-            # Any other tool must wait for the assigned issue response.
-            # Reject unrelated calls without consuming the ticket marker.
-            if event.get("tool_name") not in TICKET_TOOLS:
-                # Return a bounded admission denial to the host.
-                return denial("TICKET_READ_REQUIRED")
+        if event.get("tool_name") in TICKET_TOOLS and common.selected_lookup(event, "codex"):
             # Reserve the exact issue call and report validation failures.
             try:
                 # The provider result will be checked in PostToolUse.
@@ -494,27 +487,13 @@ def handle(event: core.JSONObject) -> core.JSONObject:
                 return denial(code)
         # Allow only the exact scoped bootstrap route before ordinary readiness checks.
         if bootstrap(event):
-            # The admitted bootstrap call establishes readiness itself.
+            # A reserved ticket read cannot be bypassed by mutation-capable recovery.
+            if startup_lookup_state(event, ".lookup-required.json"):
+                return denial("TICKET_READ_REQUIRED")
             return {}
-        # Provider gates validate pending external reads before ordinary work.
-        try:
-            # Allow the exact pending archive provider call only after gate validation.
-            if provider_gate(event):
-                # Admit only the correlated provider call.
-                return {}
-        except core.WorkspaceError:
-            # Ordinary readiness evaluation supplies the final denial.
-            pass
         tool = event.get("tool_name", "")
-        # Native launch receipts admit readers only; coordinator scope remains explicit.
-        if tool in codex_children.SPAWN_TOOLS:
-            codex_children.admit_spawn(codex_children.identity(event))
-            return {}
-        if tool in codex_children.CONTROLS:
-            codex_children.admit_control(codex_children.identity(event))
-            return {}
         # Deny covered child creation until host child identity can be verified.
-        if any(
+        if tool not in codex_children.SPAWN_TOOLS | codex_children.CONTROLS and any(
             s in tool
             for s in (
                 "multi_agent_v1",
@@ -533,6 +512,32 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         # Keep identity and permission clarification available to unready sessions.
         if tool in {"request_user_input", "request_user_input_async"}:
             # Clarification remains available while readiness is unresolved.
+            return {}
+        # Validate parent native identity before selecting a task-free effect.
+        common.native_token(event.get("session_id"))
+        common.native_token(event.get("tool_use_id"))
+        core.require(isinstance(event.get("tool_input"), dict), "INVALID_REQUEST")
+        roles = task_boundary.edit_roles(event)
+        if task_boundary.task_free(common.native_effect(event, "codex"), "codex", roles=roles):
+            return {}
+        core.require("control" not in roles, "NOT_OWNER")
+        if startup_lookup_state(event, ".lookup-required.json"):
+            return denial("TICKET_READ_REQUIRED")
+        # Specialized mutation admission must also respect the pending ticket fence.
+        try:
+            # Allow the exact pending archive provider call only after gate validation.
+            if provider_gate(event):
+                # Admit only the correlated provider call.
+                return {}
+        except core.WorkspaceError:
+            # Ordinary readiness evaluation supplies the final denial.
+            pass
+        # Native launch receipts admit readers only; coordinator scope remains explicit.
+        if tool in codex_children.SPAWN_TOOLS:
+            codex_children.admit_spawn(codex_children.identity(event))
+            return {}
+        if tool in codex_children.CONTROLS:
+            codex_children.admit_control(codex_children.identity(event))
             return {}
         # Build the request from explicit caller or observed session identities.
         request = request_for(event, "ready")
@@ -585,7 +590,9 @@ def handle(event: core.JSONObject) -> core.JSONObject:
             return {}
         # Settle a reserved Linear ticket read before generic tool completion.
         # The lookup marker identifies the pre-hook admitted issue call.
-        if event.get("tool_name") in TICKET_TOOLS and startup_lookup_state(event, ".lookup.json"):
+        if event.get("tool_name") in TICKET_TOOLS and common.selected_lookup(
+            event, "codex", complete=True
+        ):
             # Verify the provider result and start the assigned workspace.
             try:
                 # Successful startup returns a host-visible readiness message.
@@ -614,7 +621,16 @@ def handle(event: core.JSONObject) -> core.JSONObject:
                     )
                 }
         # Build the request from explicit caller or observed session identities.
-        request = request_for(event, "tool-complete")
+        try:
+            admitted = common.existing_admission(event, "codex")
+        except core.WorkspaceError as error:
+            return {"systemMessage": "TASK_WORKSPACE_NOT_READY: " + error.code}
+        if admitted is None:
+            # An unknown poll remains an explicit correlation denial.
+            if event.get("tool_name") == "write_stdin":
+                return {"systemMessage": "TASK_WORKSPACE_NOT_READY: UNKNOWN_OPERATION"}
+            return {}
+        request = admitted
         response = event.get("tool_response", {})
         # Command-only native Bash and apply_patch emit text, not legacy transport metadata.
         # A final write_stdin poll uses this original call ID; stdout cannot supply handles.
@@ -767,7 +783,8 @@ def handle(event: core.JSONObject) -> core.JSONObject:
                 "hookEventName": name,
                 "additionalContext": "TASK_WORKSPACE_NOT_READY: "
                 + result["code"]
-                + ". Ordinary task tools remain denied. Use only the assigned lifecycle "
+                + ". Protected implementation remains denied. Independent authorized "
+                "task-free work remains available. Use the assigned lifecycle "
                 "diagnostic/bootstrap routes to register, resume, read and acknowledge "
                 "the permitted packet, or repair the reported condition. Readiness was not "
                 "granted.",

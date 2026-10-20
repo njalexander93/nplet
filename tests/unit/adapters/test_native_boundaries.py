@@ -31,6 +31,19 @@ def event() -> dict[str, Any]:
     }
 
 
+@pytest.fixture
+def admitted_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supply an already recorded completion without manufacturing a session binding.
+
+    Args:
+        monkeypatch: Replace only the existing-admission storage boundary.
+    """
+    # Each dependent test still verifies its distinct native settlement result and effects.
+    monkeypatch.setattr(
+        common, "existing_admission", lambda _event, _host: {"operation": "tool-complete"}
+    )
+
+
 def test_native_bootstrap_rejects_non_shell_or_extra_args_before_parser(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -338,6 +351,7 @@ def test_native_pre_stops_on_failed_readiness_without_tool_start(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "lookup_required", lambda *_args: False)
     calls: list[str] = []
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
@@ -357,7 +371,7 @@ def test_native_pre_stops_on_failed_readiness_without_tool_start(
         return {"ok": False, "code": "SOURCE_STALE"}
 
     monkeypatch.setattr(common.core, "execute", execute)
-    native = {**event(), "tool_name": "Read", "tool_input": {}}
+    native = {**event(), "tool_name": "Write", "tool_input": {}}
     # The native boundary must reject a mismatched lifecycle command.
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_pre(native, "cursor")
@@ -375,6 +389,11 @@ def test_native_post_rejects_cursor_failure_without_documented_type(
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(common, "request_for", lambda *_args: pytest.fail("read binding"))
+    monkeypatch.setattr(
+        common,
+        "existing_admission",
+        lambda event, host: {"operation": "tool-complete"},
+    )
     native = {
         **event(),
         "tool_name": "Read",
@@ -398,6 +417,11 @@ def test_native_post_rejects_async_cursor_shell_output_without_settlement(
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(common, "request_for", lambda *_args: pytest.fail("read binding"))
+    monkeypatch.setattr(
+        common,
+        "existing_admission",
+        lambda event, host: {"operation": "tool-complete"},
+    )
     native = {**event(), "tool_output": '{"exitCode":0,"task_id":"background"}'}
     # A noncanonical bootstrap invocation must be rejected.
     with pytest.raises(core.WorkspaceError) as captured:
@@ -407,16 +431,15 @@ def test_native_post_rejects_async_cursor_shell_output_without_settlement(
 
 def test_native_post_preserves_core_settlement_failure(
     monkeypatch: pytest.MonkeyPatch,
+    admitted_completion: None,
 ) -> None:
     """Keep a failed core completion visible after a valid synchronous result.
 
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
+        admitted_completion: Existing admitted request supplied by the shared fixture.
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(
-        common, "request_for", lambda _event, operation, _host: {"operation": operation}
-    )
     requests: list[dict[str, Any]] = []
     monkeypatch.setattr(
         common.core,
@@ -804,6 +827,7 @@ def test_native_pre_admits_exact_unready_bootstrap_without_binding_lookup(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "lookup_required", lambda *_args: False)
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(common, "request_for", lambda *_args: pytest.fail("read binding"))
     assert common.native_pre(event(), "cursor") is None
@@ -817,6 +841,7 @@ def test_native_pre_does_not_record_ready_bootstrap_as_external_tool(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "lookup_required", lambda *_args: False)
     states: list[bool] = []
 
     def bootstrap(_event: dict[str, Any], _host: str, ready: bool = False) -> bool:
@@ -838,7 +863,7 @@ def test_native_pre_does_not_record_ready_bootstrap_as_external_tool(
         common, "request_for", lambda _event, operation, _host: {"operation": operation}
     )
     monkeypatch.setattr(common.core, "execute", lambda _request: {"ok": True, "code": "READY"})
-    monkeypatch.setattr(common, "native_tool", lambda *_args: pytest.fail("admitted external"))
+    monkeypatch.setattr(common, "native_tool", lambda *_args: "Write")
     assert common.native_pre(event(), "cursor") is None
     assert states == [False, True]
 
@@ -867,6 +892,11 @@ def test_native_post_rejects_unproven_claude_bash_completion(
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(common, "native_tool", lambda *_args: "Bash")
     monkeypatch.setattr(common, "request_for", lambda *_args: pytest.fail("settled tool"))
+    monkeypatch.setattr(
+        common,
+        "existing_admission",
+        lambda event, host: {"operation": "tool-complete"},
+    )
     native = {
         **event(),
         "tool_name": "Bash",
@@ -898,21 +928,23 @@ def test_native_post_rejects_unproven_claude_bash_completion(
     ],
 )
 def test_native_post_settles_only_documented_synchronous_success(
-    monkeypatch: pytest.MonkeyPatch, host: str, tool: str, response: dict[str, object]
+    monkeypatch: pytest.MonkeyPatch,
+    admitted_completion: None,
+    host: str,
+    tool: str,
+    response: dict[str, object],
 ) -> None:
     """A typed synchronous host completion records the observed tool exactly once.
 
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
+        admitted_completion: Existing admitted request supplied by the shared fixture.
         host: Native adapter selected for this case.
         tool: Tool identity selected for this case.
         response: Provider or hook response supplied by this case.
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(common, "native_tool", lambda *_args: tool)
-    monkeypatch.setattr(
-        common, "request_for", lambda _event, operation, _host: {"operation": operation}
-    )
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         common.core, "execute", lambda request: calls.append(request) or {"ok": True, "code": "OK"}
@@ -933,21 +965,23 @@ def test_native_post_settles_only_documented_synchronous_success(
     ],
 )
 def test_native_post_settles_documented_file_tool_failure(
-    monkeypatch: pytest.MonkeyPatch, host: str, field: str, extra: dict[str, object]
+    monkeypatch: pytest.MonkeyPatch,
+    admitted_completion: None,
+    host: str,
+    field: str,
+    extra: dict[str, object],
 ) -> None:
     """A host failure event is a terminal observation for synchronous file tools.
 
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
+        admitted_completion: Existing admitted request supplied by the shared fixture.
         host: Native adapter selected for this case.
         field: Request or event field varied by this case.
         extra: Additional request fields that must be rejected.
     """
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(common, "native_tool", lambda *_args: "Read")
-    monkeypatch.setattr(
-        common, "request_for", lambda _event, operation, _host: {"operation": operation}
-    )
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         common.core, "execute", lambda request: calls.append(request) or {"ok": True, "code": "OK"}
@@ -966,8 +1000,9 @@ def test_native_pre_records_only_eligible_tool_after_readiness(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "lookup_required", lambda *_args: False)
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(common, "native_tool", lambda *_args: "Read")
+    monkeypatch.setattr(common, "native_tool", lambda *_args: "Write")
     monkeypatch.setattr(
         common, "request_for", lambda _event, operation, _host: {"operation": operation}
     )
@@ -975,7 +1010,7 @@ def test_native_pre_records_only_eligible_tool_after_readiness(
     monkeypatch.setattr(
         common.core, "execute", lambda request: calls.append(request) or {"ok": True, "code": "OK"}
     )
-    assert common.native_pre({**event(), "tool_name": "Read", "tool_input": {}}, "cursor") is None
+    assert common.native_pre({**event(), "tool_name": "Write", "tool_input": {}}, "cursor") is None
     assert [call["operation"] for call in calls] == ["ready", "tool-start"]
     assert calls[-1]["request_id"] == "pre:tool-1"
 
@@ -1026,3 +1061,69 @@ def test_cursor_native_timeout_does_not_admit_ordinary_shell(metadata: dict[str,
     native = {**event(), "tool_input": {"command": "echo ok", **metadata}}
     with pytest.raises(core.WorkspaceError, match="HOST_UNSUPPORTED_ASYNC"):
         common.native_tool(native, "cursor")
+
+
+@pytest.mark.parametrize(
+    ("host", "tool", "args", "free"),
+    [
+        ("claude-code", "Bash", {"command": "pwd", "description": "read", "timeout": 10}, True),
+        ("cursor", "Shell", {"command": "pwd", "working_directory": str(CHECKOUT)}, True),
+        ("cursor", "Read", {"file_path": "notes/plan.md"}, True),
+        ("codex", "Bash", {"command": "pwd"}, True),
+        ("codex", "Bash", {"command": "pwd", "description": "read"}, False),
+        ("codex", "Shell", {"command": "pwd"}, False),
+    ],
+)
+def test_native_effect_preserves_original_and_exact_host_authority(
+    monkeypatch: pytest.MonkeyPatch, host: str, tool: str, args: dict, free: bool
+) -> None:
+    """Normalize verified native metadata without expanding Codex shell admission.
+
+    Args:
+        monkeypatch: Supply only validated checkout and foreground host configuration.
+        host: Native adapter whose input schema controls normalization.
+        tool: Observed native operation.
+        args: Original native payload, including metadata when documented.
+        free: Expected task-free read decision after normalization.
+    """
+    # Count real native validation and preserve original input for later correlation.
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
+    monkeypatch.setattr(core, "repository", lambda _path: (CHECKOUT, CHECKOUT, [CHECKOUT]))
+    validate = common.native_tool
+    calls = []
+
+    def checked(observed: dict, native_host: str) -> str:
+        """Retain real shape validation and count boundary calls.
+
+        Args:
+            observed: Original native envelope.
+            native_host: Selected adapter identity.
+
+        Returns:
+            The validated native operation.
+        """
+        calls.append(native_host)
+        return validate(observed, native_host)
+
+    monkeypatch.setattr(common, "native_tool", checked)
+    original = {**event(), "tool_name": tool, "tool_input": args.copy()}
+    effect = common.native_effect(original, host)
+    # Shared policy sees canonical known shells; unsupported Codex shapes remain untouched.
+    assert common.task_boundary.task_free(effect, host) is free
+    assert original["tool_name"] == tool
+    assert original["tool_input"] == args
+    assert calls == ([] if host == "codex" else [host])
+    if host == "codex" or tool == "Read":
+        assert effect is original
+    else:
+        assert effect["tool_name"] == "Bash"
+        assert effect["tool_input"] == {"command": "pwd"}
+
+
+def test_native_effect_rejects_unvalidated_cursor_metadata() -> None:
+    """Keep unsupported native metadata out of the shared effect policy."""
+    # Validation must fail before stripping a background flag from the shell effect.
+    observed = {**event(), "tool_input": {"command": "pwd", "background": True}}
+    with pytest.raises(core.WorkspaceError) as failure:
+        common.native_effect(observed, "cursor")
+    assert failure.value.code == "HOST_UNSUPPORTED_ASYNC"

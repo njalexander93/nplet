@@ -58,7 +58,7 @@ def test_parameterized_native_skip_ledger_matches_collection(tmp_path: Path) -> 
     actual = {item["nodeid"] for item in collected}
     approved = {nodeid for nodeid in APPROVED_NATIVE_SKIPS if nodeid.startswith(SELECTORS)}
     assert actual == approved
-    assert len(actual) == 38
+    assert len(actual) == 40
     # Compare each collected platform skip with its exact approved inventory entry.
     for item in collected:
         assert item["skip_reasons"] == [APPROVED_NATIVE_SKIPS[item["nodeid"]][1]]

@@ -227,12 +227,15 @@ class Directory:
         os.fsync(self.fd)
 
     @contextmanager
-    def lock(self, name: str = "lock", timeout: float = 1.0) -> Iterator[None]:
+    def lock(
+        self, name: str = "lock", timeout: float = 1.0, *, create: bool = True
+    ) -> Iterator[None]:
         """Hold a bounded exclusive flock on a persistent safe lock file.
 
         Args:
             name: Direct entry name relative to the opened directory.
             timeout: Maximum seconds to wait for lock acquisition.
+            create: Permit creation of a missing lock; false opens only existing storage.
 
         Returns:
             A context manager that yields while the issue lock is held.
@@ -244,20 +247,28 @@ class Directory:
         entry_name(name)
         # Set the monotonic deadline for bounded lock acquisition.
         end = time.monotonic() + timeout
-        # Retry until success or the bounded deadline is reached.
-        while True:
-            try:
-                fd = os.open(
-                    name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd
-                )
-                os.fsync(self.fd)
-                break
-            except FileExistsError:
+        # Creating operations retry racing opens; admission lookup cannot publish a lock.
+        if create:
+            while True:
                 try:
-                    fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+                    fd = os.open(
+                        name,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=self.fd,
+                    )
+                    os.fsync(self.fd)
                     break
-                except FileNotFoundError:
-                    require(time.monotonic() < end, "BUSY")
+                except FileExistsError:
+                    try:
+                        fd = os.open(
+                            name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd
+                        )
+                        break
+                    except FileNotFoundError:
+                        require(time.monotonic() < end, "BUSY")
+        else:
+            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
         try:
             s = os.fstat(fd)
             require(

@@ -54,7 +54,14 @@ def event(root: Path, name: str, **fields: object) -> dict[str, object]:
     Returns:
         The native hook event envelope for this case.
     """
-    return {"cwd": str(root), "session_id": "master", "hook_event_name": name, **fields}
+    return {
+        "cwd": str(root),
+        "session_id": "master",
+        "hook_event_name": name,
+        "tool_use_id": "native-default",
+        "tool_input": {},
+        **fields,
+    }
 
 
 def ticket_response() -> dict[str, object]:
@@ -168,8 +175,12 @@ def test_native_ticket_name_preserves_exact_startup_correlation(
     # Wrong issues and broadened queries must not reserve a lookup.
     for arguments in ({"id": "OTHER-2"}, {"id": "TEST-1", "includeRelations": True}):
         rejected = codex.handle(event(root, "PreToolUse", **{**fields, "tool_input": arguments}))
-        assert "BINDING_CONFLICT" in str(rejected)
+        assert rejected == {}
+    key = core.participant_key({"host": "codex", "session_id": "master"})
+    marker = root / ".task/.bindings" / (key + ".lookup.json")
+    assert not marker.exists()
     assert codex.handle(event(root, "PreToolUse", **fields)) == {}
+    reservation = marker.read_bytes()
     # A foreign completion must leave the actual reserved lookup and task gate intact.
     rejected = codex.handle(
         event(
@@ -179,7 +190,8 @@ def test_native_ticket_name_preserves_exact_startup_correlation(
             **{**fields, "tool_use_id": "foreign"},
         )
     )
-    assert "BINDING_CONFLICT" in str(rejected)
+    assert rejected == {}
+    assert marker.read_bytes() == reservation
     assert not (root / ".task" / "TEST-1").exists()
     # Only the correlated provider result establishes readiness and creates task sources.
     completed = codex.handle(event(root, "PostToolUse", tool_response=ticket_response(), **fields))
@@ -250,7 +262,9 @@ def test_native_missing_error_flag_does_not_validate_bad_issue_payload(
     result = codex.handle(event(root, "PostToolUse", tool_response={"content": content}, **fields))
     assert "TASK_WORKSPACE_NOT_READY" in result["systemMessage"]
     assert not (root / ".task" / "TEST-1").exists()
-    assert "TICKET_READ_REQUIRED" in str(codex.handle(event(root, "PreToolUse", tool_name="Read")))
+    assert "TICKET_READ_REQUIRED" in str(
+        codex.handle(event(root, "PreToolUse", tool_name="apply_patch"))
+    )
 
 
 def test_pending_ticket_allows_only_scoped_read_only_diagnosis(tmp_path: Path) -> None:
@@ -299,7 +313,9 @@ def test_pending_ticket_allows_only_scoped_read_only_diagnosis(tmp_path: Path) -
     # Admission performs no bootstrap mutations or marker consumption.
     assert {path.name: path.read_bytes() for path in bindings.glob("*.json")} == before
     assert not (root / ".task" / "TEST-1").exists()
-    assert "TICKET_READ_REQUIRED" in str(codex.handle(event(root, "PreToolUse", tool_name="Read")))
+    assert "TICKET_READ_REQUIRED" in str(
+        codex.handle(event(root, "PreToolUse", tool_name="apply_patch"))
+    )
 
 
 def lookup(root: Path, session: str, response: object) -> dict[str, object]:
@@ -723,13 +739,14 @@ def test_new_lookup_after_partial_setup_failure_preserves_ticket_gate(
         ]
     )
     wrong_issue = {**first, "tool_input": {"id": "OTHER-2"}, "tool_use_id": "other-issue"}
-    assert "BINDING_CONFLICT" in str(codex.handle(event(root, "PreToolUse", **wrong_issue)))
+    assert codex.handle(event(root, "PreToolUse", **wrong_issue)) == {}
     # An unassigned session must not inherit another participant’s binding.
-    with pytest.raises(core.WorkspaceError, match="BINDING_MISSING"):
-        codex.handle(event(root, "PreToolUse", session_id="other", **first))
+    assert codex.handle(event(root, "PreToolUse", session_id="other", **first)) == {}
+    other_key = core.participant_key({"host": "codex", "session_id": "other"})
+    assert not (root / ".task/.bindings" / (other_key + ".json")).exists()
 
     blocked = codex.handle(
-        event(root, "PreToolUse", tool_name="Read", tool_input={}, tool_use_id="ordinary")
+        event(root, "PreToolUse", tool_name="apply_patch", tool_input={}, tool_use_id="ordinary")
     )
     assert "TICKET_READ_REQUIRED" in str(blocked)
     second = {**first, "tool_use_id": "lookup-2"}
@@ -819,7 +836,7 @@ def test_lookup_requires_exact_ticket_and_tool_correlation(tmp_path: Path) -> No
             tool_use_id="lookup-1",
         )
     )
-    assert "BINDING_CONFLICT" in str(wrong)
+    assert wrong == {}
     fields = {
         "tool_name": "mcp__codex_apps__linear_get_issue",
         "tool_input": {"id": "TEST-1"},
@@ -834,7 +851,7 @@ def test_lookup_requires_exact_ticket_and_tool_correlation(tmp_path: Path) -> No
             **{**fields, "tool_use_id": "lookup-2"},
         )
     )
-    assert "BINDING_CONFLICT" in mismatched["systemMessage"]
+    assert mismatched == {}
     assert not (root / ".task" / "TEST-1").exists()
 
 
@@ -900,7 +917,7 @@ def test_malformed_completed_result_allows_new_lookup_id(tmp_path: Path) -> None
 
 
 def test_new_task_line_fences_previous_ready_session_until_ticket_read(tmp_path: Path) -> None:
-    """A ready binding cannot admit ordinary tools for a newly requested Task.
+    """A new Task gates protected implementation while independent reads remain available.
 
     Args:
         tmp_path: Disposable directory for repository or file fixtures.
@@ -909,10 +926,10 @@ def test_new_task_line_fences_previous_ready_session_until_ticket_read(tmp_path:
     codex.handle(event(root, "UserPromptSubmit", prompt="Task: TEST-1"))
     lookup(root, "master", ticket_response())
     codex.handle(event(root, "UserPromptSubmit", prompt="Task: TEST-1"))
-    # Neither interactive request tool can bypass ticket-first startup.
+    # Independent reads preserve the existing ticket-first implementation gate.
     for tool_name, tool_input in (
         ("Read", {"file_path": str(root / "AGENTS.md")}),
-        ("exec_command", {"cmd": "pwd", "login": False, "shell": "/bin/sh"}),
+        ("Bash", {"command": "pwd"}),
     ):
         denied = codex.handle(
             event(
@@ -923,7 +940,11 @@ def test_new_task_line_fences_previous_ready_session_until_ticket_read(tmp_path:
                 tool_use_id="blocked-" + tool_name,
             )
         )
-        assert "TICKET_READ_REQUIRED" in str(denied)
+        assert denied == {}
+    blocked = codex.handle(
+        event(root, "PreToolUse", tool_name="apply_patch", tool_input={}, tool_use_id="protected")
+    )
+    assert "TICKET_READ_REQUIRED" in str(blocked)
     assert "TASK_WORKSPACE_READY" in lookup(root, "master", ticket_response())["systemMessage"]
 
 

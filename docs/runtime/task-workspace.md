@@ -176,20 +176,53 @@ Native host configuration, event translation, trust and host-specific limitation
 
 A hook can deny a covered action only when the host actually invokes and honors it. Disabled/untrusted hooks, missing interpreters, timeout, malformed responses, uncovered paths and same-user filesystem access limit enforcement. Installed-host evidence is required separately for each host and version. Protocol fixtures do not establish that coverage or support for another operating system.
 
+### Task-free and protected work
+
+The adapters classify a validated parent operation before requiring task readiness.
+The finite [host operation contracts](host-hooks.md#task-free-parent-operations)
+allow reads, planning helpers, ordinary note edits and named Linear administration
+without a task. They create no task, participant, binding, approval or pending-tool
+record. Independent task-free work also preserves an existing pending ticket read,
+stale packet and unresolved task work.
+
+Protected implementation includes source, tests, scripts, dependencies, package
+commands, build inputs, executable workflows, agent instructions and enforcement
+configuration. Governed documentation is protected too: `docs/runtime/`,
+`docs/framework/`, `docs/README.md` and any `CONTEXT.md`. Unknown or mixed effects
+remain readiness-gated or unsupported. The [contributor procedure](contributor-workflow.md)
+separately requires explicit roadmap approval. Readiness verifies delivery facts;
+it does not authenticate human approval.
+
+Ordinary notes require a supported deterministic edit shape and a proven target
+role within the canonical checkout. Markdown files and `.txt` files inside
+`notes/` or `docs/` can qualify only outside protected roles; a `.txt` extension alone is
+insufficient. Dependency names such as `requirements*.txt` and `constraints*.txt`
+remain protected. Lexical and resolved paths must both qualify. Internal links,
+shared inodes, executable files, escapes and uncertain identities do not become
+ordinary notes. Raw `.task`, `.git` and host control directories remain protected
+by their specific rules even after readiness. Managed notes still require owned
+lifecycle updates.
+
+Child identity, scope, provider and delegation restrictions apply before this
+parent classification. Task-free work never broadens child authority. A completion
+settles only existing recorded admission by its native call ID or validated local
+poll handle. It does not classify changed targets again or create missing state.
+Corrupt registered or transactional state remains an error.
+
 ### Bootstrap exceptions
 
-An unready session may use only:
+Beyond the task-free parent operations above, an unready session may use:
 
-1. The exact Linear issue read for the recorded `Task: <issue-id>` assignment through a supported runtime adapter. The prompt records the identifier without creating an issue workspace. The adapter validates the native request and matching completion, verifies the returned identifier and immutable UUID, then runs shared registration, attachment, packet reading and readiness. Confirmed missing-ticket responses stop without workspace creation; generic invalid requests and other provider failures retain their diagnostics. This exception admits no issue edits, unrelated provider calls or opaque execution wrappers. After readiness, Claude Code admits the procedure's provider operations only through its configured Linear connector's fixed operation allowlist in [implemented coverage](host-hooks.md#implemented-coverage). Codex parents instead admit generic `mcp__` provider tools as ordinary pending work, including non-Linear tools, with no connector or operation allowlist; existing child/delegation tool-name denials still apply. Codex's archive gate is not exclusive: when it returns false, the call can still pass the generic readiness route. An earlier archive-specific error can prevent that fallthrough; for example, a legacy document save without an export fails before generic readiness. Cursor denies these provider calls. These are different implemented admission boundaries, not a shared allowlist. See [ticket-read protocols](host-hooks.md#ticket-read-protocols) for the implemented host mappings and evidence limits.
+1. The exact Linear issue read for the recorded `Task: <issue-id>` assignment through a supported runtime adapter. The prompt records the identifier without creating an issue workspace. The adapter validates the native request and matching completion, verifies the returned identifier and immutable UUID, then runs shared registration, attachment, packet reading and readiness. Confirmed missing-ticket responses stop without workspace creation; generic invalid requests and other provider failures retain their diagnostics. This reserved read does not grant general provider or wrapper admission. Independent named task-free operations remain available. Other Codex parent `mcp__` calls retain generic readiness admission with pending tracking. Claude Code keeps its configured finite provider allowlist; Cursor admits only its named Linear route. Archive-specific validation can reject a call before generic Codex admission. No provider success grants cleanup or implementation authority. See [implemented coverage](host-hooks.md#implemented-coverage) and [ticket-read protocols](host-hooks.md#ticket-read-protocols).
 2. Host user-input/permission UI needed to grant the exact requested paths.
 3. The reviewed lifecycle command's exact `diagnose/register/bind/adopt/resume/restore` invocation for its assigned issue and allowlisted arguments. `diagnose` is admitted in its pre-registration shape or its read-only issue-level shape (`repo_id`, `issue_id`, optional `binding_generation`) for the assigned issue. The issue coordinator may also run a self-refresh `scope`: its own participant key as `target_participant` and its current packet (the issue-level `diagnose` result's `packet`) with only each `sha256` replaced by a digest (same references, order and other fields), no `owned_paths` and no other fields. The coordinator takes each refreshed digest from the same result's `sources[*].current_sha256`, so recovery needs no file hashing inside the stranded session. The core clears its acknowledgment, so readiness still needs `read`, `acknowledge` and `ready`. A scope that repeats the unchanged digests is accepted but does not restore readiness; the next `read` fails again with `SOURCE_STALE` and its `stale` list. Allow no shell operators, redirection, command substitution, wrapper interpreters, arbitrary files or additional command. Parse a strict argument vector; reject anything the adapter cannot prove is this command.
 4. The exact Linear read/save operations bound to a pending immutable archive/recovery request, with checked issue/document ID and expected payload digest. This exception does not allow general provider edits. If nested tool calls conceal those arguments, use an observable direct call or retain the data.
 
-While the recorded Task's ticket read (exception 1) is pending, the session may also make read-only preparation calls. The rule is runtime-neutral. Codex admits only exact command-only native Bash reads of those two governing files; the Claude Code adapter supports: `ToolSearch` loading only configured `get_issue` schemas, and `Read` or a plain `cat` of exactly `<checkout>/docs/runtime/contributor-workflow.md` or `<checkout>/AGENTS.md`. They receive no lifecycle decision, write nothing and leave the ticket read as the first issue-provider operation. The [Claude connector mapping](host-hooks.md#claude-desktop-connector-mapping) gives the exact bounds.
+While the recorded Task's ticket read (exception 1) is pending, the reserved startup preparation route admits bounded read-only calls. Within that route, Codex admits exact command-only native Bash reads of the two governing files. Claude Code admits `ToolSearch` loading only configured `get_issue` schemas, and `Read` or a plain `cat` of exactly `<checkout>/docs/runtime/contributor-workflow.md` or `<checkout>/AGENTS.md`. These preparation calls receive no lifecycle decision and write nothing. The selected ticket read remains the first issue-provider operation in the startup sequence. Independent named task-free reads and administration remain available. The [Claude connector mapping](host-hooks.md#claude-desktop-connector-mapping) gives the preparation bounds.
 
-A sealed maintenance binding permits only the exact archive export/read-back/verify/cleanup operations for its pending request, plus explicit rebind. It cannot read arbitrary task notes or resume product actions; reopen first. A new-issue session may collect an older issue only with an explicit maintenance assignment and the same checks. This avoids keeping a payload participant live merely to finish its archival.
+A sealed maintenance binding grants lifecycle authority only for the exact archive export/read-back/verify/cleanup operations of its pending request, plus explicit rebind. It grants no lifecycle access to arbitrary task notes or resumed product actions; reopen first. Independent native task-free calls do not broaden that lifecycle scope. A new-issue session may collect an older issue only with an explicit maintenance assignment and the same checks. This avoids keeping a payload participant live merely to finish its archival.
 
-No general shell, file read/write, web search, MCP wildcard or “read-only command” exemption. A supported diagnostic path must explain the next action without recursively calling itself through the gate; adapter denials name the admitted next operation for their diagnostic code. PermissionRequest must not automatically grant permissions. Static hook control instructions may explain these routes but cannot promote arbitrary task data to instructions.
+Task-free admission uses exact named operations and finite command grammars. It supplies no general shell, arbitrary mutation, MCP wildcard or opaque-wrapper exemption. A supported diagnostic path must explain the next action without recursively calling itself through the gate; adapter denials name the admitted next operation for their diagnostic code. PermissionRequest must not automatically grant permissions. Static hook control instructions may explain these routes but cannot promote arbitrary task data to instructions.
 
 ### Native child diagnostics
 
