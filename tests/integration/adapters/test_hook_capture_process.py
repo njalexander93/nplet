@@ -53,13 +53,14 @@ def test_diagnostic_preserves_real_guard_denial_and_result(tmp_path: Path) -> No
     Args:
         tmp_path: Disposable private evidence directories.
     """
-    # Denied child creation requires no issue write and reaches the actual adapter decision.
+    # A native object input reaches the launch-shape denial before any issue write.
     event = {
         "cwd": str(ROOT),
         "session_id": "capture-fixture",
         "hook_event_name": "PreToolUse",
         "tool_name": "spawn_agent",
         "tool_use_id": "denied-tool",
+        "tool_input": {},
     }
     destination = tmp_path / "capture"
     destination.mkdir(mode=0o700)

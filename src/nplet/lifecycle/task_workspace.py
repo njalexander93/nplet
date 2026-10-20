@@ -539,15 +539,38 @@ def register(request: JSONObject) -> JSONObject:
     return {"ok": True, "code": "REGISTERED", **identity}
 
 
+def _validate_registration_identity(
+    registration: JSONObject, common: Path, trees: list[Path]
+) -> None:
+    """Require registration to name this checkout's actual shared Git repository.
+
+    Args:
+        registration: Parsed registration from the validated local task directory.
+        common: Actual shared Git metadata directory.
+        trees: Canonical worktrees discovered from Git, main worktree first.
+
+    Raises:
+        WorkspaceError: If shared metadata or main-worktree identity differs.
+        KeyError: If required registration fields are missing.
+    """
+    require(
+        str(common) == registration["common"]
+        and fs_identity(common) == registration["common_identity"]
+        and Path(registration["main"]) == trees[0],
+        "REPOSITORY_MISMATCH",
+    )
+
+
 class Store:
     """Own validated descriptors connecting one worktree to its shared task store."""
 
-    def __init__(self, request: JSONObject) -> None:
+    def __init__(self, request: JSONObject, *, create: bool = True) -> None:
         """Open the registered shared store and verify all repository identities.
 
         Args:
             request: Versioned lifecycle request with explicit repository, issue and
                 session identities.
+            create: Permit creation of binding/issue collections for lifecycle operations.
 
         Raises:
             WorkspaceError: If local and canonical registration or filesystem identities differ.
@@ -565,19 +588,14 @@ class Store:
             self.registration = self.local.json(".repository.json")
             reg = self.registration
             require(request.get("repo_id") == reg["repo_id"], "REPOSITORY_MISMATCH")
-            require(
-                str(common) == reg["common"]
-                and fs_identity(common) == reg["common_identity"]
-                and Path(reg["main"]) == trees[0],
-                "REPOSITORY_MISMATCH",
-            )
+            _validate_registration_identity(reg, common, trees)
             self.main = self.keep(Directory.absolute(reg["main"]))
             require(self.main.identity == reg["main_identity"], "REPOSITORY_MISMATCH")
             self.task = self.keep(self.main.child(".task"))
             self.control = self.keep(self.task.child(".control"))
             require(self.control.json("repository.json") == reg, "REPOSITORY_MISMATCH")
-            self.issues = self.keep(self.control.child("issues", True))
-            self.bindings = self.keep(self.local.child(".bindings", True))
+            self.issues = self.keep(self.control.child("issues", create))
+            self.bindings = self.keep(self.local.child(".bindings", create))
         # Release partially opened descriptors before propagating initialization failure.
         except BaseException:
             self.close()
@@ -2900,6 +2918,99 @@ def permission_paths(request: JSONObject) -> list[str]:
         elif request.get("operation") == "register":
             paths.extend([str(store), str(store / ".control")])
     return paths
+
+
+def existing_tool_request(
+    request: JSONObject, tool_id: str, *, polling: bool = False, poll_handle: object = None
+) -> JSONObject | None:
+    """Select existing admission under core locks without creating absent storage.
+
+    Args:
+        request: Internal completion request with explicit worktree, host and session.
+        tool_id: Validated native call identifier.
+        polling: The adapter observed its supported legacy polling transport.
+        poll_handle: Native polling handle; never inferred from command output.
+
+    Returns:
+        The existing bound request for exact admission/replay/local poll correlation,
+        or None when the session has no recorded admission.
+
+    Raises:
+        WorkspaceError: If existing registration, locks, recovery or authority is invalid.
+        OSError: If existing safe storage cannot be opened or locked.
+    """
+    # Probe absence without invoking any constructor that may create store collections.
+    root, common, trees = repository(request["worktree"])
+    key = participant_key(request)
+    with Directory.absolute(root) as directory:
+        if not directory.exists(".task"):
+            return None
+        with directory.child(".task") as local:
+            if not local.exists(".repository.json"):
+                require(not local.exists(".control"), "RECOVERY_REQUIRED")
+                if local.exists(".bindings"):
+                    with local.child(".bindings") as bindings:
+                        require(not bindings.exists(key + ".json"), "RECOVERY_REQUIRED")
+                return None
+            registration = local.json(".repository.json")
+            # Even an unbound registered session must reject foreign repository identity.
+            _validate_registration_identity(registration, common, trees)
+            if not local.exists(".bindings"):
+                return None
+            with local.child(".bindings") as bindings:
+                if not bindings.exists(key + ".json"):
+                    return None
+            request["repo_id"] = registration["repo_id"]
+    # Use the same binding-before-issue lock order as execute; opens remain non-creating.
+    with Store(request, create=False) as store:
+        lock_name = key + ".lock"
+        require(store.bindings.exists(lock_name), "RECOVERY_REQUIRED")
+        with store.bindings.lock(lock_name, create=False):
+            binding = store.binding()
+            if binding is None:
+                return None
+            request.update(binding)
+            # Binding JSON also carries repo_id; retain the canonical registered identity.
+            request["repo_id"] = store.registration["repo_id"]
+            identifier = issue_id(request["issue_id"])
+            require(store.issues.exists(identifier), "RECOVERY_REQUIRED")
+            with store.issues.child(identifier) as control:
+                require(control.exists("lock"), "RECOVERY_REQUIRED")
+                with control.lock(create=False):
+                    issue = Issue(store, control, identifier)
+                    # Existing durable intent is recovered only after its writer releases locks.
+                    try:
+                        issue.recover()
+                        finish_cleanup(issue)
+                    except (KeyError, TypeError, ValueError) as error:
+                        raise WorkspaceError("RECOVERY_REQUIRED") from error
+                    require(issue.state is not None, "RECOVERY_REQUIRED")
+                    state = issue.committed_state()
+                    authorize(state, request, maintenance=True)
+                    pending = state["participants"][key]["pending"]
+                    if tool_id in pending:
+                        return request
+                    # Preserve exact durable start-request replay after prior settlement.
+                    admission = {
+                        **request,
+                        "operation": "tool-start",
+                        "request_id": "pre:" + tool_id,
+                        "tool_id": tool_id,
+                    }
+                    if request["host"] == "codex":
+                        admission["poll_handle"] = str(poll_handle) if polling else None
+                    receipt = state["requests"].get(sha(admission["request_id"].encode()))
+                    if receipt is not None and receipt["digest"] == sha(canonical(admission)):
+                        return request
+                    # A poll without its own prehook may match only one participant-local handle.
+                    if polling:
+                        require(type(poll_handle) in {str, int}, "ASYNC_HANDLE_CONFLICT")
+                        matches = [
+                            p for p in pending.values() if p.get("handle") == str(poll_handle)
+                        ]
+                        require(len(matches) == 1, "UNKNOWN_OPERATION")
+                        return request
+    return None
 
 
 def execute(request: JSONObject) -> JSONObject:

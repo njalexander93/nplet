@@ -72,9 +72,9 @@ def native_event(host: NativeHost, case: Fixture, name: str, **fields: JsonValue
         "hook_event_name": name,
         "cwd": str(case.root),
         "tool_use_id": "actual-tool",
-        "tool_name": "Read" if host == "claude" else "Shell",
+        "tool_name": "Write" if host == "claude" else "Shell",
         "tool_input": (
-            {"file_path": str(case.root / ".task/TEST-1/roadmap.md")}
+            {"file_path": str(case.root / "src/protected.py"), "content": "protected"}
             if host == "claude"
             else {"command": "true"}
         ),
@@ -271,7 +271,7 @@ def test_cursor_ticket_callbacks_require_both_pre_events_and_native_call_id(
     before, after = ticket_callbacks(host, case, issue)
     # Admit the server-specific callback first, then reject completion without call ID.
     assert_decision(host, dispatch(host, before[1]), True)
-    assert "BINDING_CONFLICT" in str(dispatch(host, after))
+    assert dispatch(host, after) == {}
     assert not (case.root / ".task/TEST-1").exists()
     # Correlate generic pre with the same single call and reject overlapping calls.
     assert_decision(host, dispatch(host, before[0]), True)
@@ -331,7 +331,7 @@ def test_cursor_failed_local_setup_retries_with_new_call_id(
     # Begin a fresh call with server-specific callback first; old completion is stale.
     retry_before, retry_after = ticket_callbacks(host, case, issue, "second-read")
     assert_decision(host, dispatch(host, retry_before[1]), True)
-    assert "BINDING_CONFLICT" in str(dispatch(host, after))
+    assert dispatch(host, after) == {}
     assert_decision(host, dispatch(host, retry_before[0]), True)
     assert "TASK_WORKSPACE_READY" in str(dispatch(host, retry_after))
 
@@ -557,15 +557,15 @@ def test_native_wrong_tool_completion_cannot_settle_original(native: NativeCase)
     host, case = native
     case.create()
     case.ready()
-    inputs: JsonObject = {"file_path": str(case.root / ".task/TEST-1/roadmap.md")}
-    dispatch(host, native_event(host, case, "PreToolUse", tool_name="Read", tool_input=inputs))
+    inputs: JsonObject = {"file_path": str(case.root / "src/protected.py"), "content": "protected"}
+    dispatch(host, native_event(host, case, "PreToolUse", tool_name="Write", tool_input=inputs))
     failure = native_event(
         host,
         case,
         "PostToolUseFailure",
         tool_use_id="unrelated-tool",
         is_interrupt=False,
-        tool_name="Read",
+        tool_name="Write",
         tool_input=inputs,
     )
     # Use each host's documented failure-description field.
@@ -893,8 +893,8 @@ def test_native_config_quotes_checkout_and_reports_missing_environment(
         "conversation_id": "isolated",
         "workspace_roots": [str(root)],
         "cwd": str(nested),
-        "tool_name": "Read",
-        "tool_input": {"file_path": str(root / "unregistered.md")},
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(root / "src/unregistered.py"), "content": "protected"},
         "tool_use_id": "isolated-tool",
     }
     environment = os.environ.copy()

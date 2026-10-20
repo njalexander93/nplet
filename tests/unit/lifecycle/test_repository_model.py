@@ -575,3 +575,27 @@ def test_register_persists_only_explicit_coordinator_startup_packet(
     # Confirm the rejected operation reports BINDING_CONFLICT.
     assert captured.value.code == "BINDING_CONFLICT"
     assert documents[binding_path][key + ".startup.json"] == setup
+
+
+@pytest.mark.parametrize("changed", [None, "common", "common_identity", "main"])
+def test_registration_identity_requires_actual_common_and_main(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, changed: str | None
+) -> None:
+    """Reject each foreign registration field before any absent-binding shortcut.
+
+    Args:
+        monkeypatch: Supply the actual shared metadata identity without filesystem I/O.
+        tmp_path: Canonical repository and shared metadata paths for this case.
+        changed: Registration identity field corrupted independently, or none.
+    """
+    # Supply a matching registration and then alter just one claimed identity.
+    common_path, main = tmp_path / "common", tmp_path / "main"
+    registration = {"common": str(common_path), "common_identity": "actual", "main": str(main)}
+    monkeypatch.setattr(core, "fs_identity", lambda _path: "actual")
+    if changed is not None:
+        registration[changed] = "foreign"
+        with pytest.raises(core.WorkspaceError) as failure:
+            core._validate_registration_identity(registration, common_path, [main])
+        assert failure.value.code == "REPOSITORY_MISMATCH"
+    else:
+        assert core._validate_registration_identity(registration, common_path, [main]) is None

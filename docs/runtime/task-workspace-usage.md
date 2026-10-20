@@ -6,6 +6,12 @@ procedure](contributor-workflow.md). This guide describes lifecycle mechanics;
 New roadmap templates start **Proposed / awaiting explicit approval**. Attach and
 resume preserve existing roadmap bytes, including recorded progress and approval.
 
+Authorized task-free work needs no local registration or Task line. See the
+[task boundary](task-workspace.md#task-free-and-protected-work) and the exact
+[host operation contracts](host-hooks.md#task-free-parent-operations). The setup
+below establishes lifecycle state for issue work; it is not a prerequisite for
+independent research, review, planning, ordinary notes or administration.
+
 ## Usage
 
 Complete the [Python and Poetry setup](development.md), then run `make check-local`
@@ -37,7 +43,7 @@ dependency. Use the platform filesystem requirements in the
    again by `ready`. The master explicitly owns coordination; an assigned step
    attaches to its own installed packet using its actual host/session identity.
 4. Use `read`, then `acknowledge` with its exact `packet_digest`. This establishes
-   delivery facts only. Call `ready` to verify current readiness; the next covered
+   delivery facts only. Call `ready` to verify current readiness; the next protected
    tool also checks it. After required source edits, request a coordinator refresh,
    then read and acknowledge the replacement digest before dependent work. A
    coordinator's own committed `roadmap.md` update is refreshed by the core, as
@@ -140,7 +146,7 @@ own `roadmap.md` packet reference, and its stored assignment, to the committed
 digest. The same commit clears its acknowledgment and returns it to `attached`, so
 `ready` reports `NOT_READY` until the coordinator calls `read` and then
 `acknowledge` with the new `packet_digest`. Both are pre-readiness exceptions; the
-next covered tool, or an explicit `ready`, verifies readiness at the new revision.
+next protected tool, or an explicit `ready`, verifies readiness at the new revision.
 Reader packets keep their recorded digest until their own `join` refresh.
 Unexpected file edits still fail integrity checks. A different session can join
 with a core-selected roadmap-only reader packet after the verified ticket read.
@@ -324,8 +330,16 @@ results establish the tested Linux environment, not native Windows support.
 Codex SessionStart, PreCompact and PostCompact retain precise readiness/error codes in
 bounded recovery context. They do not terminate the session merely because it
 needs registration, resume, scope repair or acknowledgment. No readiness is granted:
-ordinary PreToolUse calls remain denied, and the existing exact bootstrap and
-provider exceptions still apply.
+protected PreToolUse calls remain gated, and exact bootstrap recovery remains
+available. Independent named task-free work continues without repairing or
+clearing stale task state.
+
+Task-free completions do not create task or pending records. Completion handling
+opens existing state without creating directories or lock files. Exact pending
+call IDs, durable start-request replays and unique participant-local poll handles
+select existing settlement; missing admission is ignored. Mutable note targets
+are not classified again at completion. Invalid registered or transactional state
+remains an error.
 
 Codex's observed native `Bash` and `apply_patch` final text, `webrun` content lists,
 MCP content objects and supported collaboration controls settle their exact native

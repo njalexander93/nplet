@@ -62,11 +62,13 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         observed = common.native_identity(event, HOST)
         # The first issue-provider call after Task selection must read the selected ticket.
         if name == "PreToolUse":
+            # Preparation reads retain their existing no-effect startup route.
+            if common.lookup_required(observed, HOST) and common.preparation_tool(observed, HOST):
+                return {}
             # An explicit Task permits its exact native Linear issue read first.
-            if common.lookup_required(observed, HOST):
-                # Preparation reads keep the marker and leave Claude's permission flow.
-                if common.preparation_tool(observed, HOST):
-                    return {}
+            if common._linear_tool(observed, HOST) is not None and common.selected_lookup(
+                observed, HOST
+            ):
                 core.require(
                     common.native_ticket_lookup(observed, HOST) is not None, "TICKET_READ_REQUIRED"
                 )
@@ -75,11 +77,13 @@ def handle(event: core.JSONObject) -> core.JSONObject:
             return {}  # No decision: Claude still applies its normal permission flow.
         # Translate completed native calls without inventing asynchronous completion.
         if name in {"PostToolUse", "PostToolUseFailure"}:
+            # Preparation completions never settle the reserved provider lookup.
+            if common.lookup_required(observed, HOST) and common.preparation_tool(observed, HOST):
+                return {}
             # A pending ticket read settles only through its native tool result.
-            if common.lookup_required(observed, HOST):
-                # Completed preparation reads were never recorded and settle nothing.
-                if common.preparation_tool(observed, HOST):
-                    return {}
+            if common._linear_tool(observed, HOST) is not None and common.selected_lookup(
+                observed, HOST, complete=True
+            ):
                 # Failed provider calls release correlation for a later read.
                 if name == "PostToolUseFailure":
                     common.native_ticket_failed(observed, HOST)

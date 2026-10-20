@@ -181,7 +181,7 @@ def test_native_pre_records_agent_call_before_tool_start(monkeypatch: pytest.Mon
     # An ordinary tool records no Agent marker.
     order.clear()
     assert common.native_pre({**event, "tool_name": "Read", "tool_input": {}}, HOST) is None
-    assert order == ["ready", "tool-start"]
+    assert order == []
 
 
 class Lock:

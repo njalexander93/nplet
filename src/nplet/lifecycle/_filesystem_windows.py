@@ -433,12 +433,31 @@ class Directory:
         checked(MoveFile(extended(source), extended(target), 0x8))
 
     @contextmanager
-    def lock(self, name: str = "lock", timeout: float = 1.0) -> Iterator[None]:
-        """Hold a persistent nondeletable lock inode with a bounded kernel lock wait."""
-        try:
-            handle = self._file(name, READ | WRITE, True)
-        except FileExistsError:
+    def lock(
+        self, name: str = "lock", timeout: float = 1.0, *, create: bool = True
+    ) -> Iterator[None]:
+        """Hold a persistent nondeletable lock inode with a bounded kernel lock wait.
+
+        Args:
+            name: Direct lock entry under this validated directory.
+            timeout: Maximum seconds to wait for the existing kernel lock.
+            create: Permit creation of a missing lock; false opens only existing storage.
+
+        Returns:
+            A context manager retaining the locked native handle.
+
+        Raises:
+            WorkspaceError: If the lock is unsafe or its bounded wait expires.
+            OSError: If existing-lock access or native locking fails.
+        """
+        # A completion lookup must not create missing persistent lock storage.
+        if not create:
             handle = self._file(name, READ | WRITE)
+        else:
+            try:
+                handle = self._file(name, READ | WRITE, True)
+            except FileExistsError:
+                handle = self._file(name, READ | WRITE)
         try:
             deadline = time.monotonic() + timeout
             overlapped = Overlapped()

@@ -8,10 +8,120 @@ from typing import Any
 
 import pytest
 
-from nplet.adapters import codex
+from nplet.adapters import codex, common
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
+
+
+def test_pending_ticket_blocks_mutating_bootstrap_before_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep a valid recovery route from bypassing an unresolved selected ticket.
+
+    Args:
+        monkeypatch: Isolate the recognized bootstrap route and prohibit admission writes.
+    """
+    # Preparation and diagnostics do not match this mutation-capable bootstrap command.
+    monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
+    monkeypatch.setattr(common, "preparation_tool", lambda *_args: False)
+    monkeypatch.setattr(codex, "diagnostic_bootstrap", lambda *_args: False)
+    monkeypatch.setattr(codex, "bootstrap", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("opened binding"))
+    monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("started lifecycle work"))
+    observed = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "session",
+        "tool_use_id": "bootstrap",
+        "tool_name": "Bash",
+        "tool_input": {"command": "recognized scoped bootstrap"},
+    }
+    assert codex.handle(observed) == codex.denial("TICKET_READ_REQUIRED")
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("Read", {"file_path": "src/app.py"}),
+        ("mcp__codex_apps__linear__save_issue", {"title": "independent administration"}),
+    ],
+)
+def test_pending_ticket_keeps_independent_task_free_work_outside_admission(
+    monkeypatch: pytest.MonkeyPatch, tool: str, args: dict
+) -> None:
+    """Admit named independent work without repairing readiness or reserving a provider call.
+
+    Args:
+        monkeypatch: Model the pending lookup and reject lifecycle or provider admission.
+        tool: Native read or named administration operation.
+        args: Structured input for that independent task-free operation.
+    """
+    # A pending ticket does not turn independent task-free work into implementation.
+    monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
+    monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("opened binding"))
+    monkeypatch.setattr(codex, "provider_gate", lambda *_args: pytest.fail("reserved provider"))
+    monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("started lifecycle work"))
+    observed = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "session",
+        "tool_use_id": "independent",
+        "tool_name": tool,
+        "tool_input": args,
+    }
+    assert codex.handle(observed) == {}
+
+
+@pytest.mark.parametrize(
+    "tool,probe_error,expected",
+    [
+        (
+            "Read",
+            "RECOVERY_REQUIRED",
+            {"systemMessage": "TASK_WORKSPACE_NOT_READY: RECOVERY_REQUIRED"},
+        ),
+        ("write_stdin", None, {"systemMessage": "TASK_WORKSPACE_NOT_READY: UNKNOWN_OPERATION"}),
+        ("Read", None, {}),
+    ],
+)
+def test_invalid_or_unmatched_completion_never_starts_settlement(
+    monkeypatch: pytest.MonkeyPatch, tool: str, probe_error: str | None, expected: dict
+) -> None:
+    """Preserve invalid-state diagnostics and reject uncorrelated polls without settlement.
+
+    Args:
+        monkeypatch: Replace existing admission at its read-only storage boundary.
+        tool: Completed native operation.
+        probe_error: Existing-state diagnostic, or no recorded admission.
+        expected: Exact native completion response.
+    """
+    # Neither an invalid store nor an unmatched callback can create a completion transaction.
+    monkeypatch.setattr(common, "preparation_tool", lambda *_args: False)
+    monkeypatch.setattr(codex, "bootstrap", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("settled unmatched work"))
+
+    def admission(_event: dict, _host: str) -> None:
+        """Expose only the selected existing-store result.
+
+        Args:
+            _event: Completion envelope whose admission is being inspected.
+            _host: Explicit adapter identity.
+
+        Raises:
+            core.WorkspaceError: If the modeled existing state requires recovery.
+        """
+        if probe_error is not None:
+            raise core.WorkspaceError(probe_error)
+
+    monkeypatch.setattr(common, "existing_admission", admission)
+    observed = {
+        "hook_event_name": "PostToolUse",
+        "session_id": "session",
+        "tool_use_id": "unmatched",
+        "tool_name": tool,
+        "tool_input": {},
+        "tool_response": {"isError": False},
+    }
+    assert codex.handle(observed) == expected
 
 
 def test_native_web_result_settles_without_interpreting_content(
@@ -24,6 +134,9 @@ def test_native_web_result_settles_without_interpreting_content(
     """
     # A native web result is a content list, not shell transport metadata.
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         codex.core, "execute", lambda request: calls.append(request) or {"ok": True}
@@ -57,6 +170,9 @@ def test_native_text_completion_settles_original_call(
     """
     # Native terminal callbacks carry text whose contents cannot grant lifecycle authority.
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         codex.core, "execute", lambda request: calls.append(request) or {"ok": True}
@@ -197,7 +313,13 @@ def test_codex_pretool_denies_unsupported_child_control_without_binding_lookup(
     monkeypatch.setattr(codex, "provider_gate", lambda *_args: False)
     monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("binding read"))
     response = codex.handle(
-        {"hook_event_name": "PreToolUse", "tool_name": "multi_agent_v1resume_agent"}
+        {
+            "session_id": "unit-session",
+            "tool_use_id": "unit-tool",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+            "tool_name": "multi_agent_v1resume_agent",
+        }
     )
     assert response["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert (
@@ -219,6 +341,9 @@ def test_codex_posttool_keeps_unknown_completion_pending(
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     monkeypatch.setattr(codex.core, "execute", lambda *_args: pytest.fail("settled work"))
     assert (
         codex.handle(
@@ -243,6 +368,9 @@ def test_codex_posttool_settles_typed_failure_without_handle(
     """
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     monkeypatch.setattr(
         codex.core, "execute", lambda request: calls.append(request) or {"ok": True}
     )
@@ -416,7 +544,15 @@ def test_codex_pretool_preserves_failed_core_readiness_code(
         return {"ok": False, "code": "SOURCE_STALE"}
 
     monkeypatch.setattr(codex.core, "execute", execute)
-    response = codex.handle({"hook_event_name": "PreToolUse", "tool_name": "Read"})
+    response = codex.handle(
+        {
+            "session_id": "unit-session",
+            "tool_use_id": "unit-tool",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+        }
+    )
     assert response == codex.denial("SOURCE_STALE")
     assert calls == ["ready"]
 
@@ -450,6 +586,7 @@ def test_codex_pretool_rejects_poll_without_observed_process_handle(
     monkeypatch.setattr(codex.core, "execute", execute)
     response = codex.handle(
         {
+            "session_id": "unit-session",
             "hook_event_name": "PreToolUse",
             "tool_name": "write_stdin",
             "tool_input": {},
@@ -469,6 +606,9 @@ def test_codex_posttool_rejects_mismatched_poll_response_handle(
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     monkeypatch.setattr(codex.core, "execute", lambda *_args: pytest.fail("settled poll"))
     response = codex.handle(
         {
@@ -490,14 +630,27 @@ def test_codex_pretool_requires_recorded_ticket_lookup_before_other_tools(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
     monkeypatch.setattr(codex, "ticket_lookup", lambda *_args: {})
-    assert codex.handle({"hook_event_name": "PreToolUse", "tool_name": "Read"}) == codex.denial(
-        "TICKET_READ_REQUIRED"
-    )
+    assert codex.handle(
+        {
+            "session_id": "unit-session",
+            "tool_use_id": "unit-tool",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+        }
+    ) == codex.denial("TICKET_READ_REQUIRED")
     assert (
         codex.handle(
-            {"hook_event_name": "PreToolUse", "tool_name": "mcp__codex_apps__linear_get_issue"}
+            {
+                "session_id": "unit-session",
+                "tool_use_id": "unit-tool",
+                "tool_input": {},
+                "hook_event_name": "PreToolUse",
+                "tool_name": "mcp__codex_apps__linear_get_issue",
+            }
         )
         == {}
     )
@@ -511,6 +664,7 @@ def test_codex_pretool_preserves_ticket_lookup_error(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
     monkeypatch.setattr(
         codex,
@@ -518,7 +672,13 @@ def test_codex_pretool_preserves_ticket_lookup_error(
         lambda *_args: (_ for _ in ()).throw(core.WorkspaceError("BINDING_CONFLICT")),
     )
     assert codex.handle(
-        {"hook_event_name": "PreToolUse", "tool_name": "mcp__codex_apps__linear_get_issue"}
+        {
+            "session_id": "unit-session",
+            "tool_use_id": "unit-tool",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp__codex_apps__linear_get_issue",
+        }
     ) == codex.denial("BINDING_CONFLICT")
 
 
@@ -536,10 +696,59 @@ def test_codex_pretool_admits_exact_provider_gate_without_tool_start(
     monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("opened tool binding"))
     assert (
         codex.handle(
-            {"hook_event_name": "PreToolUse", "tool_name": "mcp__codex_apps__linear_get_document"}
+            {
+                "session_id": "unit-session",
+                "tool_use_id": "unit-tool",
+                "tool_input": {},
+                "hook_event_name": "PreToolUse",
+                "tool_name": "mcp__codex_apps__linear_get_document",
+            }
         )
         == {}
     )
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "mcp__codex_apps__linear_save_document",
+        "spawn_agent",
+        "collaborationlist_agents",
+        "multi_agent_v1send_input",
+    ],
+)
+def test_pending_ticket_fences_special_mutation_routes_before_admission(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    """Prevent special archive and collaboration routes bypassing the new Task fence.
+
+    Args:
+        monkeypatch: Isolate route admission while retaining the real dispatch order.
+        tool: Protected route that previously returned before the lookup fence.
+    """
+    from unittest.mock import Mock
+
+    # A new Task awaits its exact ticket; no special mutation admission may run.
+    monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
+    monkeypatch.setattr(codex.common, "preparation_tool", lambda *_args: False)
+    monkeypatch.setattr(codex, "diagnostic_bootstrap", lambda *_args: False)
+    monkeypatch.setattr(codex, "bootstrap", lambda *_args, **_kwargs: False)
+    provider = Mock(return_value=True)
+    spawn, control = Mock(), Mock()
+    monkeypatch.setattr(codex, "provider_gate", provider)
+    monkeypatch.setattr(codex.codex_children, "admit_spawn", spawn)
+    monkeypatch.setattr(codex.codex_children, "admit_control", control)
+    observed = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "parent",
+        "tool_use_id": "protected",
+        "tool_name": tool,
+        "tool_input": {},
+    }
+    assert codex.handle(observed) == codex.denial("TICKET_READ_REQUIRED")
+    provider.assert_not_called()
+    spawn.assert_not_called()
+    control.assert_not_called()
 
 
 def test_codex_pretool_records_ready_tool_or_exact_core_denial(
@@ -577,7 +786,13 @@ def test_codex_pretool_records_ready_tool_or_exact_core_denial(
 
     monkeypatch.setattr(codex.core, "execute", execute)
     response = codex.handle(
-        {"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_use_id": "read-1"}
+        {
+            "session_id": "unit-session",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_use_id": "read-1",
+        }
     )
     assert response == codex.denial("REQUEST_CONFLICT")
     assert [item["operation"] for item in requests] == ["ready", "tool-start"]
@@ -592,6 +807,7 @@ def test_codex_posttool_ticket_lookup_reports_exact_missing_issue(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
     monkeypatch.setattr(
         codex,
@@ -616,6 +832,7 @@ def test_codex_posttool_forwards_verified_ticket_startup_context(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
     expected = {"systemMessage": "TASK_WORKSPACE_READY: assigned packet acknowledged"}
     calls: list[bool] = []
@@ -678,6 +895,9 @@ def test_codex_posttool_records_observed_async_handle_without_inferred_completio
     """
     # Isolate persistence while preserving the real transport classification and decoder.
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     requests: list[dict[str, Any]] = []
     monkeypatch.setattr(
         codex.core,
@@ -710,6 +930,9 @@ def test_codex_posttool_preserves_core_correlation_error(
     """
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
     monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
+    monkeypatch.setattr(
         codex.core, "execute", lambda _request: {"ok": False, "code": "UNKNOWN_OPERATION"}
     )
     response = codex.handle(
@@ -737,7 +960,18 @@ def test_codex_pretool_keeps_clarification_available_without_binding(
     monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("read binding"))
     # Neither interactive request tool can bypass a required ticket read.
     for tool in ("request_user_input", "request_user_input_async"):
-        assert codex.handle({"hook_event_name": "PreToolUse", "tool_name": tool}) == {}
+        assert (
+            codex.handle(
+                {
+                    "session_id": "unit-session",
+                    "tool_use_id": "unit-tool",
+                    "tool_input": {},
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": tool,
+                }
+            )
+            == {}
+        )
 
 
 def test_codex_pretool_admits_exact_unready_bootstrap_before_binding(
@@ -751,7 +985,18 @@ def test_codex_pretool_admits_exact_unready_bootstrap_before_binding(
     monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: False)
     monkeypatch.setattr(codex, "bootstrap", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(codex, "request_for", lambda *_args: pytest.fail("read binding"))
-    assert codex.handle({"hook_event_name": "PreToolUse", "tool_name": "exec_command"}) == {}
+    assert (
+        codex.handle(
+            {
+                "session_id": "unit-session",
+                "tool_use_id": "unit-tool",
+                "tool_input": {},
+                "hook_event_name": "PreToolUse",
+                "tool_name": "exec_command",
+            }
+        )
+        == {}
+    )
 
 
 def test_codex_pretool_rechecks_ready_bootstrap_without_tool_start(
@@ -772,7 +1017,18 @@ def test_codex_pretool_rechecks_ready_bootstrap_without_tool_start(
         "execute",
         lambda request: calls.append(request) or {"ok": True, "code": "READY"},
     )
-    assert codex.handle({"hook_event_name": "PreToolUse", "tool_name": "exec_command"}) == {}
+    assert (
+        codex.handle(
+            {
+                "session_id": "unit-session",
+                "tool_use_id": "unit-tool",
+                "tool_input": {},
+                "hook_event_name": "PreToolUse",
+                "tool_name": "exec_command",
+            }
+        )
+        == {}
+    )
     assert [call["operation"] for call in calls] == ["ready"]
 
 
@@ -793,6 +1049,7 @@ def test_codex_pretool_records_correlated_poll_handle(monkeypatch: pytest.Monkey
         lambda request: calls.append(request) or {"ok": True, "code": "READY"},
     )
     event = {
+        "session_id": "unit-session",
         "hook_event_name": "PreToolUse",
         "tool_name": "write_stdin",
         "tool_use_id": "poll-1",
@@ -812,6 +1069,9 @@ def test_codex_posttool_uses_poll_input_when_response_omits_handle(
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         codex.core,
@@ -840,6 +1100,9 @@ def test_codex_posttool_does_not_infer_completion_from_bad_json(
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     monkeypatch.setattr(codex.core, "execute", lambda *_args: pytest.fail("settled work"))
     event = {
         "hook_event_name": "PostToolUse",
@@ -909,7 +1172,13 @@ def test_codex_provider_gate_failure_falls_through_to_readiness(
         codex.core, "execute", lambda _request: {"ok": False, "code": "SOURCE_STALE"}
     )
     assert codex.handle(
-        {"hook_event_name": "PreToolUse", "tool_name": "mcp__codex_apps__linear_get_document"}
+        {
+            "session_id": "unit-session",
+            "tool_use_id": "unit-tool",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp__codex_apps__linear_get_document",
+        }
     ) == codex.denial("SOURCE_STALE")
 
 
@@ -922,6 +1191,9 @@ def test_codex_posttool_rejects_scalar_response_without_completion(
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
     monkeypatch.setattr(codex, "request_for", lambda *_args: {"operation": "tool-complete"})
+    monkeypatch.setattr(
+        common, "existing_admission", lambda event, host: codex.request_for(event, "tool-complete")
+    )
     monkeypatch.setattr(codex.core, "execute", lambda *_args: pytest.fail("settled work"))
     assert (
         codex.handle(
@@ -944,6 +1216,7 @@ def test_codex_posttool_linear_missing_reference_names_requested_issue(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: True)
     monkeypatch.setattr(
         codex,
@@ -1107,6 +1380,8 @@ def test_invalid_child_identity_cannot_dispatch_or_fall_through(
     with pytest.raises(core.WorkspaceError) as captured:
         codex.handle(
             {
+                "tool_use_id": "unit-tool",
+                "tool_input": {},
                 "hook_event_name": "PreToolUse",
                 "session_id": "parent",
                 "agent_id": "forged",
@@ -1181,6 +1456,7 @@ def test_required_ticket_allows_only_explicit_recovery_without_tool_start(
         monkeypatch: Fixture isolating startup and persistent readiness boundaries.
         route: Exact exception recognized by its independently tested admission helper.
     """
+    monkeypatch.setattr(common, "selected_lookup", lambda *_args, **_kwargs: True)
     from unittest.mock import Mock
 
     # Model a required ticket marker and one explicitly validated recovery command.
@@ -1193,7 +1469,18 @@ def test_required_ticket_allows_only_explicit_recovery_without_tool_start(
     monkeypatch.setattr(codex.core, "execute", execute)
     monkeypatch.setattr(codex, "ticket_lookup", lookup)
     # Recovery admission neither consumes the provider handshake nor starts ordinary work.
-    assert codex.handle({"hook_event_name": "PreToolUse", "tool_name": "Bash"}) == {}
+    assert (
+        codex.handle(
+            {
+                "session_id": "unit-session",
+                "tool_use_id": "unit-tool",
+                "tool_input": {},
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+            }
+        )
+        == {}
+    )
     execute.assert_not_called()
     lookup.assert_not_called()
     if route == "preparation":

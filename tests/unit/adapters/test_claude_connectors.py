@@ -97,7 +97,7 @@ def test_provider_admission_accepts_only_allowlisted_configured_operations(
 
 
 @pytest.mark.parametrize(
-    "operation", ["save_document", "get_document", "delete_comment", "list_issues", "get_issue_x"]
+    "operation", ["save_document", "get_document", "delete_comment", "get_issue_x"]
 )
 def test_provider_admission_rejects_other_operations(
     monkeypatch: pytest.MonkeyPatch, operation: str
@@ -139,13 +139,14 @@ def test_native_tool_routes_providers_and_no_effect_tools_by_host(
         "tool_use_id": "native-call",
     }
     assert common.native_tool(save, "claude-code") == save["tool_name"]
-    # Cursor's generic MCP callback remains unsupported after readiness.
+    # Cursor generic validation names the operation; its specific hook checks server identity.
+    assert (
+        common.native_tool(
+            {"tool_name": "MCP:get_issue", "tool_input": {}, "tool_use_id": "c"}, "cursor"
+        )
+        == "MCP:get_issue"
+    )
     for event, host, code in [
-        (
-            {"tool_name": "MCP:get_issue", "tool_input": {}, "tool_use_id": "c"},
-            "cursor",
-            "HOST_UNSUPPORTED_PROVIDER",
-        ),
         (
             {**save, "tool_name": "ToolSearch", "mcp_server": None},
             "cursor",
@@ -173,10 +174,10 @@ def test_native_tool_routes_providers_and_no_effect_tools_by_host(
 
 
 @pytest.mark.parametrize("tool", ["ToolSearch", "Skill", "SendMessage", "AskUserQuestion"])
-def test_no_effect_tools_require_readiness_but_record_no_pending_work(
+def test_no_effect_tools_are_task_free_and_record_no_pending_work(
     monkeypatch: pytest.MonkeyPatch, tool: str
 ) -> None:
-    """Check readiness for schema and skill loads without tool-start or settlement.
+    """Admit schema and skill loads without readiness, tool-start or settlement.
 
     Args:
         monkeypatch: Replaces lifecycle boundaries and records core calls.
@@ -187,6 +188,11 @@ def test_no_effect_tools_require_readiness_but_record_no_pending_work(
     monkeypatch.setattr(
         common, "request_for", lambda _event, operation, _host: {"operation": operation}
     )
+    monkeypatch.setattr(
+        common,
+        "existing_admission",
+        lambda event, host: common.request_for(event, "tool-complete", host),
+    )
     calls: list[JsonObject] = []
     monkeypatch.setattr(
         common.core, "execute", lambda request: calls.append(request) or {"ok": True, "code": "OK"}
@@ -194,16 +200,12 @@ def test_no_effect_tools_require_readiness_but_record_no_pending_work(
     event: JsonObject = {"tool_name": tool, "tool_input": {}, "tool_use_id": "tool-1"}
     # The pre-hook checks readiness only and the post-hook settles nothing.
     common.native_pre(event, "claude-code")
-    assert [call["operation"] for call in calls] == ["ready"]
+    assert calls == []
     common.native_post({**event, "tool_response": "ok"}, "claude-code", failed=False)
-    assert [call["operation"] for call in calls] == ["ready"]
-    # A failed readiness check still denies the load.
-    monkeypatch.setattr(
-        common.core, "execute", lambda _request: {"ok": False, "code": "SOURCE_STALE"}
-    )
-    with pytest.raises(core.WorkspaceError) as failure:
-        common.native_pre(event, "claude-code")
-    assert failure.value.code == "SOURCE_STALE"
+    assert calls == []
+    # A stale lifecycle packet does not gate a task-free parent helper.
+    monkeypatch.setattr(common.core, "execute", lambda _request: pytest.fail("task-free core call"))
+    assert common.native_pre(event, "claude-code") is None
 
 
 def test_preparation_tool_bounds_tool_search_and_paths(
