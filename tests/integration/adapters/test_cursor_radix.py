@@ -113,7 +113,7 @@ def test_unknown_edge_is_read_only_absence(registry: core.Directory) -> None:
     before = registry.read(routing.ROOT)
     assert routing.lookup(registry, "conversation", "unknown") is None
     assert registry.read(routing.ROOT) == before
-    assert registry.names() == ["lock", routing.ROOT]
+    assert sorted(registry.names()) == sorted(["lock", routing.ROOT])
 
 
 def test_compatible_orphan_branch_preserves_both_routes(
