@@ -340,6 +340,7 @@ def _attach(registry: core.Directory, parent: core.JSONObject, incoming: str) ->
     if prefix == target:
         _attach(registry, existing, incoming)
         return
+    # A crash after branch publication but before parent redirection can leave this orphan.
     # Reuse compatible orphan branches rather than overwriting their descendants.
     if registry.exists(_name(prefix)):
         branch = _node(registry, prefix)

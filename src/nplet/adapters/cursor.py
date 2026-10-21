@@ -7,9 +7,8 @@ import sys
 import time
 from functools import partial
 
-from nplet.adapters import common, cursor_children, runner
+from nplet.adapters import common, cursor_children, cursor_sources, runner
 from nplet.adapters import cursor_child_session as child_session
-from nplet.adapters import cursor_sources as cursor_sources
 from nplet.lifecycle import task_workspace as core
 
 HOST = "cursor"
