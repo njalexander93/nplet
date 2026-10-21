@@ -11,6 +11,7 @@ from collections.abc import Iterator
 import pytest
 
 from nplet.adapters import common, cursor, cursor_results
+from nplet.adapters import cursor_child_session as child_session
 from nplet.adapters import cursor_children as children
 from nplet.lifecycle import task_workspace as core
 from tests.support import Fixture
@@ -817,7 +818,7 @@ def test_rendered_child_templates_preserve_receipts_and_recover_revision(
         "cwd": str(case.root),
         "session_id": case.base["session_id"] + "/agent/" + CHILD,
     }
-    guidance = children.child_context(event)
+    guidance = child_session.child_context(event)
     lines = guidance.splitlines()
     templates = {
         name: common.bootstrap_request(
@@ -839,7 +840,7 @@ def test_rendered_child_templates_preserve_receipts_and_recover_revision(
         command = common.bootstrap_command(request, "cursor")
         parsed = common.bootstrap_request(command, "cursor", common.PYTHON, common.LIFECYCLE)
         assert parsed == request
-        assert children.child_lifecycle(
+        assert child_session.child_lifecycle(
             {**event, "tool_name": "Shell", "tool_input": {"command": command}}
         )
         return core.execute(parsed)

@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
-import hashlib
 import json
 import re
 import subprocess
@@ -25,10 +24,17 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
+from nplet.lifecycle import _invocation_policy as invocation_policy
 from nplet.lifecycle import _invocation_records as invocation_records
+from nplet.lifecycle import _invocation_sources as invocation_sources
 from nplet.lifecycle import _invocations as invocations
 from nplet.lifecycle._errors import WorkspaceError, require
 from nplet.lifecycle._filesystem import Directory as NativeDirectory
+from nplet.lifecycle._primitives import canonical as canonical
+from nplet.lifecycle._primitives import expected as expected
+from nplet.lifecycle._primitives import participant_key as participant_key
+from nplet.lifecycle._primitives import sha as sha
+from nplet.lifecycle._primitives import token as token
 
 MAX_REQUEST = 96 * 1024 * 1024
 MAX_FILE = 16 * 1024 * 1024
@@ -169,35 +175,6 @@ class ExportDocuments(TypedDict):
     parts: list[DocumentRequest]
 
 
-def canonical(value: object) -> bytes:
-    """Serialize a value into the deterministic UTF-8 form used by digests.
-
-    Args:
-        value: JSON-serializable value whose deterministic representation is required.
-
-    Returns:
-        Canonical JSON bytes.
-
-    Raises:
-        ValueError: If a value cannot be represented as finite JSON.
-    """
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    ).encode("utf-8")
-
-
-def sha(data: bytes) -> str:
-    """Identify exact bytes with a hexadecimal SHA-256 digest.
-
-    Args:
-        data: Exact bytes whose content identity is required.
-
-    Returns:
-        The lowercase 64-character digest.
-    """
-    return hashlib.sha256(data).hexdigest()
-
-
 def now() -> str:
     """Record the current UTC time for local lifecycle evidence.
 
@@ -219,25 +196,6 @@ def fault(point: str) -> None:
     # Run only an explicitly installed process-local test injection.
     if FAILPOINT:
         FAILPOINT(point)
-
-
-def token(value: str) -> str:
-    """Validate a bounded printable ASCII identity token.
-
-    Args:
-        value: Identity token received from a request or persisted record.
-
-    Returns:
-        The validated token.
-
-    Raises:
-        WorkspaceError: If the token is empty, oversized or contains unsafe characters.
-    """
-    # Reject empty, oversized or non-printable identity tokens before returning them.
-    require(
-        isinstance(value, str) and 0 < len(value) <= 160 and all(32 < ord(c) < 127 for c in value)
-    )
-    return value
 
 
 def issue_id(value: str) -> str:
@@ -766,21 +724,6 @@ class Store:
             pass
 
 
-def participant_key(request: JSONObject) -> str:
-    """Derive a stable participant key from explicit host and session tokens.
-
-    Args:
-        request: Versioned lifecycle request with explicit repository, issue and session identities.
-
-    Returns:
-        The SHA-256 identity key.
-
-    Raises:
-        WorkspaceError: If either identity token is invalid.
-    """
-    return sha(canonical([token(request.get("host", "codex")), token(request["session_id"])]))
-
-
 def os_metadata(name: str) -> bool:
     """Recognize only Finder metadata names excluded from task payload content.
 
@@ -954,105 +897,101 @@ def settlement_slots(state: WorkspaceState) -> int:
     return slots
 
 
-def settlement_reserve(state: WorkspaceState) -> tuple[int, int]:
-    """Derive conservative settlement growth from the actual retained record constructors.
+def settlement_reserve(
+    state: WorkspaceState,
+    *,
+    slots: int | None = None,
+) -> tuple[int, int]:
+    """Reserve fixed bounded metadata and the actual variable settlement additions.
 
     Args:
         state: Post-transition state, including its current request result.
+        slots: Already counted obligations for this unchanged pending state, if available.
 
     Returns:
         Remaining conservative state bytes and required event count.
     """
-    # Scalar bounds use current identities/counters and the exact number of remaining facts.
-    slots = settlement_slots(state)
+    # Pending work is unchanged while commit publishes its event, inventory and request result.
+    if slots is None:
+        slots = settlement_slots(state)
     active = [
-        (identifier, item)
-        for identifier, item in state.get("cursor_invocations", {}).items()
-        if item["phase"] != "retired"
+        item for item in state.get("cursor_invocations", {}).values() if item["phase"] != "retired"
     ]
-    digest = "f" * 64
     generation = (
         max(
             [member["generation"] for member in state["participants"].values()]
-            + [item["resume_generation"] or 0 for _, item in active],
+            + [item["resume_generation"] or 0 for item in active],
             default=0,
         )
         + 1
     )
-    # This fixed result-field union dominates bind, retire and both source callback responses.
-    result = {
-        "ok": True,
-        "code": "OK",
-        "revision": state["revision"] + slots + 1,
-        "repo_id": state["repo_id"],
-        "issue_id": state["issue_id"],
-        "binding_generation": generation,
-        "invocation_id": digest,
-        "source_content_verified": False,
-        "source_receipt": False,
-    }
-    request_bytes = len(canonical({digest: {"digest": digest, "result": result}}))
+    generation_bytes = len(canonical(generation))
+    # Counter widths and repository identities remain actual values, never fixed-width guesses.
+    request_bytes = invocation_records.REQUEST_METADATA_BYTES + len(
+        canonical(
+            {
+                "revision": state["revision"] + slots + 1,
+                "repo_id": state["repo_id"],
+                "issue_id": state["issue_id"],
+                "binding_generation": generation,
+            }
+        )
+    )
     reserved = 0
-    terminal_bytes, binding_bytes = invocation_records.fixed_settlement_bytes()
-    # Printable token characters need at most two JSON bytes; the terminal constructor bounds text.
-    token_bound = "\\" * invocation_records.TOKEN_LIMIT
-    claim: invocation_records.ChildClaim = {
-        "child_conversation": token_bound,
-        "child_participant": digest,
-        "child_generation": generation,
-        "native_generation": token_bound,
-    }
-    for identifier, invocation in active:
-        # Fixed bounded metadata is cached; only actual variable-size additions are rebuilt.
-        reserved += terminal_bytes + request_bytes
-        member = invocation_records.child_member(claim, identifier, None, status="detached")
-        reserved += len(canonical({"participants": {digest: member}}))
+    for invocation in active:
+        # Terminal-only publication can add both an invocation and participant generation.
+        reserved += (
+            invocation_records.RETIREMENT_METADATA_BYTES
+            + invocation_records.PARTICIPANT_METADATA_BYTES
+            + 2 * generation_bytes
+            + request_bytes
+        )
         if invocation["phase"] == "admitted":
-            participant, assignment, owners = invocation_records.child_scope(
-                invocation,
-                claim,
-                identifier,
+            # A future reader is a 64-character digest; preserve every other actual packet byte.
+            packet = invocation["packet"]
+            packet_bytes = len(canonical(packet)) + sum(
+                66 - len(canonical(reference["reader"])) for reference in packet
             )
-            # Both packet copies and each actual path are charged at their encoded sizes.
-            reserved += len(
-                canonical(
-                    {
-                        "assignments": {digest: assignment},
-                        "participants": {digest: participant},
-                        "owners": owners,
-                    }
-                )
+            paths = invocation["owned_paths"]
+            # Turning the actual path list into owners adds colon + quoted 64-byte digest per path.
+            owners_bytes = len(canonical(paths)) + 67 * len(paths)
+            reserved += (
+                invocation_records.BINDING_METADATA_BYTES
+                + invocation_records.PARTICIPANT_METADATA_BYTES
+                + invocation_records.ASSIGNMENT_METADATA_BYTES
+                + 2 * generation_bytes
+                + 2 * packet_bytes
+                + owners_bytes
+                + request_bytes
             )
-            reserved += binding_bytes + request_bytes
-    # Source locators are variable-size assigned data, not token-sized guessed allowances.
+    # Only actual source locators/tool keys vary; their bounded value fragments use proven limits.
     for member in state["participants"].values():
         for tool, pending in member["pending"].items():
             if "cursor_invocation" in pending or "cursor_invocation" not in member:
                 continue
             if "cursor_source" in pending:
                 source = pending["cursor_source"]
-                receipt = invocation_records.SourceReceipt(
-                    packet_digest=source["packet_digest"],
-                    sha256=source["sha256"],
-                    invocation_id=source["invocation_id"],
+                reserved += (
+                    invocation_records.SOURCE_RECEIPT_METADATA_BYTES
+                    + len(canonical(source["locator"]))
+                    + request_bytes
                 )
-                reserved += len(canonical({"cursor_sources": {source["locator"]: receipt}}))
-                reserved += request_bytes
                 if source.get("provisional") is None:
-                    proof = invocation_records.SourceProof(sha256=digest, content_length=MAX_FILE)
-                    reserved += len(canonical({"provisional": proof})) + request_bytes
+                    reserved += invocation_records.SOURCE_PROOF_METADATA_BYTES + request_bytes
             else:
                 count = 1 if pending["status"] == "unknown" else 2
-                reserved += count * request_bytes
-                reserved += len(canonical({tool: {"status": "unknown", "handle": token_bound}}))
-    # Retain shared counter/head growth through the last reserved fact.
+                reserved += (
+                    count * request_bytes
+                    + invocation_records.EFFECT_METADATA_BYTES
+                    + len(canonical(tool))
+                )
+    # Retain both arbitrary-width counters through the last reserved fact.
     if reserved:
-        reserved += len(
+        reserved += invocation_records.COUNTER_HEAD_METADATA_BYTES + len(
             canonical(
                 {
                     "revision": state["revision"] + slots + 1,
                     "seq": state["seq"] + slots + 1,
-                    "head": digest,
                 }
             )
         )
@@ -1210,6 +1149,8 @@ class Issue:
         """
         # Validate the old committed inventory before staging any replacement bytes.
         old_files = self.files() if self.state else {}
+        # Count pending obligations once; publication below never changes pending work.
+        pending_slots = settlement_slots(state)
         # Append a lifecycle fact only when this operation changes recorded history.
         if event_type:
             require(
@@ -1217,7 +1158,6 @@ class Issue:
             )
             optional = event_type == "observation"
             # Reserve async-transition and completion events for every admitted pending tool.
-            pending_slots = settlement_slots(state)
             reserved = 8192 * (1 + pending_slots)
             # Suppress optional observations before they consume settlement reserves.
             if optional and len(files.get("events.jsonl", b"")) + reserved + 8192 > MAX_EVENTS:
@@ -1277,7 +1217,7 @@ class Issue:
             "result": stored_result,
         }
         # Preserve settlement room even when an event-free request adds retained metadata.
-        state_reserve, pending_slots = settlement_reserve(state)
+        state_reserve, _ = settlement_reserve(state, slots=pending_slots)
         require(len(canonical(state)) + state_reserve <= 8 * 1024 * 1024, "ARCHIVE_PENDING")
         # Event-free archive progress may retain already committed checkpoint occupancy,
         # but cannot increase event bytes or the number of unfinished obligations.
@@ -1339,23 +1279,10 @@ def authorize(
         "STALE_BINDING",
     )
     # A classified child retains authority only while its exact invocation is active.
-    invocations.authorize_actor(state, key, participant, request["operation"])
+    invocation_policy.authorize_actor(state, key, participant, request["operation"])
     # Enforce coordinator ownership only for operations that request it.
     require(not coordinator or state["coordinator"] == key, "NOT_OWNER")
     return key, participant
-
-
-def expected(state: WorkspaceState, request: JSONObject) -> None:
-    """Require the caller to name the current issue revision.
-
-    Args:
-        state: Current or staged issue control state.
-        request: Versioned lifecycle request with explicit repository, issue and session identities.
-
-    Raises:
-        WorkspaceError: If the expected revision is stale or absent.
-    """
-    require(request.get("expected_revision") == state["revision"], "REVISION_CONFLICT")
 
 
 def evidence(value: list[EvidenceRef] | None) -> list[EvidenceRef]:
@@ -1674,7 +1601,7 @@ def attach(state: WorkspaceState, request: JSONObject) -> JSONObject:
     # Preserve existing scope and require the recorded generation before resuming.
     if participant:
         # Generic attachment cannot revive a retired Cursor invocation.
-        invocations.child_active(state, key, participant)
+        invocation_policy.child_active(state, key, participant)
         initial_create = (
             request["operation"] == "create"
             and request.get("binding_generation") is None
@@ -2452,7 +2379,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         packet = validate_packet(request["packet"])
         require(all(ref["reader"] == target for ref in packet), "SCOPE_MISSING")
         # Invocation policy preserves target scope without widening it.
-        invocations.authorize_scope(state, target, packet, request.get("owned_paths", []))
+        invocation_policy.authorize_scope(state, target, packet, request.get("owned_paths", []))
         state.setdefault("assignments", {})[target] = {"packet": packet}
         # Update existing scope without reviving a detached generation.
         if target in state["participants"]:
@@ -2481,7 +2408,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         if operation == "acknowledge":
             require(request.get("packet_digest") == digest, "SOURCE_STALE")
             # Available child sources need exact completed delivery receipts.
-            invocations.authorize_acknowledgment(participant, refs, digest)
+            invocation_sources.authorize_acknowledgment(participant, refs, digest)
             participant.update({"ack": digest, "status": "ready"})
         # Require active disposition and a current acknowledged packet.
         elif operation == "ready":
@@ -2507,7 +2434,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         path = payload_path(request["path"])
         require(state["owners"].get(path) == key, "NOT_OWNER")
         # Planned child output and readiness remain data-dependent mutation checks.
-        invocations.authorize_update(state, participant, files, path)
+        invocation_policy.authorize_update(state, participant, files, path)
         require(request.get("old_digest") == state["files"].get(path), "REVISION_CONFLICT")
         data = request["content"].encode("utf-8")
         require(len(data) <= MAX_FILE, "SIZE_LIMIT")
@@ -2605,7 +2532,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         event_type = request["event_type"]
     # Only correlated native source callbacks can establish Cursor source receipts.
     elif operation == "cursor-source-callback":
-        result = invocations.source_callback(state, files, request, participant)
+        result = invocation_sources.source_callback(state, files, request, participant)
     # Track exact source preparation before readiness without admitting ordinary work.
     elif operation in {"tool-start", "source-read-start"}:
         refs = packet_reads(state, participant, files)
@@ -2666,7 +2593,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             ]
             require(len(matches) == 1, "UNKNOWN_OPERATION")
             assert handle is not None  # token() returned a validated string above.
-            invocations.authorize_pending(participant["pending"][matches[0]], poll=True)
+            invocation_policy.authorize_pending(participant["pending"][matches[0]], poll=True)
             pending.update({"poll_parent": matches[0], "poll_handle": handle})
         # Reserve and persist the transport independently from its original process.
         participant["pending"][tool] = pending
@@ -2704,7 +2631,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
                 tool = matches[0]
         # Generic observations cannot settle a Task whose child must retire atomically.
         invocation_pending = participant["pending"].get(tool)
-        invocations.authorize_pending(invocation_pending)
+        invocation_policy.authorize_pending(invocation_pending)
         # An already settled parent is allowed only through its still-recorded poll transport.
         require(tool in participant["pending"] or transport is not None, "UNKNOWN_OPERATION")
         # Update or settle the original process only while its pending record exists.
@@ -2733,7 +2660,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         target = key if operation == "detach" else request["target_participant"]
         member = state["participants"][target]
         # Invocation retirement is the only path that releases a classified child generation.
-        invocations.authorize_target(member)
+        invocation_policy.authorize_target(member)
         require(
             request.get("target_generation", request.get("binding_generation"))
             == member["generation"],
@@ -2747,7 +2674,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         target = request["target_participant"]
         require(target in state["participants"] and not participant["pending"], "PENDING_OPERATION")
         # A child assignment never grants coordinator or roadmap authority.
-        invocations.authorize_target(state["participants"][target])
+        invocation_policy.authorize_target(state["participants"][target])
         evidence(request.get("evidence"))
         state["coordinator"] = target
         state["owners"]["roadmap.md"] = target

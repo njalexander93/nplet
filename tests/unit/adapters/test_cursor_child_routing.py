@@ -91,11 +91,11 @@ def test_child_pre_routes_own_lifecycle_or_assigned_read(
         new_child: Whether actual child binding just occurred.
     """
     event = {"child": True, "_cursor_new_child": new_child}
-    monkeypatch.setattr(cursor.cursor_children, "child_lifecycle", lambda _event: lifecycle)
+    monkeypatch.setattr(cursor.child_session, "child_lifecycle", lambda _event: lifecycle)
     source = MagicMock()
-    monkeypatch.setattr(cursor.cursor_children, "source_read_pre", source)
+    monkeypatch.setattr(cursor.cursor_sources, "source_read_pre", source)
     context = MagicMock(return_value="own-child-command")
-    monkeypatch.setattr(cursor.cursor_children, "child_context", context)
+    monkeypatch.setattr(cursor.child_session, "child_context", context)
     deadline = time.monotonic() + 1
     result = cursor.child_event(event, "preToolUse", deadline)
     assert result == (
@@ -124,10 +124,10 @@ def test_child_post_requires_closed_receipt_or_returns_recovery(
         receipt: Whether a current source receipt was proven.
     """
     event = {"child": True}
-    monkeypatch.setattr(cursor.cursor_children, "child_lifecycle", lambda _event: lifecycle)
+    monkeypatch.setattr(cursor.child_session, "child_lifecycle", lambda _event: lifecycle)
     post = MagicMock(return_value={"source_receipt": receipt})
-    monkeypatch.setattr(cursor.cursor_children, "source_read_post", post)
-    monkeypatch.setattr(cursor.cursor_children, "child_context", lambda _event: "own-child-command")
+    monkeypatch.setattr(cursor.cursor_sources, "source_read_post", post)
+    monkeypatch.setattr(cursor.child_session, "child_context", lambda _event: "own-child-command")
     deadline = time.monotonic() + 1
     result = cursor.child_event(event, name, deadline)
     if lifecycle:
@@ -174,10 +174,10 @@ def test_classified_child_dispatch_never_enters_parent_startup(
     observed = {**event, "child": True}
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(cursor.cursor_children, "normalize", lambda *_args: observed)
-    monkeypatch.setattr(cursor.cursor_children, "child_context", lambda _event: "own-child-command")
+    monkeypatch.setattr(cursor.child_session, "child_context", lambda _event: "own-child-command")
     content = MagicMock()
     observe = MagicMock()
-    monkeypatch.setattr(cursor.cursor_children, "source_read_content", content)
+    monkeypatch.setattr(cursor.cursor_sources, "source_read_content", content)
     monkeypatch.setattr(cursor.common, "native_observe", observe)
     parent_boundaries = []
     for boundary in ("lookup_required", "native_pre", "native_post", "native_context", "prompt"):
@@ -224,14 +224,14 @@ def test_child_denial_delivers_only_available_own_recovery(
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(cursor.cursor_children, "normalize", lambda *_args: observed)
     monkeypatch.setattr(
-        cursor.cursor_children,
+        cursor.child_session,
         "child_lifecycle",
         MagicMock(side_effect=core.WorkspaceError("NOT_OWNER")),
     )
     context = MagicMock(return_value="own-child-command")
     if not context_available:
         context.side_effect = core.WorkspaceError("STALE_BINDING")
-    monkeypatch.setattr(cursor.cursor_children, "child_context", context)
+    monkeypatch.setattr(cursor.child_session, "child_context", context)
     parent = MagicMock(side_effect=AssertionError("parent context used by child"))
     monkeypatch.setattr(cursor.common, "native_context", parent)
     result = cursor.handle(event)

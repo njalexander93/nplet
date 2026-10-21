@@ -39,11 +39,11 @@ def registry(tmp_path: Path) -> Iterator[core.Directory]:
 
 
 @pytest.mark.parametrize("phase", ["before", "after"])
-@pytest.mark.parametrize("ordinal", range(65))
+@pytest.mark.parametrize("ordinal", range(2))
 def test_every_node_publication_recovers_exactly(
     registry: core.Directory, monkeypatch: pytest.MonkeyPatch, phase: str, ordinal: int
 ) -> None:
-    """Retry all sixty-five durable publication boundaries without losing selection.
+    """Retry both durable leaf and root publication boundaries without losing selection.
 
     Args:
         registry: Real initialized directory.
@@ -75,7 +75,7 @@ def test_every_node_publication_recovers_exactly(
     monkeypatch.setattr(core, "FAILPOINT", None)
     # Only publication of the final root edge makes a new path reachable.
     selected = routing.lookup(registry, "conversation", "child")
-    assert (selected is not None) == (phase == "after" and ordinal == 64)
+    assert (selected is not None) == (phase == "after" and ordinal == 1)
     routing.claim(registry, "conversation", "child", "TEST-1", "issue-uuid")
     assert routing.lookup(registry, "conversation", "child")["issue_id"] == "TEST-1"
     before = {name: registry.read(name) for name in registry.names() if name.endswith(".json")}
@@ -85,7 +85,7 @@ def test_every_node_publication_recovers_exactly(
         routing.claim(registry, "conversation", "child", "OTHER-2", "other-uuid")
 
 
-@pytest.mark.parametrize("depth", [0, 1, 32, 64])
+@pytest.mark.parametrize("depth", [0, 64])
 def test_missing_referenced_node_is_never_recreated(registry: core.Directory, depth: int) -> None:
     """Deny both classification and insertion after referenced storage loss.
 
@@ -144,9 +144,11 @@ def test_compatible_orphan_branch_preserves_both_routes(
     monkeypatch.setattr(core, "FAILPOINT", None)
     # These exact hashes share the first digit and diverge at the second.
     routing.claim(registry, "conversation", "other-11", "OTHER-2", "other-uuid")
-    assert routing.lookup(registry, "conversation", "child")["issue_id"] == "TEST-1"
+    # Unreachable preparation grants no authority; exact replay connects its retained leaf.
+    assert routing.lookup(registry, "conversation", "child") is None
     assert routing.lookup(registry, "conversation", "other-11")["issue_id"] == "OTHER-2"
     routing.claim(registry, "conversation", "child", "TEST-1", "issue-uuid")
+    assert routing.lookup(registry, "conversation", "child")["issue_id"] == "TEST-1"
     assert routing.lookup(registry, "conversation", "other-11")["issue_id"] == "OTHER-2"
 
 
@@ -364,3 +366,92 @@ def test_oversized_terminal_rejects_before_replacement(
     assert sorted(registry.names()) == sorted(["lock", *before])
     assert routing.lookup(registry, "conversation", "child")["issue_id"] == "TEST-1"
     routing.claim(registry, "conversation", "child", "TEST-1", "issue-uuid")
+
+
+@pytest.mark.parametrize("phase", ["before", "after"])
+@pytest.mark.parametrize("ordinal", range(3))
+@pytest.mark.parametrize("deeper", [False, True])
+def test_compressed_split_recovery_preserves_existing_routes(
+    registry: core.Directory,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    ordinal: int,
+    deeper: bool,
+) -> None:
+    """Recover each split boundary without losing old or intervening identities.
+
+    Args:
+        registry: Real durable routing store.
+        monkeypatch: Installs an exact publication interruption.
+        phase: Before or after atomic replacement.
+        ordinal: Leaf, split branch or parent redirection.
+        deeper: Split below an existing branch instead of directly below root.
+    """
+    # Fixed fixture digests share prefixes 6 and 63, independently selected before this test.
+    routing.claim(registry, "conversation", "child", "TEST-1", "issue-uuid")
+    if deeper:
+        routing.claim(registry, "conversation", "other-11", "OTHER-2", "other-uuid")
+    incoming = "deeper-233" if deeper else "other-11"
+    count = 0
+
+    def interrupt(point: str) -> None:
+        """Interrupt one selected durable split publication.
+
+        Args:
+            point: Production publication boundary.
+
+        Raises:
+            RuntimeError: At the selected publication.
+        """
+        nonlocal count
+        if point.startswith("cursor-radix-" + phase + ":"):
+            current = count
+            count += 1
+            if current == ordinal:
+                raise RuntimeError("split interrupted")
+
+    monkeypatch.setattr(core, "FAILPOINT", interrupt)
+    with pytest.raises(RuntimeError, match="split interrupted"):
+        routing.claim(registry, "conversation", incoming, "NEXT-3", "next-uuid")
+    monkeypatch.setattr(core, "FAILPOINT", None)
+    assert routing.lookup(registry, "conversation", "child")["issue_id"] == "TEST-1"
+    assert (routing.lookup(registry, "conversation", incoming) is not None) == (
+        phase == "after" and ordinal == 2
+    )
+    # Another claim may intervene before replay; neither reachable selector may disappear.
+    intervening = "fourth-189" if deeper else "deeper-233"
+    routing.claim(registry, "conversation", intervening, "LAST-4", "last-uuid")
+    routing.claim(registry, "conversation", incoming, "NEXT-3", "next-uuid")
+    assert routing.lookup(registry, "conversation", incoming)["issue_id"] == "NEXT-3"
+    assert routing.lookup(registry, "conversation", intervening)["issue_id"] == "LAST-4"
+    assert routing.lookup(registry, "conversation", "child")["issue_id"] == "TEST-1"
+    if deeper:
+        assert routing.lookup(registry, "conversation", "other-11")["issue_id"] == "OTHER-2"
+
+
+def test_compressed_branch_loss_never_becomes_unknown(registry: core.Directory) -> None:
+    """A missing selected branch denies both lookup and insertion without reconstruction.
+
+    Args:
+        registry: Real durable routing store.
+    """
+    # Two fixed native identities diverge immediately after prefix 6.
+    routing.claim(registry, "conversation", "child", "TEST-1", "issue-uuid")
+    routing.claim(registry, "conversation", "other-11", "OTHER-2", "other-uuid")
+    registry.unlink("node-6.json")
+    with pytest.raises(core.WorkspaceError, match="RECOVERY_REQUIRED"):
+        routing.lookup(registry, "conversation", "child")
+    with pytest.raises(core.WorkspaceError, match="RECOVERY_REQUIRED"):
+        routing.claim(registry, "conversation", "child", "TEST-1", "issue-uuid")
+    assert not registry.exists("node-6.json")
+
+
+def test_first_identity_uses_only_leaf_and_root(registry: core.Directory) -> None:
+    """The review's sparse-storage requirement forbids a permanent per-digit chain.
+
+    Args:
+        registry: Real durable routing store.
+    """
+    routing.claim(registry, "conversation", "child", "TEST-1", "issue-uuid")
+    assert len([name for name in registry.names() if name.endswith(".json")]) == 2
+    assert routing.lookup(registry, "conversation", "child")["issue_id"] == "TEST-1"

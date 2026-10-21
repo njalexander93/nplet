@@ -175,19 +175,15 @@ def main() -> int:
     """
     # Accept only the exact supervisor-owned argv; native event JSON cannot select a budget.
     args = sys.argv[1:]
-    observer = (
-        len(args) == 5
-        and args[:3] == ["--worker", "cursor", "--deadline"]
-        and args[4] == "--observe-read-content"
-    )
-    cursor_worker = (
-        len(args) in {4, 5}
-        and args[:3] == ["--worker", "cursor", "--deadline"]
-        and (len(args) == 4 or observer)
-    )
-    other_worker = len(args) == 2 and args[0] == "--worker" and args[1] in {"codex", "claude"}
-    if not (cursor_worker or other_worker):
-        return 2
+    match tuple(args):
+        case ("--worker", "codex" | "claude"):
+            observer, cursor_worker = False, False
+        case ("--worker", "cursor", "--deadline", _):
+            observer, cursor_worker = False, True
+        case ("--worker", "cursor", "--deadline", _, "--observe-read-content"):
+            observer, cursor_worker = True, True
+        case _:
+            return 2
     # Decode only finite absolute deadlines; expiration is checked inside the selected adapter.
     deadline = None
     if cursor_worker:

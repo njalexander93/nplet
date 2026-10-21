@@ -8,6 +8,8 @@ import time
 from functools import partial
 
 from nplet.adapters import common, cursor_children, runner
+from nplet.adapters import cursor_child_session as child_session
+from nplet.adapters import cursor_sources as cursor_sources
 from nplet.lifecycle import task_workspace as core
 
 HOST = "cursor"
@@ -61,28 +63,28 @@ def child_event(event: core.JSONObject, name: str, deadline: float) -> core.JSON
     """
     # A child can prepare exact sources before acknowledgment; core receipt gates own readiness.
     if name == "preToolUse":
-        if not cursor_children.child_lifecycle(event):
-            cursor_children.source_read_pre(event, deadline)
+        if not child_session.child_lifecycle(event):
+            cursor_sources.source_read_pre(event, deadline)
         result: core.JSONObject = {"permission": "allow"}
         if event.get("_cursor_new_child"):
-            result["additional_context"] = cursor_children.child_context(event)
+            result["additional_context"] = child_session.child_context(event)
         return result
     # Actual content is provisional until the same Read's recognized native success.
     if name == "beforeReadFile":
-        cursor_children.source_read_content(event, deadline)
+        cursor_sources.source_read_content(event, deadline)
         return {"permission": "allow"}
     # Lifecycle commands manage their own transaction; file Read effects use the closed callback.
     if name in {"postToolUse", "postToolUseFailure"}:
-        if cursor_children.child_lifecycle(event):
+        if child_session.child_lifecycle(event):
             return {}
-        result = cursor_children.source_read_post(
+        result = cursor_sources.source_read_post(
             event, deadline, failed=name == "postToolUseFailure"
         )
         if not result["source_receipt"]:
             return {
                 "additional_context": "SOURCE_DELIVERY_REQUIRED: "
                 "Read finished without a current source receipt. "
-                + cursor_children.child_context(event)
+                + child_session.child_context(event)
             }
         return {}
     # Children never enter provider ticket bootstrap or ordinary parent prompt startup.
@@ -91,9 +93,9 @@ def child_event(event: core.JSONObject, name: str, deadline: float) -> core.JSON
     if name == "beforeSubmitPrompt":
         return {"continue": True}
     if name == "sessionStart":
-        return {"additional_context": cursor_children.child_context(event)}
+        return {"additional_context": child_session.child_context(event)}
     if name == "preCompact":
-        return {"user_message": cursor_children.child_context(event)}
+        return {"user_message": child_session.child_context(event)}
     # A stop is an observation only, never Task retirement or pending settlement.
     if name in {"stop", "sessionEnd"}:
         common.native_observe(event, HOST)
@@ -223,7 +225,7 @@ def handle(event: core.JSONObject, *, deadline: float | None = None) -> core.JSO
         # Denials deliver only this actual child's own recovery command, never parent identity.
         if observed.get("child") is True:
             try:
-                context = cursor_children.child_context(observed)
+                context = child_session.child_context(observed)
                 response["additional_context"] = (
                     response.get("additional_context", "") + " " + context
                 )

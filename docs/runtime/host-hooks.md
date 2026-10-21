@@ -739,10 +739,13 @@ preserve old child operations, or establish safe installation over a legacy runt
 A supported transition remains necessary before live cutover.
 
 Native classification hashes the exact raw parent call or child conversation with
-its namespace into a full 64-digit SHA-256 key. A mandatory root and at most 64
-selected descendant nodes locate one retained issue; the route grants no authority.
+its namespace into a full 64-digit SHA-256 key. Compressed prefix paths locate one
+retained issue; the route grants no authority. The first identity needs only a leaf
+and root reference. A branch is added where keys diverge, with at most 64 selected
+descendants in the worst case. Existing one-digit paths remain readable.
 Each node has at most sixteen edges or one exact terminal identity and issue selector.
-A missing edge in a valid node means an unknown identity. A missing root or referenced
+A missing edge or validated compressed-prefix mismatch means an unknown identity.
+A missing root or referenced
 node fails closed; native hooks never recreate it or interpret it as absence.
 The adapter recovers the selected issue transaction under its existing lock and
 revalidates the committed invocation and current participant generation. Ordinary

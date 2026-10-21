@@ -140,7 +140,7 @@ def test_new_oversized_endpoint_preserves_existing_routes(
     assert routing.lookup(directory, "conversation", "child")["issue_id"] == "TEST-1"
 
 
-@pytest.mark.parametrize("depth", [0, 1, 64])
+@pytest.mark.parametrize("depth", [0, 64])
 def test_lost_required_node_denies_lookup_and_claim_without_recreation(
     memory_routes: tuple[MagicMock, dict[str, bytes]], depth: int
 ) -> None:
@@ -437,3 +437,45 @@ def test_registered_parent_without_registry_never_opens_issue_histories(
     assert result.get("child") is not True
     store.issues.child.assert_not_called()
     store.control.child.assert_not_called()
+
+
+def test_interleaved_orphan_split_keeps_nested_routes(
+    memory_routes: tuple[MagicMock, dict[str, bytes]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Merge an interrupted shallow split after a deeper split becomes reachable.
+
+    Args:
+        memory_routes: Isolated external persistence boundary.
+        monkeypatch: Interrupts only the shallow root redirection.
+    """
+    directory, files = memory_routes
+    routing.prepare(directory)
+    routing.claim(directory, "conversation", "child", "TEST-1", "issue-uuid")
+
+    def interrupt(point: str) -> None:
+        """Leave the complete shallow branch unreachable.
+
+        Args:
+            point: Production persistence phase.
+
+        Raises:
+            RuntimeError: Before root redirection.
+        """
+        if point == "cursor-radix-before:root":
+            raise RuntimeError("split interrupted")
+
+    monkeypatch.setattr(core, "FAILPOINT", interrupt)
+    with pytest.raises(RuntimeError, match="split interrupted"):
+        routing.claim(directory, "conversation", "other-11", "OTHER-2", "other-uuid")
+    monkeypatch.setattr(core, "FAILPOINT", None)
+    # These fixed native hashes diverge at 6, then 63; the replay must retain both splits.
+    routing.claim(directory, "conversation", "deeper-233", "DEEP-3", "deep-uuid")
+    routing.claim(directory, "conversation", "other-11", "OTHER-2", "other-uuid")
+    routing.claim(directory, "conversation", "fourth-189", "LAST-4", "last-uuid")
+    assert routing.lookup(directory, "conversation", "child")["issue_id"] == "TEST-1"
+    assert routing.lookup(directory, "conversation", "other-11")["issue_id"] == "OTHER-2"
+    assert routing.lookup(directory, "conversation", "deeper-233")["issue_id"] == "DEEP-3"
+    assert routing.lookup(directory, "conversation", "fourth-189")["issue_id"] == "LAST-4"
+    before = dict(files)
+    routing.claim(directory, "conversation", "other-11", "OTHER-2", "other-uuid")
+    assert files == before

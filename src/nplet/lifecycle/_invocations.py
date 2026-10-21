@@ -10,9 +10,10 @@ import copy
 from typing import TYPE_CHECKING
 
 from nplet.lifecycle import _invocation_records as records
+from nplet.lifecycle._errors import require
+from nplet.lifecycle._primitives import canonical, expected, participant_key, sha, token
 
 if TYPE_CHECKING:
-    from nplet.lifecycle import task_workspace as core
     from nplet.lifecycle.task_workspace import (
         Issue,
         JSONObject,
@@ -31,22 +32,6 @@ INTERNAL_OPERATIONS = frozenset(
     }
 )
 OPERATIONS = INTERNAL_OPERATIONS | {"cursor-plan"}
-CHILD_OPERATIONS = frozenset(
-    {
-        "read",
-        "ready",
-        "acknowledge",
-        "update",
-        "event",
-        "tool-start",
-        "source-read-start",
-        "tool-complete",
-        "cursor-source-callback",
-        "attach",
-        "resume",
-        "bind",
-    }
-)
 
 
 def child_key(parent_session: str, conversation: str) -> str:
@@ -59,9 +44,7 @@ def child_key(parent_session: str, conversation: str) -> str:
     Returns:
         The framework participant key for the normalized child session.
     """
-    from nplet.lifecycle import task_workspace as core
-
-    return core.participant_key(
+    return participant_key(
         {
             "host": "cursor",
             "session_id": parent_session + "/agent/" + conversation,
@@ -84,10 +67,8 @@ def conversation_available(
     Raises:
         WorkspaceError: Another admitted or bound invocation already reserves the conversation.
     """
-    from nplet.lifecycle import task_workspace as core
-
     # Arrival order and normalized parent identities never substitute for actual identity.
-    core.require(
+    require(
         not any(
             identifier != excluded_invocation
             and item["phase"] in {"admitted", "bound"}
@@ -118,11 +99,9 @@ def resumable_member(
     Raises:
         WorkspaceError: Classification, status, effects or planned generation conflict.
     """
-    from nplet.lifecycle import task_workspace as core
-
     # The same eligibility predicate governs planning, admission and both identity-claim paths.
     member = state["participants"].get(child_key(parent_session, conversation))
-    core.require(
+    require(
         member is not None
         and member["status"] == "detached"
         and not member["pending"]
@@ -156,18 +135,16 @@ def claim_child_identity(
     Raises:
         WorkspaceError: Another invocation, unplanned reuse or retired generation conflicts.
     """
-    from nplet.lifecycle import task_workspace as core
-
     # Revalidate actual conversation exclusion under the same lock as publication.
     conversation_available(state, conversation, identifier)
     key = child_key(invocation["parent_session"], conversation)
     previous = state["participants"].get(key)
     # A fresh callback and an early foreground return allocate generation through one rule.
     if previous is None:
-        core.require(invocation["resume_child"] is None, "STALE_BINDING")
+        require(invocation["resume_child"] is None, "STALE_BINDING")
         generation = 1
     else:
-        core.require(invocation["resume_child"] == conversation, "STALE_BINDING")
+        require(invocation["resume_child"] == conversation, "STALE_BINDING")
         previous = resumable_member(
             state,
             invocation["parent_session"],
@@ -199,21 +176,19 @@ def resolve(
     Raises:
         WorkspaceError: Invocation, parent generation or pending correlation is invalid.
     """
-    from nplet.lifecycle import task_workspace as core
-
     # Committed invocation metadata selects authority; callback arrival cannot create it.
-    identifier = core.token(request["invocation_id"])
+    identifier = token(request["invocation_id"])
     invocation = state.get("cursor_invocations", {}).get(identifier)
-    core.require(invocation is not None, "UNKNOWN_OPERATION")
+    require(invocation is not None, "UNKNOWN_OPERATION")
     assert invocation is not None
     parent = state["participants"].get(invocation["parent"])
-    core.require(
+    require(
         parent is not None and parent["generation"] == invocation["parent_generation"],
         "STALE_BINDING",
     )
     assert parent is not None
     pending = parent["pending"].get(invocation["tool_id"])
-    core.require(
+    require(
         invocation["phase"] == "retired"
         or pending is not None
         and pending.get("cursor_invocation") == identifier,
@@ -281,28 +256,28 @@ def plan(
     from nplet.lifecycle import task_workspace as core
 
     # Exact planning replay still requires the current ready parent.
-    previous = state["requests"].get(core.sha(request["request_id"].encode()))
+    previous = state["requests"].get(sha(request["request_id"].encode()))
     if previous is not None:
         ready(state, request, files)
         return previous["result"]
     plans = state.setdefault("cursor_plans", {})
-    key = core.participant_key(request)
+    key = participant_key(request)
     ready(state, request, files)
-    core.expected(state, request)
-    plan_id = core.token(request["plan_id"])
+    expected(state, request)
+    plan_id = token(request["plan_id"])
     existing_plan = plans.get(plan_id)
-    core.require(
+    require(
         existing_plan is None or existing_plan["invocation_id"] is None,
         "REQUEST_CONFLICT",
     )
     packet = copy.deepcopy(core.validate_packet(request["packet"]))
-    core.require(all(ref["reader"] == "cursor-child" for ref in packet), "SCOPE_MISSING")
+    require(all(ref["reader"] == "cursor-child" for ref in packet), "SCOPE_MISSING")
     paths = request["owned_paths"]
-    core.require(isinstance(paths, list) and len(paths) <= 64 and len(set(paths)) == len(paths))
+    require(isinstance(paths, list) and len(paths) <= 64 and len(set(paths)) == len(paths))
     # Reserve notes against both installed owners and all still-unconsumed plans.
     resumed = request.get("resume_child")
     if resumed is not None:
-        core.token(resumed)
+        token(resumed)
     resumed_key = None
     retired = None
     if resumed is not None:
@@ -311,7 +286,7 @@ def plan(
         conversation_available(state, resumed)
     # An unconsumed plan reserves its known resume conversation too.
     if resumed is not None:
-        core.require(
+        require(
             not any(
                 other_id != plan_id
                 and plan["resume_child"] == resumed
@@ -322,21 +297,21 @@ def plan(
         )
     for path in paths:
         core.payload_path(path)
-        core.require(
+        require(
             path != "roadmap.md" and state["owners"].get(path) in {None, resumed_key},
             "NOT_OWNER",
         )
-        core.require(
+        require(
             not path_reserved(state, path, plan_id),
             "NOT_OWNER",
         )
     # Retain only planned metadata; Task prompt text never enters issue state.
-    core.require(records.DIGEST.fullmatch(request["task_digest"]), "INVALID_REQUEST")
+    require(records.DIGEST.fullmatch(request["task_digest"]), "INVALID_REQUEST")
     plans[plan_id] = {
         "parent": key,
         "parent_generation": request["binding_generation"],
         "parent_session": request["session_id"],
-        "parent_conversation": core.token(request["parent_conversation"]),
+        "parent_conversation": token(request["parent_conversation"]),
         "task_digest": request["task_digest"],
         "packet": packet,
         "owned_paths": paths,
@@ -369,20 +344,18 @@ def admit(
     Raises:
         WorkspaceError: Parent readiness, plan, call or reservation checks fail.
     """
-    from nplet.lifecycle import task_workspace as core
-
-    previous = state["requests"].get(core.sha(request["request_id"].encode()))
+    previous = state["requests"].get(sha(request["request_id"].encode()))
     plans = state.setdefault("cursor_plans", {})
     invocations = state.setdefault("cursor_invocations", {})
     # Match the exact planned launch before reserving the existing parent pending slot.
     parent_key, member = ready(state, request, files)
-    plan = plans.get(core.token(request["plan_id"]))
-    core.require(plan is not None, "SCOPE_MISSING")
+    plan = plans.get(token(request["plan_id"]))
+    require(plan is not None, "SCOPE_MISSING")
     assert plan is not None
-    tool = core.token(request["tool_id"])
+    tool = token(request["tool_id"])
     native_call = records.native_text(request["native_call"])
-    identifier = core.sha(core.canonical([parent_key, member["generation"], tool]))
-    core.require(
+    identifier = sha(canonical([parent_key, member["generation"], tool]))
+    require(
         plan["parent"] == parent_key
         and plan["parent_generation"] == member["generation"]
         and plan["parent_conversation"] == request["parent_conversation"]
@@ -392,9 +365,9 @@ def admit(
     existing = invocations.get(identifier)
     # An identical active admission is safe to retry; retired calls never relaunch.
     if existing is not None:
-        core.require(existing["phase"] in {"admitted", "bound"}, "STALE_BINDING")
+        require(existing["phase"] in {"admitted", "bound"}, "STALE_BINDING")
         admitted_pending = member["pending"].get(tool)
-        core.require(
+        require(
             existing["plan_id"] == request["plan_id"]
             and existing["native_call"] == native_call
             and admitted_pending is not None
@@ -411,11 +384,9 @@ def admit(
                 "invocation_id": identifier,
             }
         )
-    core.expected(state, request)
-    core.require(
-        plan["invocation_id"] is None and tool not in member["pending"], "REQUEST_CONFLICT"
-    )
-    core.require(
+    expected(state, request)
+    require(plan["invocation_id"] is None and tool not in member["pending"], "REQUEST_CONFLICT")
+    require(
         not any(
             inv["parent"] == parent_key
             and inv["parent_generation"] == member["generation"]
@@ -473,23 +444,23 @@ def bind_child(
     from nplet.lifecycle import task_workspace as core
 
     identifier, invocation, _parent = resolve(state, request)
-    conversation = core.token(request["child_conversation"])
+    conversation = token(request["child_conversation"])
     key = child_key(invocation["parent_session"], conversation)
     member = state["participants"].get(key)
-    previous = state["requests"].get(core.sha(request["request_id"].encode()))
+    previous = state["requests"].get(sha(request["request_id"].encode()))
     # Actual host identity must match the admitted parent's normalized child session.
-    core.require(
-        core.participant_key(request) == key
+    require(
+        participant_key(request) == key
         and request["session_id"] == invocation["parent_session"] + "/agent/" + conversation,
         "NOT_OWNER",
     )
-    core.require(request["tool_id"] == invocation["tool_id"], "REQUEST_CONFLICT")
+    require(request["tool_id"] == invocation["tool_id"], "REQUEST_CONFLICT")
     native_generation = request.get("native_generation")
     if native_generation is not None:
-        core.token(native_generation)
+        token(native_generation)
     # Duplicate callbacks may repair the binding but never replace generation authority.
     if invocation["phase"] == "bound":
-        core.require(
+        require(
             invocation["child_participant"] == key
             and invocation["native_generation"] == native_generation
             and member is not None
@@ -511,16 +482,16 @@ def bind_child(
                 "invocation_id": identifier,
             }
         )
-    core.require(invocation["phase"] == "admitted", "STALE_BINDING")
+    require(invocation["phase"] == "admitted", "STALE_BINDING")
     assert invocation["phase"] == "admitted"
-    core.require(invocation["resume_child"] in {None, conversation}, "REQUEST_CONFLICT")
+    require(invocation["resume_child"] in {None, conversation}, "REQUEST_CONFLICT")
     claim = claim_child_identity(state, invocation, identifier, conversation, native_generation)
-    core.require(key != state["coordinator"], "NOT_OWNER")
+    require(key != state["coordinator"], "NOT_OWNER")
     core.validate_packet(invocation["packet"])
     # The shared constructor defines both persisted packet copies and variable owner additions.
     participant, assignment, owners = records.child_scope(invocation, claim, identifier)
     for path in owners:
-        core.require(state["owners"].get(path) in {None, key}, "NOT_OWNER")
+        require(state["owners"].get(path) in {None, key}, "NOT_OWNER")
     state["owners"].update(owners)
     state.setdefault("assignments", {})[key] = assignment
     state["participants"][key] = participant
@@ -559,19 +530,17 @@ def retire(
     Raises:
         WorkspaceError: Parent, evidence, generation, actual identity or pending effects conflict.
     """
-    from nplet.lifecycle import task_workspace as core
-
     identifier, invocation, parent = resolve(state, request)
     parent_key, parent = ready(state, request, files)
-    core.require(
+    require(
         parent_key == invocation["parent"]
         and request["binding_generation"] == invocation["parent_generation"],
         "NOT_OWNER",
     )
     # The shared terminal contract is also used by the native decoder and byte projection.
-    core.require(isinstance(request.get("result"), dict), "INVALID_REQUEST")
+    require(isinstance(request.get("result"), dict), "INVALID_REQUEST")
     observed = records.terminal_evidence(request["result"])
-    core.require(
+    require(
         observed["parent_conversation"] == invocation["parent_conversation"]
         and observed["native_call"] == invocation["native_call"],
         "RESULT_NOT_TERMINAL",
@@ -579,11 +548,11 @@ def retire(
     conversation = observed["child_conversation"]
     key = child_key(invocation["parent_session"], conversation)
     member = state["participants"].get(key)
-    previous = state["requests"].get(core.sha(request["request_id"].encode()))
+    previous = state["requests"].get(sha(request["request_id"].encode()))
     # Old terminal evidence cannot detach a later planned resume, including exact request replay.
     if invocation["phase"] == "retired":
-        core.require(invocation["terminal_result"] == observed, "REQUEST_CONFLICT")
-        core.require(
+        require(invocation["terminal_result"] == observed, "REQUEST_CONFLICT")
+        require(
             member is not None
             and member["generation"] == invocation["child_generation"]
             and member.get("cursor_invocation") == identifier,
@@ -602,11 +571,11 @@ def retire(
                 "binding_generation": member["generation"],
             }
         )
-    core.expected(state, request)
-    core.require(invocation["phase"] in {"admitted", "bound"}, "STALE_BINDING")
+    expected(state, request)
+    require(invocation["phase"] in {"admitted", "bound"}, "STALE_BINDING")
     # Bound retirement reuses existing authority; early return claims classification only.
     if invocation["phase"] == "bound":
-        core.require(
+        require(
             invocation["child_participant"] == key
             and member is not None
             and member["generation"] == invocation["child_generation"]
@@ -614,7 +583,7 @@ def retire(
             "STALE_BINDING",
         )
         assert member is not None
-        core.require(not member["pending"], "PENDING_OPERATION")
+        require(not member["pending"], "PENDING_OPERATION")
         claim: records.ChildClaim = {
             "child_conversation": conversation,
             "child_participant": key,
@@ -666,8 +635,8 @@ def operate(
     from nplet.lifecycle import task_workspace as core
 
     # Native decoding and transaction recovery happen outside this focused dispatcher.
-    core.require(request["host"] == "cursor", "HOST_UNSUPPORTED")
-    core.require(
+    require(request["host"] == "cursor", "HOST_UNSUPPORTED")
+    require(
         state["disposition"] not in core.TERMINAL and state["storage"] == "present",
         "TERMINAL",
     )
@@ -676,9 +645,9 @@ def operate(
     binding = store.binding()
     operation = request["operation"]
     if operation == "cursor-bind-child":
-        core.require(not binding or binding["issue_id"] == issue.id, "BINDING_CONFLICT")
+        require(not binding or binding["issue_id"] == issue.id, "BINDING_CONFLICT")
     else:
-        core.require(
+        require(
             binding is not None
             and binding["issue_id"] == issue.id
             and binding["binding_generation"] == request.get("binding_generation"),
@@ -690,36 +659,8 @@ def operate(
         "cursor-bind-child": bind_child,
         "cursor-retire": retire,
     }
-    core.require(operation in handlers, "UNSUPPORTED_OPERATION")
+    require(operation in handlers, "UNSUPPORTED_OPERATION")
     return handlers[operation](store, issue, state, files, request)
-
-
-def child_active(state: WorkspaceState, key: str, member: Participant) -> None:
-    """Fence a classified child to its currently bound invocation.
-
-    Args:
-        state: Locked issue state.
-        key: Exact participant identity.
-        member: Recorded participant being authorized.
-
-    Raises:
-        WorkspaceError: The invocation retired or belongs to another generation.
-    """
-    from nplet.lifecycle import task_workspace as core
-
-    # Ordinary participants preserve the existing lifecycle contract.
-    identifier = member.get("cursor_invocation")
-    if identifier is None:
-        return
-    # Classification survives detachment; only a new admitted binding can replace it.
-    invocation = state.get("cursor_invocations", {}).get(identifier)
-    core.require(
-        invocation is not None
-        and invocation["phase"] == "bound"
-        and invocation["child_participant"] == key
-        and invocation["child_generation"] == member["generation"],
-        "STALE_BINDING",
-    )
 
 
 def ready(
@@ -741,12 +682,12 @@ def ready(
     from nplet.lifecycle import task_workspace as core
 
     # Verify the parent role before checking its assigned current source bytes.
-    core.require(request["host"] == "cursor", "HOST_UNSUPPORTED")
+    require(request["host"] == "cursor", "HOST_UNSUPPORTED")
     key, member = core.authorize(state, request, coordinator=True)
-    core.require("cursor_invocation" not in member, "NOT_OWNER")
+    require("cursor_invocation" not in member, "NOT_OWNER")
     core.packet_reads(state, member, files)
-    core.require(
-        member["status"] == "ready" and member["ack"] == core.sha(core.canonical(member["packet"])),
+    require(
+        member["status"] == "ready" and member["ack"] == sha(canonical(member["packet"])),
         "NOT_READY",
     )
     return key, member
@@ -770,278 +711,3 @@ def path_reserved(state: WorkspaceState, path: str, excluded_plan: str | None = 
             if invocation is None or state["cursor_invocations"][invocation]["phase"] == "admitted":
                 return True
     return False
-
-
-def source_callback(
-    state: WorkspaceState, files: PayloadFiles, request: JSONObject, participant: Participant
-) -> JSONObject:
-    """Record verified content or settle one exact Cursor source Read callback.
-
-    Caller holds the existing issue transaction and has authorized this generation.
-
-    Args:
-        state: Current locked issue state.
-        files: Verified managed payload bytes.
-        request: Adapter-internal closed content/success/failure metadata.
-        participant: Current independently bound Cursor child.
-
-    Returns:
-        Whether this callback verified content or finalized a current-packet receipt.
-
-    Raises:
-        WorkspaceError: Unknown/foreign call, closed shape, identity or content conflicts.
-    """
-    from nplet.lifecycle import task_workspace as core
-
-    # This narrow protocol cannot authorize a parent, another host or a generic completion.
-    core.require(request["host"] == "cursor" and "cursor_invocation" in participant, "NOT_OWNER")
-    phase = request.get("source_event")
-    core.require(phase in {"content", "success", "failure"}, "INVALID_REQUEST")
-    allowed = {
-        "schema_version",
-        "operation",
-        "request_id",
-        "worktree",
-        "host",
-        "session_id",
-        "repo_id",
-        "issue_id",
-        "issue_uuid",
-        "binding_generation",
-        "expected_revision",
-        "source_event",
-        "tool_id",
-        "source_path",
-    }
-    # Raw source content is never accepted by or persisted in lifecycle state.
-    if phase == "content":
-        allowed |= {"observed_sha256", "content_length"}
-    elif phase == "success":
-        allowed |= {"content_length"}
-    core.require(set(request) <= allowed, "INVALID_REQUEST")
-    tool = core.token(request["tool_id"])
-    pending = participant["pending"].get(tool)
-    core.require(pending is not None and "cursor_source" in pending, "UNKNOWN_OPERATION")
-    assert pending is not None
-    source = pending["cursor_source"]
-    core.require(
-        source["invocation_id"] == participant["cursor_invocation"]
-        and source["generation"] == participant["generation"]
-        and request.get("source_path") == source["file_path"],
-        "REQUEST_CONFLICT",
-    )
-    digest = core.sha(core.canonical(participant["packet"]))
-    # Content is provisional until a distinct correlated native success is observed.
-    if phase == "content":
-        refs = core.packet_reads(state, participant, files)
-        core.require(source["packet_digest"] == digest, "SOURCE_STALE")
-        core.require(
-            any(
-                ref["available"]
-                and ref["locator"] == source["locator"]
-                and ref["sha256"] == source["sha256"]
-                for ref in refs
-            ),
-            "SOURCE_STALE",
-        )
-        observed = request.get("observed_sha256")
-        length = request.get("content_length")
-        core.require(
-            isinstance(observed, str) and records.DIGEST.fullmatch(observed), "INVALID_REQUEST"
-        )
-        core.require(type(length) is int and 0 <= length <= core.MAX_FILE, "INVALID_REQUEST")
-        assert isinstance(observed, str)
-        assert isinstance(length, int)
-        core.require(observed == source["sha256"], "SOURCE_DELIVERY_REQUIRED")
-        proof = records.SourceProof(sha256=observed, content_length=length)
-        core.require(source.get("provisional") in (None, proof), "REQUEST_CONFLICT")
-        source["provisional"] = proof
-        return {"source_content_verified": True, "source_receipt": False}
-    # Known finished failure/stale/unmatched success settles this call without credit.
-    receipt = False
-    if (
-        phase == "success"
-        and source.get("provisional") is not None
-        and source["packet_digest"] == digest
-    ):
-        provisional = source["provisional"]
-        assert provisional is not None
-        length = request.get("content_length")
-        core.require(type(length) is int and length >= 0, "INVALID_REQUEST")
-        # Source refresh/missing bytes must not strand an already finished file Read.
-        try:
-            refs = core.packet_reads(state, participant, files)
-        except (core.WorkspaceError, OSError):
-            refs = []
-        current = any(
-            ref["available"]
-            and ref["locator"] == source["locator"]
-            and ref["sha256"] == source["sha256"]
-            for ref in refs
-        )
-        if current and length == provisional["content_length"]:
-            # Prune old-packet receipts before adding at most one of64current assigned locators.
-            receipts = {
-                locator: item
-                for locator, item in participant.get("cursor_sources", {}).items()
-                if item["packet_digest"] == digest
-            }
-            receipts[source["locator"]] = records.SourceReceipt(
-                packet_digest=digest,
-                sha256=source["sha256"],
-                invocation_id=participant["cursor_invocation"],
-            )
-            core.require(len(receipts) <= 64, "SIZE_LIMIT")
-            participant["cursor_sources"] = receipts
-            receipt = True
-    del participant["pending"][tool]
-    return {"source_content_verified": False, "source_receipt": receipt}
-
-
-def authorize_actor(state: WorkspaceState, key: str, member: Participant, operation: str) -> None:
-    """Apply static child capability policy after generic generation/status validation.
-
-    Args:
-        state: Locked issue state.
-        key: Actual current actor.
-        member: Current participant.
-        operation: Requested lifecycle operation.
-
-    Raises:
-        WorkspaceError: The child retired or the actor requests parent-only authority.
-    """
-    from nplet.lifecycle import task_workspace as core
-
-    # Target and exact pending-record checks remain at their existing data-dependent call sites.
-    child_active(state, key, member)
-    if "cursor_invocation" in member:
-        core.require(operation in CHILD_OPERATIONS, "NOT_OWNER")
-
-
-def authorize_target(member: Participant) -> None:
-    """Keep generic detach/reconcile and coordinator transfer outside child retirement.
-
-    Args:
-        member: The resolved operation target, which may differ from its parent actor.
-
-    Raises:
-        WorkspaceError: The target belongs to an invocation.
-    """
-    from nplet.lifecycle import task_workspace as core
-
-    core.require("cursor_invocation" not in member, "NOT_OWNER")
-
-
-def authorize_pending(pending: core.PendingOperation | None, *, poll: bool = False) -> None:
-    """Protect typed invocation/source obligations after generic call/handle resolution.
-
-    Args:
-        pending: The exact resolved original pending operation.
-        poll: Poll admission checks only invocation Tasks, preserving existing ordering.
-
-    Raises:
-        WorkspaceError: Generic completion/polling would bypass invocation or source settlement.
-    """
-    from nplet.lifecycle import task_workspace as core
-
-    protected = {"cursor_invocation"} if poll else {"cursor_invocation", "cursor_source"}
-    core.require(pending is None or not protected.intersection(pending), "REQUEST_CONFLICT")
-
-
-def authorize_scope(
-    state: WorkspaceState,
-    target: str,
-    packet: list[core.SourceRef],
-    paths: list[str],
-) -> None:
-    """Permit active child source digest refresh without widening its planned capabilities.
-
-    Args:
-        state: Locked issue state.
-        target: Resolved independent reader.
-        packet: Validated replacement packet.
-        paths: Requested output ownership additions.
-
-    Raises:
-        WorkspaceError: Retired identity, new sources or wider output scope are requested.
-    """
-    from nplet.lifecycle import task_workspace as core
-
-    member = state["participants"].get(target)
-    if member is None or "cursor_invocation" not in member:
-        return
-    child_active(state, target, member)
-    current = member["packet"]
-    core.require(
-        current is not None
-        and len(packet) == len(current)
-        and all(new == {**old, "sha256": new["sha256"]} for old, new in zip(current, packet)),
-        "SCOPE_MISSING",
-    )
-    invocation = state["cursor_invocations"][member["cursor_invocation"]]
-    core.require(set(paths) <= set(invocation["owned_paths"]), "NOT_OWNER")
-
-
-def authorize_acknowledgment(
-    member: Participant,
-    references: list[core.SourceAvailability],
-    digest: str,
-) -> None:
-    """Require exact delivered source credit before a child acknowledges its current packet.
-
-    Args:
-        member: Current independently authorized participant.
-        references: Currently available assigned references.
-        digest: Current exact packet digest.
-
-    Raises:
-        WorkspaceError: An available source lacks its invocation-specific completed receipt.
-    """
-    from nplet.lifecycle import task_workspace as core
-
-    if "cursor_invocation" not in member:
-        return
-    receipts = member.get("cursor_sources", {})
-    core.require(
-        all(
-            not ref["available"]
-            or receipts.get(ref["locator"])
-            == records.SourceReceipt(
-                packet_digest=digest,
-                sha256=ref["sha256"],
-                invocation_id=member["cursor_invocation"],
-            )
-            for ref in references
-        ),
-        "SOURCE_DELIVERY_REQUIRED",
-    )
-
-
-def authorize_update(
-    state: WorkspaceState,
-    member: Participant,
-    files: PayloadFiles,
-    path: str,
-) -> None:
-    """Require current planned output and independent readiness for a child mutation.
-
-    Args:
-        state: Locked issue state.
-        member: Current independently authorized participant.
-        files: Verified committed payload.
-        path: Already validated owned managed-note target.
-
-    Raises:
-        WorkspaceError: An older output, stale source or unready packet is used.
-    """
-    from nplet.lifecycle import task_workspace as core
-
-    if "cursor_invocation" not in member:
-        return
-    invocation = state["cursor_invocations"][member["cursor_invocation"]]
-    core.require(path in invocation["owned_paths"], "NOT_OWNER")
-    core.packet_reads(state, member, files)
-    core.require(
-        member["status"] == "ready" and member["ack"] == core.sha(core.canonical(member["packet"])),
-        "NOT_READY",
-    )

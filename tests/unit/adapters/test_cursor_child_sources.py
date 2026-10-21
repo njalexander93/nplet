@@ -9,7 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nplet.adapters import cursor_child_session as child_session
 from nplet.adapters import cursor_children as children
+from nplet.adapters import cursor_sources as cursor_sources
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -24,10 +26,10 @@ def test_source_content_hashes_actual_utf8_and_js_utf16_units(
         monkeypatch: Replaces only the core source transition boundary.
     """
     transition = MagicMock(return_value={"source_content_verified": True, "source_receipt": False})
-    monkeypatch.setattr(children, "source_transition", transition)
+    monkeypatch.setattr(cursor_sources, "source_transition", transition)
     text = "café\n😀\n"
     event = {"child": True, "content": text, "file_path": "/source", "attachments": []}
-    result = children.source_read_content(event, time.monotonic() + 1)
+    result = cursor_sources.source_read_content(event, time.monotonic() + 1)
     assert result["source_receipt"] is False
     assert transition.call_args.args[1] == "content"
     assert transition.call_args.kwargs == {
@@ -49,9 +51,9 @@ def test_source_content_rejects_nontext_or_lossy_encoding(
         content: Invalid native source text.
     """
     transition = MagicMock()
-    monkeypatch.setattr(children, "source_transition", transition)
+    monkeypatch.setattr(cursor_sources, "source_transition", transition)
     with pytest.raises(core.WorkspaceError):
-        children.source_read_content(
+        cursor_sources.source_read_content(
             {"child": True, "content": content, "file_path": "/source", "attachments": []},
             time.monotonic() + 1,
         )
@@ -78,7 +80,7 @@ def test_source_post_unknown_shapes_preserve_pending(
         output: Missing, foreign, boolean-length or malformed native output.
     """
     transition = MagicMock()
-    monkeypatch.setattr(children, "source_transition", transition)
+    monkeypatch.setattr(cursor_sources, "source_transition", transition)
     event = {
         "child": True,
         "tool_name": "Read",
@@ -86,7 +88,7 @@ def test_source_post_unknown_shapes_preserve_pending(
         "tool_output": output,
     }
     with pytest.raises(core.WorkspaceError):
-        children.source_read_post(event, time.monotonic() + 1, False)
+        cursor_sources.source_read_post(event, time.monotonic() + 1, False)
     transition.assert_not_called()
 
 
@@ -101,7 +103,7 @@ def test_source_post_uses_closed_native_success_or_failure(
         failed: Actual native failure versus supported native success.
     """
     transition = MagicMock(return_value={"source_receipt": False})
-    monkeypatch.setattr(children, "source_transition", transition)
+    monkeypatch.setattr(cursor_sources, "source_transition", transition)
     event = {
         "child": True,
         "tool_name": "Read",
@@ -110,7 +112,7 @@ def test_source_post_uses_closed_native_success_or_failure(
         "error_message": "denied",
         "failure_type": "permission_denied",
     }
-    children.source_read_post(event, time.monotonic() + 1, failed)
+    cursor_sources.source_read_post(event, time.monotonic() + 1, failed)
     assert transition.call_args.args[1] == ("failure" if failed else "success")
     assert transition.call_args.kwargs == (
         {"source_path": "/source"} if failed else {"source_path": "/source", "content_length": 8}
@@ -162,7 +164,7 @@ def test_source_transition_replay_keeps_exact_request_id(
     internal = MagicMock(side_effect=execute)
     monkeypatch.setattr(children.core, "execute", public)
     monkeypatch.setattr(children.core, "execute_internal", internal)
-    children.source_transition(
+    cursor_sources.source_transition(
         {"child": True, "tool_use_id": "native-token"},
         phase,
         time.monotonic() + 1,
@@ -226,8 +228,8 @@ def test_child_lifecycle_uses_own_binding_without_parent_assignment(
             "timeout": 30000,
         },
     }
-    assert children.child_lifecycle(event) is True
-    assert children.child_lifecycle({"tool_name": "Read"}) is False
+    assert child_session.child_lifecycle(event) is True
+    assert child_session.child_lifecycle({"tool_name": "Read"}) is False
 
 
 @pytest.mark.parametrize(
@@ -299,7 +301,7 @@ def test_child_lifecycle_rejects_foreign_or_general_shell(
         "tool_input": {"command": command, "cwd": "", "timeout": 30000},
     }
     with pytest.raises(core.WorkspaceError) as error:
-        children.child_lifecycle(event)
+        child_session.child_lifecycle(event)
     assert error.value.code == code
 
 
@@ -328,7 +330,7 @@ def test_child_context_carries_only_actual_own_request_identity(
     monkeypatch.setattr(children.common, "request_for", lambda *_args: bound)
     command = MagicMock(return_value="canonical-own-command")
     monkeypatch.setattr(children.common, "bootstrap_command", command)
-    assert "canonical-own-command" in children.child_context({"child": True})
+    assert "canonical-own-command" in child_session.child_context({"child": True})
     request = command.call_args.args[0]
     assert request["session_id"] == "actual-parent/agent/actual-child"
     assert request["binding_generation"] == 3
@@ -358,7 +360,7 @@ def test_source_transition_exhausts_contention_without_changing_request(
     execute = MagicMock(return_value={"ok": False, "code": "BUSY"})
     monkeypatch.setattr(children.core, "execute_internal", execute)
     with pytest.raises(core.WorkspaceError, match="BUSY"):
-        children.source_transition(
+        cursor_sources.source_transition(
             {"child": True, "tool_use_id": "call"},
             "failure",
             time.monotonic() + 1,
@@ -400,14 +402,14 @@ def test_source_read_pre_admits_only_exact_available_packet_locator(
     monkeypatch.setattr(children.core, "execute", read)
     monkeypatch.setattr(children.core, "repository", lambda _path: (tmp_path, None, []))
     transition = MagicMock(return_value={"ok": True, "code": "OK"})
-    monkeypatch.setattr(children, "source_transition", transition)
+    monkeypatch.setattr(cursor_sources, "source_transition", transition)
     event = {
         "child": True,
         "tool_name": "Read",
         "tool_input": {"file_path": path},
         "cwd": str(tmp_path),
     }
-    assert children.source_read_pre(event, time.monotonic() + 1)["ok"] is True
+    assert cursor_sources.source_read_pre(event, time.monotonic() + 1)["ok"] is True
     assert transition.call_args.args[:2] == (event, "start")
     assert transition.call_args.kwargs == {"source_locator": locator, "packet_digest": "packet"}
     read.assert_called_once_with(bound)
@@ -476,9 +478,9 @@ def test_source_read_pre_denies_without_starting_unassigned_read(
     monkeypatch.setattr(children.core, "execute", read)
     monkeypatch.setattr(children.core, "repository", lambda _path: (tmp_path, None, []))
     transition = MagicMock()
-    monkeypatch.setattr(children, "source_transition", transition)
+    monkeypatch.setattr(cursor_sources, "source_transition", transition)
     with pytest.raises(core.WorkspaceError, match=code):
-        children.source_read_pre(event, time.monotonic() + 1)
+        cursor_sources.source_read_pre(event, time.monotonic() + 1)
     transition.assert_not_called()
     assert read.call_count == reads
 
@@ -520,7 +522,7 @@ def test_child_lifecycle_requires_matching_native_working_directory(
         },
     }
     if allowed:
-        assert children.child_lifecycle(event) is True
+        assert child_session.child_lifecycle(event) is True
     else:
         with pytest.raises(core.WorkspaceError, match="REPOSITORY_MISMATCH"):
-            children.child_lifecycle(event)
+            child_session.child_lifecycle(event)

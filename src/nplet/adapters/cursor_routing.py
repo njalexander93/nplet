@@ -1,4 +1,4 @@
-"""Route exact Cursor identities through durable bounded radix nodes, without authority."""
+"""Route exact Cursor identities through durable compressed radix nodes, without authority."""
 
 from __future__ import annotations
 
@@ -127,7 +127,12 @@ def _node(registry: core.Directory, prefix: str) -> core.JSONObject:
         and isinstance(node["edges"], dict)
         and len(node["edges"]) <= 16
         and all(
-            len(digit) == 1 and digit in "0123456789abcdef" and target == prefix + digit
+            len(digit) == 1
+            and digit in "0123456789abcdef"
+            and isinstance(target, str)
+            and len(prefix) < len(target) <= 64
+            and all(char in "0123456789abcdef" for char in target)
+            and target.startswith(prefix + digit)
             for digit, target in node["edges"].items()
         ),
         "INTEGRITY_ERROR",
@@ -242,19 +247,22 @@ def lookup(registry: core.Directory, kind: str, native: str) -> core.JSONObject 
         native: Exact native identity.
 
     Returns:
-        Validated selector, or None only for a missing edge in a valid required node.
+        Validated selector, or None for a missing edge or validated compressed-prefix mismatch.
 
     Raises:
         core.WorkspaceError: Selected identity or referenced storage is invalid.
         OSError: Required node access fails.
     """
-    # One digit selects one bounded edge; no lookup enumerates issue histories or sibling nodes.
+    # Read each selected reference before treating a compressed-prefix mismatch as unknown.
     digest = _identity(kind, native)
     node = _node(registry, "")
-    for digit in digest:
+    while len(node["prefix"]) < 64:
+        digit = digest[len(node["prefix"])]
         if digit not in node["edges"]:
             return None
         node = _node(registry, node["edges"][digit])
+        if not digest.startswith(node["prefix"]):
+            return None
     # Exact bytes are checked even if two external identities produce the same full digest.
     route: core.JSONObject = node["route"]
     core.require(route["kind"] == kind and route["native"] == native, "REQUEST_CONFLICT")
@@ -286,36 +294,66 @@ def claim(registry: core.Directory, kind: str, native: str, issue: str, issue_uu
         "issue_id": issue,
         "issue_uuid": issue_uuid,
     }
-    prefix = ""
-    node = _node(registry, prefix)
-    for digit in digest:
-        if digit not in node["edges"]:
-            break
-        prefix = node["edges"][digit]
-        node = _node(registry, prefix)
-    if len(prefix) == 64:
-        core.require(node["route"] == route, "REQUEST_CONFLICT")
+    # Validate the selected path before publication; never recreate a missing referenced leaf.
+    selected = lookup(registry, kind, native)
+    if selected is not None:
+        core.require(selected == route, "REQUEST_CONFLICT")
+        core.fault("cursor-route:" + kind)
+        return
+    root = _node(registry, "")
+    if registry.exists(_name(digest)):
+        core.require(_node(registry, digest)["route"] == route, "REQUEST_CONFLICT")
     else:
-        # Descendants are complete before their parent reference; compatible orphans are retained.
-        parent = node
-        for depth in range(64, len(prefix), -1):
-            child_prefix = digest[:depth]
-            exists = registry.exists(_name(child_prefix))
-            candidate = (
-                _node(registry, child_prefix)
-                if exists
-                else {"schema_version": 1, "prefix": child_prefix, "edges": {}, "route": None}
-            )
-            before = core.canonical(candidate)
-            if depth == 64:
-                core.require(candidate["route"] in (None, route), "REQUEST_CONFLICT")
-                candidate["route"] = route
-            else:
-                candidate["edges"][digest[depth]] = digest[: depth + 1]
-            if not exists or core.canonical(candidate) != before:
-                _publish(registry, candidate)
-        # Publish the first missing edge last, preserving all previously reachable routes.
-        parent["edges"][digest[len(prefix)]] = digest[: len(prefix) + 1]
-        _publish(registry, parent)
+        _publish(registry, {"schema_version": 1, "prefix": digest, "edges": {}, "route": route})
+    _attach(registry, root, digest)
     # Failure here leaves restrictive routing durable before the issue may grant authority.
     core.fault("cursor-route:" + kind)
+
+
+def _attach(registry: core.Directory, parent: core.JSONObject, incoming: str) -> None:
+    """Merge one durable descendant without losing selected or orphan branch edges.
+
+    Args:
+        registry: Canonical routing directory under its mutex.
+        parent: Validated node strictly above the incoming prefix.
+        incoming: Prefix of an already durable node.
+
+    Raises:
+        core.WorkspaceError: Required nodes or compatible orphan storage are invalid.
+        OSError: Atomic branch or parent publication fails.
+    """
+    # An absent edge needs only its already durable leaf or branch reference.
+    digit = incoming[len(parent["prefix"])]
+    target = parent["edges"].get(digit)
+    if target is None:
+        parent["edges"][digit] = incoming
+        _publish(registry, parent)
+        return
+    existing = _node(registry, target)
+    if target == incoming:
+        return
+    # Find the branching prefix; old one-digit paths remain valid compressed paths.
+    length = len(parent["prefix"]) + 1
+    while length < min(len(target), len(incoming)) and target[length] == incoming[length]:
+        length += 1
+    prefix = incoming[:length]
+    if prefix == target:
+        _attach(registry, existing, incoming)
+        return
+    # Reuse compatible orphan branches rather than overwriting their descendants.
+    if registry.exists(_name(prefix)):
+        branch = _node(registry, prefix)
+        _attach(registry, branch, target)
+        if prefix != incoming:
+            _attach(registry, branch, incoming)
+    else:
+        branch = {
+            "schema_version": 1,
+            "prefix": prefix,
+            "edges": {target[length]: target, incoming[length]: incoming},
+            "route": None,
+        }
+        _publish(registry, branch)
+    # The new subtree is durable before redirecting its previously reachable parent.
+    parent["edges"][digit] = prefix
+    _publish(registry, parent)
