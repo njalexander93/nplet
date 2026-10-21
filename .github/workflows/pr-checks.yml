@@ -66,14 +66,14 @@ jobs:
   tests:
     name: ${{ matrix.name }} Tests (Unit/Integration)
     runs-on: ${{ matrix.os }}
-    # Compressed routing removes the exhaustive per-digit durable publication workload.
+    # Windows has completed near 60 minutes; retain headroom for the full evidence-producing suite.
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - {os: ubuntu-24.04, name: Linux, artifact: linux, timeout: 30}
-          - {os: windows-2025, name: Windows, artifact: windows, timeout: 45}
+          - {os: windows-2025, name: Windows, artifact: windows, timeout: 75}
           - {os: macos-15, name: MacOS, artifact: macos, timeout: 30}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
