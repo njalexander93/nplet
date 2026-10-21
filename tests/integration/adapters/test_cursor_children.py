@@ -1003,13 +1003,12 @@ def test_orphan_conversation_route_denies_parent_then_exact_retry_recovers(
 
     monkeypatch.setattr(core, "FAILPOINT", interrupt)
     # No issue transition may commit authority when its preceding reservation crashes.
-    with pytest.raises(RuntimeError, match="interrupted conversation reservation"):
-        if transition == "bind":
-            children.normalize(
-                cursor_native(case, "beforeSubmitPrompt", child=True, parent_call=raw_call),
-                time.monotonic() + 10,
-            )
-        else:
+    if transition == "bind":
+        event = cursor_native(case, "beforeSubmitPrompt", child=True, parent_call=raw_call)
+        with pytest.raises(RuntimeError, match="interrupted conversation reservation"):
+            children.normalize(event, time.monotonic() + 10)
+    else:
+        with pytest.raises(RuntimeError, match="interrupted conversation reservation"):
             children.reconcile(
                 str(case.root),
                 case.base["issue_id"],
