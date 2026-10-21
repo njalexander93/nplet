@@ -198,7 +198,8 @@ def test_supervisor_reaps_worker_and_preserves_failure_contract(
     marker = '\nif __name__ == "__main__":'
     assert marker in original
     path.write_text(
-        original.replace(marker, "\ndef handle(event):\n" + body + marker), encoding="utf-8"
+        original.replace(marker, "\ndef handle(event, *, deadline=None):\n" + body + marker),
+        encoding="utf-8",
     )
     environment = mutated_source_environment(source)
     environment.pop("CURSOR_VERSION", None)
@@ -310,3 +311,42 @@ def test_windows_bootstrap_survives_literal_paths_and_json(
     response = json.loads(result.stdout)
     assert response["ok"] is True and response["code"] == "REGISTRATION_REQUIRED"
     assert not (root / ".task").exists()
+
+
+@pytest.mark.parametrize("open_pipe", [False, True])
+def test_content_observer_bounds_oversize_and_open_pipe(tmp_path: Path, open_pipe: bool) -> None:
+    """Exercise actual subprocess input fallback without claiming Cursor honors its output.
+
+    Args:
+        tmp_path: Disposable working directory, unrelated to any registered task.
+        open_pipe: Keep stdin open past the deadline instead of ending oversized input.
+    """
+    # Lower only the fixture's byte threshold; retain the production deadline and process code.
+    program = (
+        "from functools import partial\n"
+        "from nplet.adapters import cursor, runner\n"
+        "runner.CONTENT_INPUT_LIMIT = 2048\n"
+        "raise SystemExit(runner.run(cursor.handle, "
+        "partial(cursor.failure, content_observer=True), content_observer=True))\n"
+    )
+    with subprocess.Popen(
+        [sys.executable, "-c", program],
+        cwd=tmp_path,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        assert process.stdin is not None
+        # A still-open native transport must not create a lifecycle worker or hang forever.
+        if open_pipe:
+            process.stdin.write(b'{"hook_event_name":"beforeReadFile"}')
+            process.stdin.flush()
+            process.wait(timeout=6)
+            process.stdin.close()
+            process.stdin = None
+            output, errors = process.communicate(timeout=1)
+        else:
+            output, errors = process.communicate(b"x" * 4096, timeout=6)
+        assert process.returncode == 0, errors.decode()
+        assert json.loads(output) == {"permission": "allow"}
+    assert not (tmp_path / ".task").exists()

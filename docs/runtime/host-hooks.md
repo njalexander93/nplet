@@ -515,7 +515,7 @@ The first table compares Claude Code and Cursor; the second records Codex bounda
 | File-tool completion | A supported success/failure event with required payload settles only existing admitted work. A task-free completion creates no state | Same; native failure type is checked for existing work |
 | Shell completion | Successful Bash result with string stdout/stderr, `interrupted: false`, and no async markers | Successful Shell result with integer `exitCode` and no async markers |
 | Ambiguous shell result/failure | Retain pending operation and report recovery | Same; booleans are not exit codes |
-| Child/provider/background tools | Deny unsupported tool names, unconfigured servers, other provider operations (including document/archive operations) and background identities. A ready parent's foreground `Agent` call (no `run_in_background: true`, no `isolation`) is pending work under its `tool_use_id`; `Task`, `TaskOutput`, `TaskStop`, `SpawnAgent` and `Agent` from a child are denied. `SubagentStart` joins the child (restricted, below); `SubagentStop` is an observation | Same; `subagentStart` also denies; remote sessions denied |
+| Child/provider/background tools | Deny unsupported tool names, unconfigured servers, other provider operations (including document/archive operations) and background identities. A ready parent's foreground `Agent` call (no `run_in_background: true`, no `isolation`) is pending work under its `tool_use_id`; `Task`, `TaskOutput`, `TaskStop`, `SpawnAgent` and `Agent` from a child are denied. `SubagentStart` joins the child (restricted, below); `SubagentStop` is an observation | Only the experimental [scoped foreground Task route](#cursor-scoped-foreground-tasks) below; unsupported child tools and remote sessions denied |
 | Session start | Advisory recovery/readiness context; no readiness grant | Advisory context only |
 | Compaction | PreCompact/PostCompact observations only; no context or decision output | Advisory context only |
 | Stop/session end | Optional observation only | Optional observation only; no automatic follow-up |
@@ -607,7 +607,7 @@ Provider authentication and permissions still apply.
 
 The rule behind this route is runtime-neutral: a child joins only with a verified,
 host-issued child identity and its own reader binding. `Agent`, `SubagentStart` and
-`agent_id` are the Claude Code mechanism for it. Cursor's child route remains denied;
+`agent_id` are the Claude Code mechanism for it. Cursor has a separate experimental [scoped Task route](#cursor-scoped-foreground-tasks);
 Codex uses its separate [native child contract](#codex-native-child-route-restricted).
 The Claude route is
 implemented and covered by synthetic protocol tests, plus one observed local Desktop
@@ -689,6 +689,114 @@ archive-provider coverage is claimed here. Interrupted or ambiguous shell work r
 inspect the actual process outcome before an explicit lifecycle recovery/settlement. A stop event,
 empty result, or timeout is not that evidence. Shell commands remain cooperative tool calls; these
 hooks do not prove that arbitrary commands did not launch their own independent child processes.
+
+## Cursor scoped foreground Tasks
+
+The candidate adapter supports assigned source reads and owned managed-note writes.
+It does not admit generic child Shell, project-file Write/Edit, child providers or
+nested Tasks. This is an experimental implementation, not completed native
+acceptance. Installed profiles require separate verified deployment; changing this
+checkout does not upgrade existing installations or retire their obligations.
+
+A ready parent prepares an exact Task assignment through `cursor-plan`. Native
+`preToolUse` consumes that assignment and records the parent call before allowing
+execution. The actual child conversation and parent call identify its independent
+participant, packet and owned paths. Source content and correlated successful Read
+completion establish receipts before acknowledgment. A lifecycle `read` returns
+source references; it does not replace source delivery. Use the exposed model Read
+argument `path`; captured hook envelopes use `file_path`.
+
+Exact lifecycle and reconciliation commands accept native `cwd` and positive
+integer `timeout` metadata. Empty `cwd` means no override; nonempty overrides must
+remain in the same repository. The timeout can background execution. These commands
+rely on their checked core transactions, not Shell return, to establish effects.
+After an uncertain return, inspect the original request and committed state before
+retrying. This metadata does not authorize ordinary Shell work.
+
+The adapter does not register `subagentStart` or `subagentStop` hooks. Their opaque
+observations supply no authority or completion evidence. Actual Task admission,
+child tool callbacks and independently verified results own those transitions.
+
+After a Task callback, use the exact reconciliation command supplied in its context:
+`cursor-reconcile --issue <issue-id> --call <call-token>` through the indicated
+adapter entry point. The native prehook verifies the issue selector against the
+actual ready parent. Reconciliation reads only the selected issue and independently
+obtains the exact pinned native result. The core revalidates invocation, generation
+and pending effects before atomically detaching authority and settling the parent
+call. A report, tool completion, authority retirement and native invocation outcome
+are distinct facts. Parent output acceptance remains separate.
+
+A resumed conversation requires a fresh admitted invocation, generation, assignment
+and source acknowledgment. Old callbacks cannot revive its earlier authority.
+Missing or unsupported results remain unresolved; neither elapsed time nor an idle
+UI establishes completion. Existing issue transactions provide crash recovery.
+
+When a retained version-2 child index exists, its known raw-session children are
+rejected before parent fallback, regardless of retained status. The adapter reads
+that index without rewriting or retiring it. Malformed index data fails closed.
+This guard does not identify unclaimed returned children missing from the index,
+preserve old child operations, or establish safe installation over a legacy runtime.
+A supported transition remains necessary before live cutover.
+
+Native classification hashes the exact raw parent call or child conversation with
+its namespace into a full 64-digit SHA-256 key. Compressed prefix paths locate one
+retained issue; the route grants no authority. The first identity needs only a leaf
+and root reference. A branch is added where keys diverge, with at most 64 selected
+descendants in the worst case. Existing one-digit paths remain readable.
+Each node has at most sixteen edges or one exact terminal identity and issue selector.
+A missing edge or validated compressed-prefix mismatch means an unknown identity.
+A missing root or referenced
+node fails closed; native hooks never recreate it or interpret it as absence.
+The adapter recovers the selected issue transaction under its existing lock and
+revalidates the committed invocation and current participant generation. Ordinary
+parents without a selected route do not enumerate retained issue histories.
+Missing local bindings cannot turn a retained routed child into a parent.
+
+The adapter publishes descendants durably before their parent references, and makes
+each exact route reachable from the root before admission, child binding or
+terminal-only retirement commits. Before the route becomes reachable, the corresponding
+authority cannot commit. Once reachable, an interrupted claim remains restrictive
+until the exact operation is retried or deliberately recovered. A root completion marker
+binds the routing directory identity, so deleting or replacing that directory does
+not establish a fresh empty registry.
+
+An existing modern registry needs explicit complete population before routing
+cutover. Run the following maintenance command from the registered repository root
+in a standalone terminal outside Cursor native hooks. Supply the complete sorted
+list of retained issue identifiers, including cleaned histories. The example list
+and positive finite budget are operator inputs, not an inferred authorization.
+
+```sh
+poetry run python src/nplet/adapters/cursor_children.py \
+  cursor-routing-recover --issues-json '["TEAM-1","TEAM-2"]' --budget-ms 30000
+```
+
+Recovery may roll selected issue transactions forward through their existing
+recovery mechanism. It bounds the explicit inventory by the lifecycle request-size limit, checks
+it against the retained issue collection, recovers every selected issue and writes
+exact modern pointers. It checks the full inventory again before publishing the
+completion marker. Markerless recovery can finish interrupted root initialization. It preserves existing
+root edges and compatible orphan descendants; it never prunes pending route claims.
+An incomplete or changed inventory, unreadable selected state,
+expired budget or interrupted population leaves cutover unverified; partial
+pointers remain restrictive and the explicit command can be retried. A coexisting
+version-2 index remains byte-for-byte unchanged and keeps its raw-child denial.
+Routing does not aggregate lifetime identities into a fixed-capacity file. Each
+node uses the existing file-byte limit, with at most sixteen edges or one bounded
+native identity. New branches therefore do not consume space reserved for an
+admitted Task's future child identity. Encoded-size checks precede atomic node
+replacement. Exact replay leaves node bytes unchanged. Nodes, routes and edges are
+never evicted, truncated or deleted by the adapter. The completion marker and
+required references detect missing storage; they do not authenticate valid-JSON
+edits. Routing files retain the cooperative protected-state trust boundary.
+
+This operation does not migrate legacy authority, retire legacy obligations or
+update installed profiles. Native hooks never run population as a fallback and do
+not admit this maintenance command as ordinary reconciliation.
+
+These protocol tests do not establish native installation or live cutover. Source
+delivery, genuine resume, repeated overlapping bursts and failure recovery still
+require actual native acceptance with hooks active.
 
 ## Avoiding duplicate imported hooks
 

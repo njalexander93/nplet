@@ -51,7 +51,9 @@ def main() -> int:
     try:
         # Require the documented flag before invoking the core.
         core.require(len(sys.argv) == 3 and sys.argv[1] == "--request-base64", "INVALID_REQUEST")
-        result = core.execute(decode_request(sys.argv[2]))
+        request = decode_request(sys.argv[2])
+        core.require(isinstance(request.get("operation"), str), "INVALID_REQUEST")
+        result = core.execute(request)
     except core.WorkspaceError as error:
         # Keep expected request failures inside the canonical wire response.
         result = {"ok": False, "code": error.code}

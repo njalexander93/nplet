@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+from functools import partial
 
-from nplet.adapters import common
+from nplet.adapters import common, cursor_children, cursor_sources, runner
+from nplet.adapters import cursor_child_session as child_session
 from nplet.lifecycle import task_workspace as core
 
 HOST = "cursor"
@@ -13,19 +16,23 @@ PYTHON = common.PYTHON
 LIFECYCLE = common.LIFECYCLE
 
 
-def failure(name: str, code: str) -> core.JSONObject:
+def failure(name: str, code: str, *, content_observer: bool = False) -> core.JSONObject:
     """Render the supported Cursor decision or diagnostic for an event.
 
     Args:
         name: Native Cursor event name.
         code: Bounded lifecycle or adapter diagnostic.
+        content_observer: Trusted fixed supervisor mode, never native event or worker-selected.
 
     Returns:
         Cursor-native JSON without an automatic follow-up or blanket permission grant.
     """
+    # A transport timeout or overflow in the fixed observer supplies no proof or completion.
+    if content_observer and code in {"BUSY", "SIZE_LIMIT"}:
+        return {"permission": "allow"}
     message = common.recovery(code, HOST)
     # Admission failures deny only the pending Cursor tool or child hook.
-    if name in {"preToolUse", "beforeMCPExecution", "subagentStart"}:
+    if name in {"preToolUse", "beforeMCPExecution", "beforeReadFile"}:
         return {"permission": "deny", "user_message": message, "agent_message": message}
     # Prompt rejection uses Cursor's continue decision.
     if name == "beforeSubmitPrompt":
@@ -39,24 +46,85 @@ def failure(name: str, code: str) -> core.JSONObject:
     return {}
 
 
-def handle(event: core.JSONObject) -> core.JSONObject:
+def child_event(event: core.JSONObject, name: str, deadline: float) -> core.JSONObject:
+    """Route only scoped Read and own lifecycle operations for a bound Cursor child.
+
+    Args:
+        event: Independently normalized current child envelope.
+        name: Actual native hook name.
+        deadline: Trusted shared supervisor deadline.
+
+    Returns:
+        Native scoped decisions or advisory context without parent startup/provider authority.
+
+    Raises:
+        core.WorkspaceError: Tool, source or own lifecycle command is unsupported.
+    """
+    # A child can prepare exact sources before acknowledgment; core receipt gates own readiness.
+    if name == "preToolUse":
+        if not child_session.child_lifecycle(event):
+            cursor_sources.source_read_pre(event, deadline)
+        result: core.JSONObject = {"permission": "allow"}
+        if event.get("_cursor_new_child"):
+            result["additional_context"] = child_session.child_context(event)
+        return result
+    # Actual content is provisional until the same Read's recognized native success.
+    if name == "beforeReadFile":
+        cursor_sources.source_read_content(event, deadline)
+        return {"permission": "allow"}
+    # Lifecycle commands manage their own transaction; file Read effects use the closed callback.
+    if name in {"postToolUse", "postToolUseFailure"}:
+        if child_session.child_lifecycle(event):
+            return {}
+        result = cursor_sources.source_read_post(
+            event, deadline, failed=name == "postToolUseFailure"
+        )
+        if not result["source_receipt"]:
+            return {
+                "additional_context": "SOURCE_DELIVERY_REQUIRED: "
+                "Read finished without a current source receipt. "
+                + child_session.child_context(event)
+            }
+        return {}
+    # Children never enter provider ticket bootstrap or ordinary parent prompt startup.
+    if name in {"beforeMCPExecution", "afterMCPExecution"}:
+        return failure(name, "HOST_UNSUPPORTED_PROVIDER")
+    if name == "beforeSubmitPrompt":
+        return {"continue": True}
+    if name == "sessionStart":
+        return {"additional_context": child_session.child_context(event)}
+    if name == "preCompact":
+        return {"user_message": child_session.child_context(event)}
+    # A stop is an observation only, never Task retirement or pending settlement.
+    if name in {"stop", "sessionEnd"}:
+        common.native_observe(event, HOST)
+        return {}
+    return failure(name, "HOST_UNSUPPORTED_EVENT")
+
+
+def handle(event: core.JSONObject, *, deadline: float | None = None) -> core.JSONObject:
     """Translate a native Cursor envelope into conversation-bound lifecycle actions.
 
     Args:
         event: JSON received from a local Cursor Agent hook.
+        deadline: Trusted absolute worker deadline, or the shared budget for direct invocation.
 
     Returns:
         Native decisions; session start and compaction are advisory only.
     """
     name = event.get("hook_event_name", "")
-    # Reject unsupported execution surfaces before looking up session state.
+    observed: core.JSONObject = {}
+    deadline = time.monotonic() + runner.DEADLINE_SECONDS if deadline is None else deadline
+    # Reject unsupported surfaces before parent startup, and classify retained children first.
     try:
-        # Local single-root Agent sessions are the only supported Cursor execution surface.
+        cursor_children.cursor_results.check_deadline(deadline)
         core.require(os.environ.get("CURSOR_CODE_REMOTE") != "true", "HOST_UNSUPPORTED_REMOTE")
-        # Child sessions have no independently verified conversation identity.
-        if name == "subagentStart":
-            return failure(name, "HOST_UNSUPPORTED_CHILD_IDENTITY")
-        observed = common.native_identity(event, HOST)
+        observed = cursor_children.normalize(event, deadline)
+        if observed.get("child") is True:
+            return child_event(observed, name, deadline)
+        # Parent beforeReadFile is advisory-only; ordinary Read admission/completion stays generic.
+        if name == "beforeReadFile":
+            return {}
         # Record the generic callback's native call ID before granting the tool.
         if name == "preToolUse":
             # Correlate Cursor's native tool ID. The MCP-specific callback must
@@ -68,6 +136,10 @@ def handle(event: core.JSONObject) -> core.JSONObject:
                     common.native_ticket_lookup(observed, HOST) is not None, "TICKET_READ_REQUIRED"
                 )
                 return {"permission": "allow"}
+            # Parent Task/reconciliation policy owns its own admission and pending effects.
+            managed = cursor_children.parent_pre(observed, deadline)
+            if managed is not None:
+                return managed
             common.native_pre(observed, HOST)
             return {"permission": "allow"}  # Only this validated and recorded tool call passes.
         # Verify the configured Linear server through the MCP-specific callback.
@@ -101,6 +173,12 @@ def handle(event: core.JSONObject) -> core.JSONObject:
             return {}  # No native call ID; generic postToolUse owns completion.
         # Correlate native completion facts with the exact admitted tool call.
         if name in {"postToolUse", "postToolUseFailure"}:
+            # Parent Task/reconciliation completions never settle ordinary pending effects.
+            managed = cursor_children.parent_post(
+                observed, deadline, failed=name == "postToolUseFailure"
+            )
+            if managed is not None:
+                return managed
             # A ticket read must settle against the pending Task marker.
             if observed.get("tool_name") == "MCP:get_issue":
                 # Ignore unrelated completions when no ticket lookup is pending.
@@ -142,15 +220,32 @@ def handle(event: core.JSONObject) -> core.JSONObject:
     # Render local failures with Cursor's event-specific decision fields.
     except Exception as error:
         code = error.code if isinstance(error, core.WorkspaceError) else "RECOVERY_REQUIRED"
-        return failure(name, code)
+        response = failure(name, code)
+        # Denials deliver only this actual child's own recovery command, never parent identity.
+        if observed.get("child") is True:
+            try:
+                context = child_session.child_context(observed)
+                response["additional_context"] = (
+                    response.get("additional_context", "") + " " + context
+                )
+            except (core.WorkspaceError, OSError):
+                pass
+        return response
 
 
 def main() -> int:
-    """Run one bounded Cursor protocol exchange with fail-closed parser errors.
+    """Run one fixed normal or beforeReadFile observer protocol invocation.
 
     Returns:
-        Zero for a handled event or two for malformed/unreadable input.
+        Existing native status, or two for unsupported entry arguments.
     """
+    # Only this explicit configured CLI mode selects the dedicated full-content observer budget.
+    if sys.argv[1:] == ["--observe-read-content"]:
+        return runner.run(handle, partial(failure, content_observer=True), content_observer=True)
+    if len(sys.argv) != 1:
+        print(core.canonical(failure("", "INVALID_REQUEST")).decode())
+        print("TASK_WORKSPACE_NOT_READY: INVALID_REQUEST", file=sys.stderr)
+        return 2
     return common.run_native(handle, failure)
 
 

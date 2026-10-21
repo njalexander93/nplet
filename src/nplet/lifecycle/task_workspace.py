@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
-import hashlib
 import json
 import re
 import subprocess
@@ -25,8 +24,17 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
+from nplet.lifecycle import _invocation_policy as invocation_policy
+from nplet.lifecycle import _invocation_records as invocation_records
+from nplet.lifecycle import _invocation_sources as invocation_sources
+from nplet.lifecycle import _invocations as invocations
 from nplet.lifecycle._errors import WorkspaceError, require
 from nplet.lifecycle._filesystem import Directory as NativeDirectory
+from nplet.lifecycle._primitives import canonical as canonical
+from nplet.lifecycle._primitives import expected as expected
+from nplet.lifecycle._primitives import participant_key as participant_key
+from nplet.lifecycle._primitives import sha as sha
+from nplet.lifecycle._primitives import token as token
 
 MAX_REQUEST = 96 * 1024 * 1024
 MAX_FILE = 16 * 1024 * 1024
@@ -81,6 +89,8 @@ class PendingOperation(TypedDict):
     handle: NotRequired[str]
     poll_parent: NotRequired[str]
     poll_handle: NotRequired[str]
+    cursor_invocation: NotRequired[str]
+    cursor_source: NotRequired[invocation_records.SourceEffect]
 
 
 class Participant(TypedDict):
@@ -91,6 +101,8 @@ class Participant(TypedDict):
     pending: dict[str, PendingOperation]
     packet: list[SourceRef] | None
     ack: str | None
+    cursor_invocation: NotRequired[str]
+    cursor_sources: NotRequired[dict[str, invocation_records.SourceReceipt]]
 
 
 class RequestRecord(TypedDict):
@@ -144,6 +156,8 @@ class WorkspaceState(TypedDict):
     reconciliation: NotRequired[JSONObject]
     submitted_pr: NotRequired[str]
     provider_completion: NotRequired[JSONObject]
+    cursor_plans: NotRequired[dict[str, invocation_records.InvocationPlan]]
+    cursor_invocations: NotRequired[dict[str, invocation_records.Invocation]]
 
 
 class DocumentRequest(TypedDict):
@@ -159,35 +173,6 @@ class ExportDocuments(TypedDict):
 
     snapshot: str
     parts: list[DocumentRequest]
-
-
-def canonical(value: object) -> bytes:
-    """Serialize a value into the deterministic UTF-8 form used by digests.
-
-    Args:
-        value: JSON-serializable value whose deterministic representation is required.
-
-    Returns:
-        Canonical JSON bytes.
-
-    Raises:
-        ValueError: If a value cannot be represented as finite JSON.
-    """
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    ).encode("utf-8")
-
-
-def sha(data: bytes) -> str:
-    """Identify exact bytes with a hexadecimal SHA-256 digest.
-
-    Args:
-        data: Exact bytes whose content identity is required.
-
-    Returns:
-        The lowercase 64-character digest.
-    """
-    return hashlib.sha256(data).hexdigest()
 
 
 def now() -> str:
@@ -211,25 +196,6 @@ def fault(point: str) -> None:
     # Run only an explicitly installed process-local test injection.
     if FAILPOINT:
         FAILPOINT(point)
-
-
-def token(value: str) -> str:
-    """Validate a bounded printable ASCII identity token.
-
-    Args:
-        value: Identity token received from a request or persisted record.
-
-    Returns:
-        The validated token.
-
-    Raises:
-        WorkspaceError: If the token is empty, oversized or contains unsafe characters.
-    """
-    # Reject empty, oversized or non-printable identity tokens before returning them.
-    require(
-        isinstance(value, str) and 0 < len(value) <= 160 and all(32 < ord(c) < 127 for c in value)
-    )
-    return value
 
 
 def issue_id(value: str) -> str:
@@ -564,13 +530,20 @@ def _validate_registration_identity(
 class Store:
     """Own validated descriptors connecting one worktree to its shared task store."""
 
-    def __init__(self, request: JSONObject, *, create: bool = True) -> None:
+    def __init__(
+        self,
+        request: JSONObject,
+        *,
+        create: bool = True,
+        bindings: bool = True,
+    ) -> None:
         """Open the registered shared store and verify all repository identities.
 
         Args:
             request: Versioned lifecycle request with explicit repository, issue and
                 session identities.
             create: Permit creation of binding/issue collections for lifecycle operations.
+            bindings: Open local binding metadata; False supports read-only classification.
 
         Raises:
             WorkspaceError: If local and canonical registration or filesystem identities differ.
@@ -580,6 +553,8 @@ class Store:
         self.request = request
         self.root, common, trees = repository(request["worktree"])
         self.handles: list[Directory] = []
+        self._issues: Directory | None = None
+        self._bindings: Directory | None = None
         # Open and validate store descriptors within a cleanup-protected lifetime.
         try:
             self.local_root = self.keep(Directory.absolute(self.root))
@@ -594,12 +569,53 @@ class Store:
             self.task = self.keep(self.main.child(".task"))
             self.control = self.keep(self.task.child(".control"))
             require(self.control.json("repository.json") == reg, "REPOSITORY_MISMATCH")
-            self.issues = self.keep(self.control.child("issues", create))
-            self.bindings = self.keep(self.local.child(".bindings", create))
+            # Registration-only parent inspection may precede the first issue collection.
+            if create or self.control.exists("issues"):
+                self._issues = self.keep(self.control.child("issues", create))
+            # Classification must not open or create local binding metadata as a side effect.
+            if bindings:
+                self._bindings = self.keep(self.local.child(".bindings", create))
         # Release partially opened descriptors before propagating initialization failure.
         except BaseException:
             self.close()
             raise
+
+    @property
+    def issues_present(self) -> bool:
+        """Report whether the validated registered store already has an issue collection.
+
+        Returns:
+            False only for a registered store with no issue collection yet.
+        """
+        return self._issues is not None
+
+    @property
+    def issues(self) -> Directory:
+        """Expose the opened issue collection to ordinary lifecycle callers.
+
+        Returns:
+            The validated existing or explicitly created issue collection.
+
+        Raises:
+            WorkspaceError: A positive issue lookup has no retained collection.
+        """
+        require(self._issues is not None, "RECOVERY_REQUIRED")
+        assert self._issues is not None
+        return self._issues
+
+    @property
+    def bindings(self) -> Directory:
+        """Expose local binding metadata only when the caller requested that capability.
+
+        Returns:
+            The validated opened binding collection.
+
+        Raises:
+            WorkspaceError: Classification-only code attempts a binding operation.
+        """
+        require(self._bindings is not None, "RECOVERY_REQUIRED")
+        assert self._bindings is not None
+        return self._bindings
 
     def keep(self, directory: Directory) -> Directory:
         """Track a descriptor for reverse-order store cleanup.
@@ -679,6 +695,11 @@ class Store:
                 "issue_id": state["issue_id"],
                 "participant_id": participant,
                 "binding_generation": state["participants"][participant]["generation"],
+                **(
+                    {"cursor_invocation": state["participants"][participant]["cursor_invocation"]}
+                    if "cursor_invocation" in state["participants"][participant]
+                    else {}
+                ),
             },
         )
 
@@ -701,21 +722,6 @@ class Store:
         # Verify that the canonical issue directory can be opened safely.
         with self.task.child(issue):
             pass
-
-
-def participant_key(request: JSONObject) -> str:
-    """Derive a stable participant key from explicit host and session tokens.
-
-    Args:
-        request: Versioned lifecycle request with explicit repository, issue and session identities.
-
-    Returns:
-        The SHA-256 identity key.
-
-    Raises:
-        WorkspaceError: If either identity token is invalid.
-    """
-    return sha(canonical([token(request.get("host", "codex")), token(request["session_id"])]))
 
 
 def os_metadata(name: str) -> bool:
@@ -863,6 +869,133 @@ def validate_history(files: PayloadFiles) -> tuple[int, str | None]:
         require(seq == last, "INTEGRITY_ERROR")
     # Continue the validated segment chain through the active event stream.
     return validate_events(files.get("events.jsonl", b""), seq, head)
+
+
+def settlement_slots(state: WorkspaceState) -> int:
+    """Count unfinished event obligations without constructing byte projections.
+
+    Args:
+        state: Current staged or committed issue state.
+
+    Returns:
+        Mandatory remaining transition/completion event count.
+    """
+    # Invocation Tasks already account for their own binding and terminal events.
+    slots = sum(
+        2 if item["phase"] == "admitted" else 1
+        for item in state.get("cursor_invocations", {}).values()
+        if item["phase"] != "retired"
+    )
+    for member in state["participants"].values():
+        for pending in member["pending"].values():
+            if "cursor_invocation" in pending:
+                continue
+            if "cursor_source" in pending:
+                slots += 1 if pending["cursor_source"].get("provisional") is not None else 2
+            else:
+                slots += 1 if pending["status"] == "unknown" else 2
+    return slots
+
+
+def settlement_reserve(
+    state: WorkspaceState,
+    *,
+    slots: int | None = None,
+) -> tuple[int, int]:
+    """Reserve fixed bounded metadata and the actual variable settlement additions.
+
+    Args:
+        state: Post-transition state, including its current request result.
+        slots: Already counted obligations for this unchanged pending state, if available.
+
+    Returns:
+        Remaining conservative state bytes and required event count.
+    """
+    # Pending work is unchanged while commit publishes its event, inventory and request result.
+    if slots is None:
+        slots = settlement_slots(state)
+    active = [
+        item for item in state.get("cursor_invocations", {}).values() if item["phase"] != "retired"
+    ]
+    generation = (
+        max(
+            [member["generation"] for member in state["participants"].values()]
+            + [item["resume_generation"] or 0 for item in active],
+            default=0,
+        )
+        + 1
+    )
+    generation_bytes = len(canonical(generation))
+    # Counter widths and repository identities remain actual values, never fixed-width guesses.
+    request_bytes = invocation_records.REQUEST_METADATA_BYTES + len(
+        canonical(
+            {
+                "revision": state["revision"] + slots + 1,
+                "repo_id": state["repo_id"],
+                "issue_id": state["issue_id"],
+                "binding_generation": generation,
+            }
+        )
+    )
+    reserved = 0
+    for invocation in active:
+        # Terminal-only publication can add both an invocation and participant generation.
+        reserved += (
+            invocation_records.RETIREMENT_METADATA_BYTES
+            + invocation_records.PARTICIPANT_METADATA_BYTES
+            + 2 * generation_bytes
+            + request_bytes
+        )
+        if invocation["phase"] == "admitted":
+            # A future reader is a 64-character digest; preserve every other actual packet byte.
+            packet = invocation["packet"]
+            packet_bytes = len(canonical(packet)) + sum(
+                66 - len(canonical(reference["reader"])) for reference in packet
+            )
+            paths = invocation["owned_paths"]
+            # Turning the actual path list into owners adds colon + quoted 64-byte digest per path.
+            owners_bytes = len(canonical(paths)) + 67 * len(paths)
+            reserved += (
+                invocation_records.BINDING_METADATA_BYTES
+                + invocation_records.PARTICIPANT_METADATA_BYTES
+                + invocation_records.ASSIGNMENT_METADATA_BYTES
+                + 2 * generation_bytes
+                + 2 * packet_bytes
+                + owners_bytes
+                + request_bytes
+            )
+    # Only actual source locators/tool keys vary; their bounded value fragments use proven limits.
+    for member in state["participants"].values():
+        for tool, pending in member["pending"].items():
+            if "cursor_invocation" in pending or "cursor_invocation" not in member:
+                continue
+            if "cursor_source" in pending:
+                source = pending["cursor_source"]
+                reserved += (
+                    invocation_records.SOURCE_RECEIPT_METADATA_BYTES
+                    + len(canonical(source["locator"]))
+                    + request_bytes
+                )
+                if source.get("provisional") is None:
+                    reserved += invocation_records.SOURCE_PROOF_METADATA_BYTES + request_bytes
+            else:
+                count = 1 if pending["status"] == "unknown" else 2
+                reserved += (
+                    count * request_bytes
+                    + invocation_records.EFFECT_METADATA_BYTES
+                    + len(canonical(tool))
+                )
+    # Retain both arbitrary-width counters through the last reserved fact.
+    if reserved:
+        reserved += invocation_records.COUNTER_HEAD_METADATA_BYTES + len(
+            canonical(
+                {
+                    "revision": state["revision"] + slots + 1,
+                    "seq": state["seq"] + slots + 1,
+                }
+            )
+        )
+    return reserved, slots
 
 
 class Issue:
@@ -1016,6 +1149,8 @@ class Issue:
         """
         # Validate the old committed inventory before staging any replacement bytes.
         old_files = self.files() if self.state else {}
+        # Count pending obligations once; publication below never changes pending work.
+        pending_slots = settlement_slots(state)
         # Append a lifecycle fact only when this operation changes recorded history.
         if event_type:
             require(
@@ -1023,11 +1158,6 @@ class Issue:
             )
             optional = event_type == "observation"
             # Reserve async-transition and completion events for every admitted pending tool.
-            pending_slots = sum(
-                1 if tool["status"] == "unknown" else 2
-                for member in state["participants"].values()
-                for tool in member["pending"].values()
-            )
             reserved = 8192 * (1 + pending_slots)
             # Suppress optional observations before they consume settlement reserves.
             if optional and len(files.get("events.jsonl", b"")) + reserved + 8192 > MAX_EVENTS:
@@ -1086,7 +1216,25 @@ class Issue:
             "digest": sha(canonical(request)),
             "result": stored_result,
         }
-        require(len(canonical(state)) <= 8 * 1024 * 1024, "ARCHIVE_PENDING")
+        # Preserve settlement room even when an event-free request adds retained metadata.
+        state_reserve, _ = settlement_reserve(state, slots=pending_slots)
+        require(len(canonical(state)) + state_reserve <= 8 * 1024 * 1024, "ARCHIVE_PENDING")
+        # Event-free archive progress may retain already committed checkpoint occupancy,
+        # but cannot increase event bytes or the number of unfinished obligations.
+        retained_occupancy = (
+            event_type is None
+            and self.state is not None
+            and files.get("events.jsonl", b"") == old_files.get("events.jsonl", b"")
+            and pending_slots <= settlement_slots(self.state)
+        )
+        event_reserve = (
+            0
+            if event_type == "archive-prepare" or retained_occupancy
+            else 8192 * (1 + pending_slots)
+        )
+        require(
+            len(files.get("events.jsonl", b"")) + event_reserve <= MAX_EVENTS, "ARCHIVE_PENDING"
+        )
         tx = {
             "base": self.state["files"] if self.state else None,
             "directory_identity": self.state.get("directory_identity") if self.state else None,
@@ -1130,22 +1278,11 @@ def authorize(
         in ({"attached", "ready", "maintenance"} if maintenance else {"attached", "ready"}),
         "STALE_BINDING",
     )
+    # A classified child retains authority only while its exact invocation is active.
+    invocation_policy.authorize_actor(state, key, participant, request["operation"])
     # Enforce coordinator ownership only for operations that request it.
     require(not coordinator or state["coordinator"] == key, "NOT_OWNER")
     return key, participant
-
-
-def expected(state: WorkspaceState, request: JSONObject) -> None:
-    """Require the caller to name the current issue revision.
-
-    Args:
-        state: Current or staged issue control state.
-        request: Versioned lifecycle request with explicit repository, issue and session identities.
-
-    Raises:
-        WorkspaceError: If the expected revision is stale or absent.
-    """
-    require(request.get("expected_revision") == state["revision"], "REVISION_CONFLICT")
 
 
 def evidence(value: list[EvidenceRef] | None) -> list[EvidenceRef]:
@@ -1463,6 +1600,8 @@ def attach(state: WorkspaceState, request: JSONObject) -> JSONObject:
     participant = state["participants"].get(key)
     # Preserve existing scope and require the recorded generation before resuming.
     if participant:
+        # Generic attachment cannot revive a retired Cursor invocation.
+        invocation_policy.child_active(state, key, participant)
         initial_create = (
             request["operation"] == "create"
             and request.get("binding_generation") is None
@@ -1923,6 +2062,10 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         # Replay only an identical request; a reused ID with different content is a conflict.
         if previous:
             require(previous["digest"] == sha(canonical(request)), "REQUEST_CONFLICT")
+        # Invocation retries revalidate generation before ordinary request replay.
+        if operation in {"cursor-plan", "cursor-admit", "cursor-bind-child", "cursor-retire"}:
+            return invocations.operate(store, issue, state, issue.files(), request)
+        if previous:
             # Restore worktree visibility and binding for retried attachment operations.
             if (
                 operation in {"create", "adopt", "attach", "resume", "bind", "restore"}
@@ -2235,6 +2378,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         require(DIGEST.fullmatch(target), "SCOPE_MISSING")
         packet = validate_packet(request["packet"])
         require(all(ref["reader"] == target for ref in packet), "SCOPE_MISSING")
+        # Invocation policy preserves target scope without widening it.
+        invocation_policy.authorize_scope(state, target, packet, request.get("owned_paths", []))
         state.setdefault("assignments", {})[target] = {"packet": packet}
         # Update existing scope without reviving a detached generation.
         if target in state["participants"]:
@@ -2249,6 +2394,10 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             require(
                 path != "roadmap.md" and state["owners"].get(path, target) == target, "NOT_OWNER"
             )
+            require(
+                not invocations.path_reserved(state, path),
+                "NOT_OWNER",
+            )
             state["owners"][path] = target
         result["packet_digest"] = sha(canonical(packet))
     # Validate the assigned bytes and establish or inspect exact-digest readiness.
@@ -2258,6 +2407,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         # Record acknowledgment only for the current assigned packet digest.
         if operation == "acknowledge":
             require(request.get("packet_digest") == digest, "SOURCE_STALE")
+            # Available child sources need exact completed delivery receipts.
+            invocation_sources.authorize_acknowledgment(participant, refs, digest)
             participant.update({"ack": digest, "status": "ready"})
         # Require active disposition and a current acknowledged packet.
         elif operation == "ready":
@@ -2282,6 +2433,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
     elif operation == "update":
         path = payload_path(request["path"])
         require(state["owners"].get(path) == key, "NOT_OWNER")
+        # Planned child output and readiness remain data-dependent mutation checks.
+        invocation_policy.authorize_update(state, participant, files, path)
         require(request.get("old_digest") == state["files"].get(path), "REVISION_CONFLICT")
         data = request["content"].encode("utf-8")
         require(len(data) <= MAX_FILE, "SIZE_LIMIT")
@@ -2377,6 +2530,9 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             request.get("event", {}).get("code", "OK") in {"OK", "FAILED", "UNKNOWN", "INTERRUPTED"}
         )
         event_type = request["event_type"]
+    # Only correlated native source callbacks can establish Cursor source receipts.
+    elif operation == "cursor-source-callback":
+        result = invocation_sources.source_callback(state, files, request, participant)
     # Track exact source preparation before readiness without admitting ordinary work.
     elif operation in {"tool-start", "source-read-start"}:
         refs = packet_reads(state, participant, files)
@@ -2404,6 +2560,29 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         require(tool not in participant["pending"], "REQUEST_CONFLICT")
         # Associate an observed polling transport without borrowing another participant's work.
         pending: PendingOperation = {"status": "pending"}
+        # Cursor source effects carry their exact current assignment through both native callbacks.
+        if operation == "source-read-start" and "cursor_invocation" in participant:
+            require(request["host"] == "cursor", "HOST_UNSUPPORTED")
+            selected = next(
+                ref
+                for ref in refs
+                if ref["locator"] == request["source_locator"] and ref["available"]
+            )
+            locator = selected["locator"]
+            source_path = (
+                Path(locator)
+                if Path(locator).is_absolute()
+                else store.root / ".task" / issue.id / locator
+            )
+            pending["cursor_source"] = {
+                "invocation_id": participant["cursor_invocation"],
+                "generation": participant["generation"],
+                "packet_digest": request["packet_digest"],
+                "locator": locator,
+                "sha256": selected["sha256"],
+                "file_path": str(source_path),
+                "provisional": None,
+            }
         # Bind a polling transport only to a unique pending process handle.
         if request.get("poll_handle") is not None:
             handle: str | None = token(request["poll_handle"])
@@ -2414,6 +2593,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             ]
             require(len(matches) == 1, "UNKNOWN_OPERATION")
             assert handle is not None  # token() returned a validated string above.
+            invocation_policy.authorize_pending(participant["pending"][matches[0]], poll=True)
             pending.update({"poll_parent": matches[0], "poll_handle": handle})
         # Reserve and persist the transport independently from its original process.
         participant["pending"][tool] = pending
@@ -2449,6 +2629,9 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
                 # participant-local correlation.
                 require(len(matches) == 1, "UNKNOWN_OPERATION")
                 tool = matches[0]
+        # Generic observations cannot settle a Task whose child must retire atomically.
+        invocation_pending = participant["pending"].get(tool)
+        invocation_policy.authorize_pending(invocation_pending)
         # An already settled parent is allowed only through its still-recorded poll transport.
         require(tool in participant["pending"] or transport is not None, "UNKNOWN_OPERATION")
         # Update or settle the original process only while its pending record exists.
@@ -2476,6 +2659,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
     elif operation in {"detach", "reconcile-participant"}:
         target = key if operation == "detach" else request["target_participant"]
         member = state["participants"][target]
+        # Invocation retirement is the only path that releases a classified child generation.
+        invocation_policy.authorize_target(member)
         require(
             request.get("target_generation", request.get("binding_generation"))
             == member["generation"],
@@ -2488,6 +2673,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
     elif operation == "transfer-coordinator":
         target = request["target_participant"]
         require(target in state["participants"] and not participant["pending"], "PENDING_OPERATION")
+        # A child assignment never grants coordinator or roadmap authority.
+        invocation_policy.authorize_target(state["participants"][target])
         evidence(request.get("evidence"))
         state["coordinator"] = target
         state["owners"]["roadmap.md"] = target
@@ -3013,11 +3200,12 @@ def existing_tool_request(
     return None
 
 
-def execute(request: JSONObject) -> JSONObject:
+def _execute(request: JSONObject, *, internal: bool) -> JSONObject:
     """Execute a bounded request and return safe diagnostics without exception contents.
 
     Args:
         request: Versioned lifecycle request with explicit repository, issue and session identities.
+        internal: Permit Python-only adapter operations; never read from request data.
 
     Returns:
         A success result or a structured failure with a public code and recovery action.
@@ -3028,6 +3216,9 @@ def execute(request: JSONObject) -> JSONObject:
         require(request.get("schema_version") == 1)
         token(request["request_id"])
         operation = request["operation"]
+        require(
+            internal or operation not in invocations.INTERNAL_OPERATIONS, "HOST_UNSUPPORTED_TOOL"
+        )
         # Create registration without accepting a caller-selected repository identity.
         if operation == "register":
             require("repo_id" not in request, "INVALID_REQUEST")
@@ -3095,6 +3286,30 @@ def execute(request: JSONObject) -> JSONObject:
         }
 
 
+def execute(request: JSONObject) -> JSONObject:
+    """Execute the public lifecycle contract and reject adapter-internal wire operations.
+
+    Args:
+        request: Bounded versioned public request.
+
+    Returns:
+        Structured lifecycle success or safe failure diagnostics.
+    """
+    return _execute(request, internal=False)
+
+
+def execute_internal(request: JSONObject) -> JSONObject:
+    """Execute a Python-only adapter transition through normal locks and error handling.
+
+    Args:
+        request: Internal request constructed by the trusted native adapter.
+
+    Returns:
+        The same structured lifecycle response contract as execute.
+    """
+    return _execute(request, internal=True)
+
+
 def main() -> int:
     """Read one bounded CLI request and emit one canonical result.
 
@@ -3116,7 +3331,10 @@ def main() -> int:
             else sys.stdin.buffer.read(MAX_REQUEST + 1)
         )
         require(len(raw) <= MAX_REQUEST, "SIZE_LIMIT")
-        result = execute(strict_json(raw))
+        request = strict_json(raw)
+        require(isinstance(request, dict), "INVALID_REQUEST")
+        require(isinstance(request.get("operation"), str), "INVALID_REQUEST")
+        result = execute(request)
     # Return the bounded lifecycle diagnostic without exposing exception contents.
     except WorkspaceError as error:
         result = {"ok": False, "code": error.code}

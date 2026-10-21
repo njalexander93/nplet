@@ -29,13 +29,15 @@ def case(monkeypatch: pytest.MonkeyPatch) -> Iterator[Fixture]:
     """Create a disposable repository whose coordinator is a Claude parent session.
 
     Args:
-        monkeypatch: Removes Cursor markers so the Claude entry point handles events.
+        monkeypatch: Isolates host markers and the semantic test budget.
 
     Yields:
         Real-core fixture with the issue created but no packet acknowledged.
     """
     # Exercise Claude's own entry point with a Claude-host coordinator identity.
     monkeypatch.delenv("CURSOR_VERSION", raising=False)
+    # Real filesystem coverage tests verify lifecycle semantics, not native hook latency.
+    monkeypatch.setattr(common, "CHILD_JOIN_BUDGET_SECONDS", 60.0)
     fixture = Fixture()
     fixture.setUp()
     fixture.base["host"] = claude.HOST
@@ -583,12 +585,13 @@ def test_child_handback_and_parent_message_record_no_pending_work(case: Fixture)
     assert case.state() == before
 
 
-def test_cursor_subagent_start_is_unchanged(case: Fixture) -> None:
-    """Keep Cursor's subagentStart denial independent of the Claude child route.
+def test_cursor_unregistered_subagent_start_has_no_effect(case: Fixture) -> None:
+    """Ignore Cursor's unregistered child hook without changing lifecycle state.
 
     Args:
         case: Disposable repository fixture.
     """
+    before = case.state()
     response = cursor.handle(
         {
             "hook_event_name": "subagentStart",
@@ -597,8 +600,8 @@ def test_cursor_subagent_start_is_unchanged(case: Fixture) -> None:
             "agent_id": AGENT,
         }
     )
-    assert response["permission"] == "deny"
-    assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in response["user_message"]
+    assert response == {}
+    assert case.state() == before
 
 
 def parent_mutation(case: Fixture, tool_id: str) -> JsonObject:
@@ -671,9 +674,7 @@ def test_child_join_retries_after_revision_drift(
         case: Disposable repository fixture.
         monkeypatch: Injects the revision drift before the first join.
     """
-    # The first join fails on the drifted revision; the retry re-reads and succeeds. A
-    # generous budget keeps slow native runners inside the retry window.
-    monkeypatch.setattr(common, "CHILD_JOIN_BUDGET_SECONDS", 60.0)
+    # The first join fails on the drifted revision; the retry re-reads and succeeds.
     joins = drift_before(case, monkeypatch, "join")
     response = start_child(case)
     assert [result["code"] for result in joins] == ["REVISION_CONFLICT", "OK"]
@@ -734,7 +735,7 @@ def test_child_acknowledge_tolerates_revision_drift(
     [
         ("REVISION_CONFLICT", 60.0, common.CHILD_JOIN_ATTEMPTS),
         ("BUSY", 60.0, common.CHILD_JOIN_ATTEMPTS),
-        ("REVISION_CONFLICT", 0.0, 1),
+        ("BUSY", 0.0, 0),
         ("ISSUE_MISMATCH", 60.0, 1),
     ],
 )

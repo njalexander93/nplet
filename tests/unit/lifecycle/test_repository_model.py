@@ -201,7 +201,7 @@ def bare_store() -> core.Store:
     anchor = Path(Path.cwd().anchor)
     store.root = anchor / "linked"
     store.registration = {"repo_id": "repo", "main": str(anchor / "main")}
-    store.bindings = BindingDirectory()  # type: ignore[assignment]
+    store._bindings = BindingDirectory()  # type: ignore[assignment]
     store.local = BindingDirectory()  # type: ignore[assignment]
     store.task = BindingDirectory()  # type: ignore[assignment]
     return store
@@ -454,21 +454,29 @@ def test_register_refuses_changed_local_identity_without_replacement(
     assert documents[str(root / ".task")][".repository.json"] == {"repo_id": "foreign"}
 
 
+@pytest.mark.parametrize(
+    "create,bindings,existing_issues",
+    [(True, True, False), (False, False, False), (False, False, True)],
+)
 def test_store_initialization_verifies_registration_and_releases_handles(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    create: bool,
+    bindings: bool,
+    existing_issues: bool,
 ) -> None:
     """Validate local and canonical registrations before exposing store handles.
 
     Args:
         monkeypatch: Pytest fixture used to replace the dependency under test.
-        tmp_path: Disposable directory owned by this test.
+        create: Whether collection creation is permitted.
+        bindings: Whether local binding metadata may be opened.
+        existing_issues: Whether an issue collection already exists.
     """
     # Install fake repository, fs_identity, absolute calls.
     documents: dict[str, dict[str, object]] = {}
     closed: list[str] = []
-    root = tmp_path / "main"
-    common = tmp_path / "git/common"
+    root = Path(Path.cwd().anchor) / "modeled-main"
+    common = root.parent / "modeled-common"
     monkeypatch.setattr(core, "repository", lambda _path: (root, common, [root]))
     monkeypatch.setattr(
         core, "fs_identity", lambda path: [1, 2] if Path(path) == common else [3, 4]
@@ -478,10 +486,29 @@ def test_store_initialization_verifies_registration_and_releases_handles(
     registration = core.register(
         {"worktree": str(root), "main_worktree": str(root), "host": "codex", "session_id": "s"}
     )
-    # Open a store only after local and canonical registration identities match.
-    with core.Store({"worktree": str(root), "repo_id": registration["repo_id"]}) as store:
+    # Read-only classification may find an existing issue collection or none at all.
+    if existing_issues:
+        documents[str(root / ".task/.control")]["issues"] = {}
+    before = {path: dict(data) for path, data in documents.items()}
+    closed.clear()
+    with core.Store(
+        {"worktree": str(root), "repo_id": registration["repo_id"]},
+        create=create,
+        bindings=bindings,
+    ) as store:
         assert store.registration["repo_id"] == registration["repo_id"]
-        assert len(store.handles) == 7
+        assert store.issues_present is (create or existing_issues)
+        assert len(store.handles) == 5 + int(create or existing_issues) + int(bindings)
+        if not (create or existing_issues):
+            with pytest.raises(core.WorkspaceError) as missing:
+                _ = store.issues
+            assert missing.value.code == "RECOVERY_REQUIRED"
+        if not bindings:
+            with pytest.raises(core.WorkspaceError) as forbidden:
+                _ = store.bindings
+            assert forbidden.value.code == "RECOVERY_REQUIRED"
+    assert (str(root / ".task/.bindings") in closed) is bindings
+    assert documents == before
     # Check recorded closed against the required side effects.
     assert store.handles == []
     assert closed[-2:] == [str(root / ".task"), str(root)]

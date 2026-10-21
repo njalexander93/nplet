@@ -259,6 +259,8 @@ def test_native_adapter_pretool_preserves_host_specific_permission(
     monkeypatch.delenv("CURSOR_VERSION", raising=False)
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(adapter.common, "native_identity", lambda event, _host: event)
+    if adapter is cursor:
+        monkeypatch.setattr(cursor.cursor_children, "normalize", lambda event, _deadline: event)
     observed: list[dict[str, object]] = []
     monkeypatch.setattr(adapter.common, "native_pre", lambda event, _host: observed.append(event))
     event = {"hook_event_name": event_name}
@@ -369,7 +371,7 @@ def test_cursor_routes_prompt_completion_context_and_stop(
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
-    monkeypatch.setattr(cursor.common, "native_identity", lambda event, _host: event)
+    monkeypatch.setattr(cursor.cursor_children, "normalize", lambda event, _deadline: event)
     effects: list[str] = []
     monkeypatch.setattr(
         cursor.common, "native_post", lambda _event, _host, failed: effects.append(f"post:{failed}")
@@ -406,7 +408,7 @@ def test_cursor_nonbootstrap_linear_completion_uses_normal_admission(
         failed: Whether Cursor reports provider failure instead of success.
     """
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
-    monkeypatch.setattr(cursor.common, "native_identity", lambda event, _host: event)
+    monkeypatch.setattr(cursor.cursor_children, "normalize", lambda event, _deadline: event)
     monkeypatch.setattr(cursor.common, "lookup_required", lambda _event, _host: False)
     settled: list[bool] = []
     monkeypatch.setattr(
@@ -420,7 +422,7 @@ def test_cursor_nonbootstrap_linear_completion_uses_normal_admission(
     assert settled == [failed]
 
 
-def test_cursor_subagent_denied_before_identity_or_completion(
+def test_cursor_opaque_child_marker_denied_before_parent_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep child-session work outside the parent binding.
@@ -430,7 +432,7 @@ def test_cursor_subagent_denied_before_identity_or_completion(
     """
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
     monkeypatch.setattr(cursor.common, "native_identity", lambda *_args: pytest.fail("identity"))
-    result = cursor.handle({"hook_event_name": "subagentStart"})
+    result = cursor.handle({"hook_event_name": "preToolUse", "subagent_id": "opaque-child"})
     assert result["permission"] == "deny"
     assert "HOST_UNSUPPORTED_CHILD_IDENTITY" in result["user_message"]
 
@@ -503,7 +505,7 @@ def test_claude_catches_native_failure_as_bounded_tool_denial(
 @pytest.mark.parametrize(
     ("name", "field"),
     [
-        ("subagentStart", "permission"),
+        ("beforeReadFile", "permission"),
         ("postToolUse", "additional_context"),
         ("postToolUseFailure", "additional_context"),
         ("sessionStart", "additional_context"),
@@ -523,6 +525,7 @@ def test_cursor_failure_renders_documented_event_field(name: str, field: str) ->
     if field != "permission":
         assert "SOURCE_STALE" in response[field]
     assert cursor.failure("unknown", "SOURCE_STALE") == {}
+    assert cursor.failure("subagentStart", "SOURCE_STALE") == {}
 
 
 def test_cursor_prompt_continue_and_unsupported_event_are_bounded(
@@ -534,7 +537,7 @@ def test_cursor_prompt_continue_and_unsupported_event_are_bounded(
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
-    monkeypatch.setattr(cursor.common, "native_identity", lambda event, _host: event)
+    monkeypatch.setattr(cursor.cursor_children, "normalize", lambda event, _deadline: event)
     monkeypatch.setattr(cursor.common, "prompt", lambda *_args: {})
     assert cursor.handle({"hook_event_name": "beforeSubmitPrompt"}) == {"continue": True}
     assert cursor.handle({"hook_event_name": "unknown"}) == {}
@@ -547,6 +550,7 @@ def test_cursor_main_delegates_to_bounded_native_runner(monkeypatch: pytest.Monk
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
     calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(cursor.sys, "argv", ["cursor.py"])
     monkeypatch.setattr(
         cursor.common,
         "run_native",

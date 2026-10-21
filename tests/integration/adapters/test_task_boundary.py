@@ -555,7 +555,12 @@ def test_same_note_input_changes_identity_before_completion(host: str) -> None:
         }
         assert adapter.handle(completed) == {}
         assert case.state() == before
-        assert "implementation" in before["participants"][case.base["coordinator"]]["pending"]
+        implementation_id = (
+            cursor.cursor_children.call_token("implementation")
+            if host == "cursor"
+            else "implementation"
+        )
+        assert implementation_id in before["participants"][case.base["coordinator"]]["pending"]
         assert source.read_text() == "source sentinel"
     finally:
         case.doCleanups()

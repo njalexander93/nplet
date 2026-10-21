@@ -32,7 +32,8 @@ def test_completion_waits_for_overlapping_core_commit(
     try:
         case.create()
         case.ready()
-        case.call("tool-start", tool_id="finished")
+        finished = cursor.cursor_children.call_token("finished") if host == "cursor" else "finished"
+        case.call("tool-start", tool_id=finished)
         request = case.req("tool-start", tool_id="other")
 
         def pause(stage: str) -> None:

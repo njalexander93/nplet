@@ -1,7 +1,7 @@
 [
   {
-    "source_path": "src/nplet/lifecycle/task_workspace.py",
-    "source_sha256": "d7f49286b5aa64294599fe43cab4561f8482a63bf9d2ea5f4d8a2506a94456bd",
+    "source_path": "src/nplet/lifecycle/_primitives.py",
+    "source_sha256": "875270618839a4d7b17bb7ab789e6e2de97007d5df594da1d42edb58d6de9313",
     "timeout_seconds": 20,
     "kind": "wrong_result",
     "old": "return hashlib.sha256(data).hexdigest()",
@@ -14,7 +14,7 @@
   },
   {
     "source_path": "src/nplet/lifecycle/task_workspace.py",
-    "source_sha256": "d7f49286b5aa64294599fe43cab4561f8482a63bf9d2ea5f4d8a2506a94456bd",
+    "source_sha256": "230dc04e22fc6746c4841054900e0867b693c605c8b016a0c81491b33ffffc7f",
     "timeout_seconds": 20,
     "kind": "missing_exception",
     "old": "require(isinstance(value, str) and ISSUE.fullmatch(value), \"INVALID_ISSUE\")",
@@ -27,7 +27,7 @@
   },
   {
     "source_path": "src/nplet/lifecycle/task_workspace.py",
-    "source_sha256": "d7f49286b5aa64294599fe43cab4561f8482a63bf9d2ea5f4d8a2506a94456bd",
+    "source_sha256": "230dc04e22fc6746c4841054900e0867b693c605c8b016a0c81491b33ffffc7f",
     "timeout_seconds": 20,
     "kind": "omitted_effect",
     "old": "        FAILPOINT(point)",
