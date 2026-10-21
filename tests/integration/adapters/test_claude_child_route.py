@@ -29,13 +29,15 @@ def case(monkeypatch: pytest.MonkeyPatch) -> Iterator[Fixture]:
     """Create a disposable repository whose coordinator is a Claude parent session.
 
     Args:
-        monkeypatch: Removes Cursor markers so the Claude entry point handles events.
+        monkeypatch: Isolates host markers and the semantic test budget.
 
     Yields:
         Real-core fixture with the issue created but no packet acknowledged.
     """
     # Exercise Claude's own entry point with a Claude-host coordinator identity.
     monkeypatch.delenv("CURSOR_VERSION", raising=False)
+    # Real filesystem coverage tests verify lifecycle semantics, not native hook latency.
+    monkeypatch.setattr(common, "CHILD_JOIN_BUDGET_SECONDS", 60.0)
     fixture = Fixture()
     fixture.setUp()
     fixture.base["host"] = claude.HOST
@@ -672,9 +674,7 @@ def test_child_join_retries_after_revision_drift(
         case: Disposable repository fixture.
         monkeypatch: Injects the revision drift before the first join.
     """
-    # The first join fails on the drifted revision; the retry re-reads and succeeds. A
-    # generous budget keeps slow native runners inside the retry window.
-    monkeypatch.setattr(common, "CHILD_JOIN_BUDGET_SECONDS", 60.0)
+    # The first join fails on the drifted revision; the retry re-reads and succeeds.
     joins = drift_before(case, monkeypatch, "join")
     response = start_child(case)
     assert [result["code"] for result in joins] == ["REVISION_CONFLICT", "OK"]

@@ -415,6 +415,26 @@ def test_join_child_stops_at_the_deadline_or_an_unretryable_code(
         )
     assert captured.value.code == "BUSY"
     assert calls == []
+    # A snapshot that consumes the remaining budget must not start a late mutation.
+    clock = [0.0]
+    monkeypatch.setattr(common.time, "monotonic", lambda: clock[0])
+
+    def expired_snapshot(_parent: dict[str, Any]) -> dict[str, Any]:
+        """Return real-shaped state after advancing beyond the attempt deadline.
+
+        Args:
+            _parent: Parent lifecycle request.
+
+        Returns:
+            State with no child membership.
+        """
+        clock[0] = 2.0
+        return issue_state()
+
+    monkeypatch.setattr(common, "_issue_state", expired_snapshot)
+    with pytest.raises(core.WorkspaceError, match="BUSY"):
+        common._join_child(child_event(tmp_path), HOST, parent_request(), 1.0)
+    assert calls == []
 
 
 def ready_executor(
