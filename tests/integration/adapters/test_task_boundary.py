@@ -2,7 +2,6 @@
 
 import copy
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -94,19 +93,52 @@ def test_cursor_shell_override_rejects_foreign_checkout_and_unknown_effect(
     assert not (foreign / ".task").exists()
 
 
+def commit_and_link_worktree(root: Path) -> Path:
+    """Commit an empty history and add one linked worktree beside the checkout.
+
+    Args:
+        root: Real Git checkout.
+
+    Returns:
+        Canonical linked worktree path.
+    """
+    # A linked worktree needs a commit to branch from.
+    subprocess.run(
+        [
+            "git",
+            *("-C", str(root), "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid"),
+            *("commit", "--allow-empty", "-qm", "fixture"),
+        ],
+        check=True,
+    )
+    linked = root.parent / "linked"
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "-q", "-b", "linked", str(linked)], check=True
+    )
+    return linked.resolve()
+
+
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
-def test_fresh_reads_notes_and_protected_denials_leave_no_task(checkout: Path, host: str) -> None:
-    """Permit independent work while source, dependencies and controls remain unchanged.
+def test_fresh_reads_and_external_edits_leave_no_task_while_repository_edits_are_denied(
+    checkout: Path, tmp_path: Path, host: str
+) -> None:
+    """Permit reads and edits outside the repository; deny every in-repository edit.
 
     Args:
         checkout: Real checkout with no task registration.
+        tmp_path: Disposable parent for external, vault and non-Git targets.
         host: Native adapter.
     """
     adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
-    # Read tools and ordinary notes require neither binding nor lifecycle setup.
+    # A separate Git repository stands in for a vault; it is not project code.
+    vault = tmp_path / "vault"
+    subprocess.run(["git", "init", "-q", str(vault)], check=True)
+    # Reads and edits outside the repository require neither binding nor lifecycle setup.
     for tool, args in [
         ("Read", {"file_path": str(checkout / "src/app.py")}),
-        ("Write", {"file_path": str(checkout / "notes/research.md"), "content": "prose"}),
+        ("Write", {"file_path": str(tmp_path / "outside.md"), "content": "prose"}),
+        ("Write", {"file_path": str(vault / "note.md"), "content": "prose"}),
+        ("Write", {"file_path": str(tmp_path / "plain/record.txt"), "content": "prose"}),
     ]:
         observed = event(checkout, host, tool, args)
         assert allowed(host, adapter.handle(observed))
@@ -118,8 +150,13 @@ def test_fresh_reads_notes_and_protected_denials_leave_no_task(checkout: Path, h
         }
         assert adapter.handle(completed) == {}
         assert not (checkout / ".task").exists()
+        assert not (vault / ".task").exists()
+        assert not Path(args["file_path"]).exists() or tool == "Read"
     # Denied native calls have no target effect and cannot manufacture registration.
     for path in [
+        "notes/research.md",
+        "README.md",
+        "docs/draft.md",
         "src/app.py",
         "tests/test_app.py",
         "scripts/run.md",
@@ -152,6 +189,61 @@ def test_fresh_reads_notes_and_protected_denials_leave_no_task(checkout: Path, h
         assert not allowed(host, response)
         assert not (checkout / path).exists()
         assert not (checkout / ".task").exists()
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_linked_worktrees_are_project_code_for_each_other(checkout: Path, host: str) -> None:
+    """Deny edits that cross between the main checkout and its linked worktree.
+
+    Args:
+        checkout: Real main checkout.
+        host: Native adapter.
+    """
+    adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
+    linked = commit_and_link_worktree(checkout)
+    # Either worktree is part of the session's repository, whichever one is the cwd.
+    for cwd, target in ((checkout, linked / "notes/x.md"), (linked, checkout / "notes/x.md")):
+        observed = event(cwd, host, "Write", {"file_path": str(target), "content": "blocked"})
+        try:
+            response = adapter.handle(observed)
+        except core.WorkspaceError as error:
+            assert host == "codex"
+            response = codex.failure("PreToolUse", error.code)
+        assert not allowed(host, response)
+        assert not target.exists()
+    assert not (checkout / ".task").exists()
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_session_outside_any_repository_edits_without_a_gate(
+    checkout: Path, tmp_path: Path, host: str
+) -> None:
+    """Admit every edit from a non-Git cwd, including one aimed into a repository.
+
+    A cwd inside no Git repository has no project roots, so this hook treats every
+    target as external; host permissions remain the only control.
+
+    Args:
+        checkout: Real checkout that the session does not belong to.
+        tmp_path: Disposable parent for the non-Git session directory.
+        host: Native adapter.
+    """
+    adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    # Both a local file and a file in an unrelated repository are external here.
+    for target in (plain / "x.md", checkout / "src/app.py"):
+        observed = event(plain, host, "Write", {"file_path": str(target), "content": "prose"})
+        assert adapter.handle(observed) == ({"permission": "allow"} if host == "cursor" else {})
+        completed = {
+            **observed,
+            "hook_event_name": "postToolUse" if host == "cursor" else "PostToolUse",
+            "tool_response": {"isError": False},
+            "tool_output": "{}",
+        }
+        assert adapter.handle(completed) == {}
+    assert not (plain / ".task").exists()
+    assert not (checkout / ".task").exists()
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
@@ -189,49 +281,29 @@ def test_native_package_mutation_denial_preserves_manifest_and_absent_task(
     assert not (checkout / ".task").exists()
 
 
-@pytest.mark.parametrize(
-    "relative", ["notes/research.md", "docs/draft-review.md", "notes/record.txt"]
-)
-def test_real_checkout_aliases_preserve_note_identity(
-    checkout: Path, relative: str, tmp_path: Path
-) -> None:
-    """Allow canonical and alias spellings in either direction.
+def test_real_aliases_follow_the_repository_directory(checkout: Path, tmp_path: Path) -> None:
+    """Gate a target when either its lexical or resolved spelling is inside the repository.
 
     Args:
         checkout: Canonical Git checkout.
-        relative: Ordinary note role.
-        tmp_path: Disposable alias parent.
+        tmp_path: Disposable parent for links and external directories.
     """
-    # Directory symlinks/junctions exercise actual filesystem aliases.
+    roots = core.repository(checkout)[2]
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    # A link outside the repository that points into it is protected.
     alias = tmp_path / "alias"
     link_directory(alias, checkout)
-    assert task_boundary.target_role(str(alias), str(checkout / relative)) == "note"
-    assert task_boundary.target_role(str(checkout), str(alias / relative)) == "note"
-    assert task_boundary.target_role(str(alias), str(alias / relative)) == "note"
-
-
-def test_internal_links_hardlinks_and_executable_notes_remain_protected(checkout: Path) -> None:
-    """Prevent lexical source roles and shared inode identities from becoming notes.
-
-    Args:
-        checkout: Canonical checkout.
-    """
-    # An internal back-link must not erase the lexical source directory.
-    (checkout / "src").mkdir()
-    link_directory(checkout / "src/back", checkout)
-    assert task_boundary.target_role(str(checkout), "src/back/docs/note.md") == "protected"
-    # A hardlink to protected source retains the shared identity despite its suffix.
-    source = checkout / "src/source.py"
-    source.write_text("source")
-    os.link(source, checkout / "note.md")
-    assert task_boundary.target_role(str(checkout), "note.md") == "protected"
-    # Existing executable prose cannot receive the ordinary note exemption.
-    executable = checkout / "executable.md"
-    executable.write_text("#!/bin/sh")
-    if os.name != "nt":
-        executable.chmod(0o700)
-        assert task_boundary.target_role(str(checkout), "executable.md") == "protected"
-    assert task_boundary.target_role(str(checkout), "program.exe") == "protected"
+    assert task_boundary.target_role(str(checkout), str(alias / "notes/x.md"), roots) == "protected"
+    # An alias spelling of the checkout as cwd still names the repository.
+    assert task_boundary.target_role(str(alias), "notes/x.md", roots) == "protected"
+    # A link inside the repository that points outside it is protected.
+    link_directory(checkout / "outlink", outside)
+    assert task_boundary.target_role(str(checkout), "outlink/x.md", roots) == "protected"
+    # Lexical traversal is judged by where it lands.
+    assert task_boundary.target_role(str(checkout), "notes/../../outside.md", roots) == "external"
+    into = str(outside / ".." / "src/build/checkout/notes/x.md")
+    assert task_boundary.target_role(str(outside), into, roots) == "protected"
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
@@ -275,7 +347,8 @@ def test_ready_hosts_deny_control_aliases_without_changing_state(host: str, layo
         }
         # Exercise each native process, including Codex's exception-to-denial boundary.
         for index, path in enumerate(paths):
-            assert task_boundary.target_role(str(case.root), str(path)) == "control"
+            roots = core.repository(case.root)[2]
+            assert task_boundary.target_role(str(case.root), str(path), roots) == "control"
             observed = event(
                 case.root,
                 host,
@@ -334,7 +407,7 @@ def test_pending_ticket_allows_unrelated_work_without_consuming_reservation(chec
     for tool, args in [
         ("mcp__codex_apps__linear__get_issue", {"id": "TEST-2"}),
         ("mcp__codex_apps__linear__save_issue", {"title": "independent"}),
-        ("Write", {"file_path": "notes/free.md", "content": "free"}),
+        ("Write", {"file_path": str(checkout.parent / "external/free.md"), "content": "free"}),
     ]:
         observed = event(checkout, "codex", tool, args, call="unrelated")
         assert codex.handle(observed) == {}
@@ -401,45 +474,53 @@ def test_pending_new_task_fences_codex_special_routes_without_state_changes(rout
         case.doCleanups()
 
 
-def test_update_patch_end_of_file_admits_notes_but_not_mixed_source(checkout: Path) -> None:
-    """Keep valid note update patches task-free without discarding other protected targets.
+def test_update_patch_admits_external_targets_but_not_repository_targets(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """Keep external-only patches task-free and gate any patch touching the repository.
 
     Args:
         checkout: Real unregistered repository.
+        tmp_path: Disposable parent for the external target.
     """
-    # A valid native update marker does not introduce a new target or implementation effect.
-    note = checkout / "notes/note.md"
-    note.parent.mkdir()
-    note.write_text("old\n")
+    # An external-only update patch has no project code effect.
+    external = tmp_path / "vault/note.md"
+    external.parent.mkdir()
+    external.write_text("old\n")
     patch = (
-        "*** Begin Patch\n*** Update File: notes/note.md\n@@\n-old\n+new\n"
+        f"*** Begin Patch\n*** Update File: {external}\n@@\n-old\n+new\n"
         "*** End of File\n*** End Patch"
     )
     observed = event(checkout, "codex", "apply_patch", {"command": patch})
     assert codex.handle(observed) == {}
-    # Moving or updating a protected target gates the entire call, preserving both files.
-    source = checkout / "src/app.py"
-    source.parent.mkdir()
-    source.write_text("old\n")
+    # Mixed updates and moves in either direction across the boundary gate the whole call.
+    note, source = checkout / "notes/x.md", checkout / "src/app.py"
+    for path in (note, source):
+        path.parent.mkdir()
+        path.write_text("old\n")
     mixed_update = patch.replace(
         "*** End Patch",
         "*** Update File: src/app.py\n@@\n-old\n+new\n*** End of File\n*** End Patch",
     )
-    mixed_move = patch.replace(
-        "*** Update File: notes/note.md",
-        "*** Update File: notes/note.md\n*** Move to: src/app.py",
+    move_out = (
+        f"*** Begin Patch\n*** Update File: notes/x.md\n*** Move to: {external}\n@@\n-old\n"
+        "+new\n*** End Patch"
     )
-    for mixed in (mixed_update, mixed_move):
+    move_in = patch.replace(
+        f"*** Update File: {external}", f"*** Update File: {external}\n*** Move to: src/app.py"
+    )
+    for mixed in (mixed_update, move_out, move_in):
         with pytest.raises(core.WorkspaceError) as failure:
             codex.handle({**observed, "tool_input": {"command": mixed}})
         assert failure.value.code in {"REGISTRATION_REQUIRED", "BINDING_MISSING"}
+    assert external.read_text() == "old\n"
     assert note.read_text() == "old\n"
     assert source.read_text() == "old\n"
     assert not (checkout / ".task").exists()
 
 
 def test_completion_uses_recorded_admission_after_target_changes() -> None:
-    """Settle an admitted source call after its target becomes ordinary prose.
+    """Settle an admitted source call after its target becomes an external file.
 
     Raises:
         AssertionError: Native settlement loses admission or invents free-call pending work.
@@ -463,13 +544,13 @@ def test_completion_uses_recorded_admission_after_target_changes() -> None:
         completed = copy.deepcopy(observed)
         completed.update(
             hook_event_name="PostToolUse",
-            tool_input={"file_path": "notes/free.md", "content": "content"},
+            tool_input={"file_path": str(case.root.parent / "free.md"), "content": "content"},
             tool_response={"isError": False},
         )
         assert codex.handle(completed) == {}
         assert case.state()["participants"][case.base["coordinator"]]["pending"] == {}
         assert codex.handle(completed) == {}
-        # An untracked note callback cannot settle another pending source call.
+        # An untracked external callback cannot settle another pending source call.
         observed["tool_use_id"] = "still-pending"
         assert codex.handle(observed) == {}
         completed["tool_use_id"] = "foreign"
@@ -506,8 +587,8 @@ def test_codex_process_denies_fresh_implementation(checkout: Path) -> None:
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
-def test_same_note_input_changes_identity_before_completion(host: str) -> None:
-    """Ignore a free completion after its unchanged target becomes a protected hardlink.
+def test_same_free_input_changes_identity_before_completion(host: str) -> None:
+    """Ignore a free completion after its unchanged external target becomes a repository alias.
 
     Args:
         host: Native adapter whose callback carries the same call ID and input.
@@ -524,9 +605,9 @@ def test_same_note_input_changes_identity_before_completion(host: str) -> None:
         source = case.root / "src/app.py"
         source.parent.mkdir()
         source.write_text("source sentinel")
-        note = case.root / "notes/research.md"
-        note.parent.mkdir()
-        note.write_text("ordinary prose")
+        external = case.root.parent / "external"
+        external.mkdir()
+        note = external / "research.md"
         implementation = event(
             case.root,
             host,
@@ -536,16 +617,17 @@ def test_same_note_input_changes_identity_before_completion(host: str) -> None:
         )
         implementation.update(session_id="coordinator", conversation_id="coordinator")
         assert allowed(host, adapter.handle(implementation))
-        # Free admission records no lifecycle work under this separate note call ID.
+        # Free admission records no lifecycle work under this separate external call ID.
         observed = event(
             case.root, host, "Write", {"file_path": str(note), "content": "prose"}, call="free-note"
         )
         observed.update(session_id="coordinator", conversation_id="coordinator")
         assert allowed(host, adapter.handle(observed))
         before = copy.deepcopy(case.state())
-        note.unlink()
-        os.link(source, note)
-        assert task_boundary.target_role(str(case.root), str(note)) == "protected"
+        external.rmdir()
+        link_directory(external, case.root)
+        roots = core.repository(case.root)[2]
+        assert task_boundary.target_role(str(case.root), str(note), roots) == "protected"
         # The host returns exactly the original input; only the filesystem identity changed.
         completed = {
             **observed,
@@ -571,7 +653,7 @@ def test_same_note_input_changes_identity_before_completion(host: str) -> None:
 def test_free_work_preserves_bound_pending_or_stale_state(
     host: str, condition: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Permit reads, admin and notes while retaining exact blocked implementation state.
+    """Permit reads, admin and external edits while retaining blocked implementation state.
 
     Args:
         host: Native parent adapter.
@@ -640,7 +722,7 @@ def test_free_work_preserves_bound_pending_or_stale_state(
         for index, (tool, args) in enumerate(
             [
                 ("Read", {"file_path": str(case.root / "src/app.py")}),
-                ("Write", {"file_path": "notes/free.md", "content": "prose"}),
+                ("Write", {"file_path": str(case.root.parent / "free.md"), "content": "prose"}),
                 (provider, {"title": "independent administration"}),
             ]
         ):
@@ -668,6 +750,7 @@ def test_free_work_preserves_bound_pending_or_stale_state(
             assert adapter.handle(completed) == {}
         # Independent literal headline categories remain implementation under either fence.
         protected = (
+            "notes/blocked.md",
             "src/blocked.py",
             "AGENTS.md",
             "CLAUDE.md",
@@ -705,19 +788,22 @@ def test_free_work_preserves_bound_pending_or_stale_state(
         case.doCleanups()
 
 
-def test_mixed_patch_denies_both_note_and_source(checkout: Path) -> None:
+def test_mixed_patch_denies_both_external_and_repository_targets(
+    checkout: Path, tmp_path: Path
+) -> None:
     """Deny the whole patch and retain both real target sentinels.
 
     Args:
         checkout: Unregistered repository.
+        tmp_path: Disposable parent for the external target.
     """
-    # A note target cannot grant task-free admission to another protected patch target.
-    note, source = checkout / "note.md", checkout / "src/app.py"
+    # An external target cannot grant task-free admission to a repository patch target.
+    note, source = tmp_path / "note.md", checkout / "src/app.py"
     source.parent.mkdir()
     note.write_text("note sentinel")
     source.write_text("source sentinel")
     patch = (
-        "*** Begin Patch\n*** Update File: note.md\n@@\n-note sentinel\n+changed\n"
+        f"*** Begin Patch\n*** Update File: {note}\n@@\n-note sentinel\n+changed\n"
         "*** Update File: src/app.py\n@@\n-source sentinel\n+changed\n*** End Patch"
     )
     observed = event(checkout, "codex", "apply_patch", {"command": patch})
@@ -752,7 +838,7 @@ def test_registered_unbound_completion_does_not_create_missing_store_directories
             case.root,
             host,
             "Write",
-            {"file_path": "notes/note.md", "content": "prose"},
+            {"file_path": str(case.root.parent / "note.md"), "content": "prose"},
             name="PostToolUse",
         )
         observed.update(tool_response={"content": []}, tool_output="{}")

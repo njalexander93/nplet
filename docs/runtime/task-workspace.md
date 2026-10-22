@@ -180,28 +180,31 @@ A hook can deny a covered action only when the host actually invokes and honors 
 
 The adapters classify a validated parent operation before requiring task readiness.
 The finite [host operation contracts](host-hooks.md#task-free-parent-operations)
-allow reads, planning helpers, ordinary note edits and named Linear administration
+allow reads, planning helpers, edits outside the project code repositories and named Linear administration
 without a task. They create no task, participant, binding, approval or pending-tool
 record. Independent task-free work also preserves an existing pending ticket read,
 stale packet and unresolved task work.
 
-Protected implementation includes source, tests, scripts, dependencies, package
-commands, build inputs, executable workflows, agent instructions and enforcement
-configuration. Governed documentation is protected too: `docs/runtime/`,
-`docs/framework/`, `docs/README.md` and any `CONTEXT.md`. Unknown or mixed effects
-remain readiness-gated or unsupported. The [contributor procedure](contributor-workflow.md)
+Protected implementation is every file edit inside a project code repository,
+whatever its extension or purpose, plus package commands and other mutation-capable
+shell commands. The project code repositories are the session's Git repository and
+its linked worktrees. A note, draft or README inside them is protected
+implementation. Unknown or mixed effects remain readiness-gated or unsupported. The [contributor procedure](contributor-workflow.md)
 separately requires explicit roadmap approval. Readiness verifies delivery facts;
 it does not authenticate human approval.
 
-Ordinary notes require a supported deterministic edit shape and a proven target
-role within the canonical checkout. Markdown files and `.txt` files inside
-`notes/` or `docs/` can qualify only outside protected roles; a `.txt` extension alone is
-insufficient. Dependency names such as `requirements*.txt` and `constraints*.txt`
-remain protected. Lexical and resolved paths must both qualify. Internal links,
-shared inodes, executable files, escapes and uncertain identities do not become
-ordinary notes. Raw `.task`, `.git` and host control directories remain protected
-by their specific rules even after readiness. Managed notes still require owned
-lifecycle updates.
+A file edit is task-free only when it uses a supported deterministic edit shape
+and every target lies outside the project code repositories. The adapters compare
+both the lexical and the link-resolved spelling of each target with the worktree
+directories. A target is protected when either spelling is inside one, and
+unresolvable targets are protected too. Hard links are not detected; the supported
+edit shapes cannot create them. The shared and personal vaults, and any
+other directory outside the repositories, are not gated by this hook, even when
+they have their own Git history. A session whose working directory is inside no
+Git repository has no project code repositories, so this hook gates none of its
+edits. Host permissions still apply in every case. Raw `.task`, `.git` and host
+control directories inside a repository remain protected by their specific rules
+even after readiness. Managed notes still require owned lifecycle updates.
 
 Child identity, scope, provider and delegation restrictions apply before this
 parent classification. Task-free work never broadens child authority. A completion

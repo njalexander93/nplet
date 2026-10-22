@@ -10,7 +10,8 @@ Authorized task-free work needs no local registration or Task line. See the
 [task boundary](task-workspace.md#task-free-and-protected-work) and the exact
 [host operation contracts](host-hooks.md#task-free-parent-operations). The setup
 below establishes lifecycle state for issue work; it is not a prerequisite for
-independent research, review, planning, ordinary notes or administration.
+independent research, review, planning, notes outside the project code repositories
+or administration.
 
 ## Usage
 
@@ -337,7 +338,7 @@ clearing stale task state.
 Task-free completions do not create task or pending records. Completion handling
 opens existing state without creating directories or lock files. Exact pending
 call IDs, durable start-request replays and unique participant-local poll handles
-select existing settlement; missing admission is ignored. Mutable note targets
+select existing settlement; missing admission is ignored. Mutable edit targets
 are not classified again at completion. Invalid registered or transactional state
 remains an error.
 

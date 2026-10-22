@@ -1,6 +1,6 @@
 # Contributor issue workflow
 
-Authorized research, review, planning, ordinary notes and project administration can proceed without a Task assignment. The adapters admit only the [named task-free operations](host-hooks.md#task-free-parent-operations). These operations grant no implementation authority. Before protected implementation, establish verified ticket startup, current readiness and explicit roadmap approval through this procedure.
+Authorized research, review, planning, notes outside the project code repositories and project administration can proceed without a Task assignment. The adapters admit only the [named task-free operations](host-hooks.md#task-free-parent-operations). These operations grant no implementation authority. Before protected implementation, establish verified ticket startup, current readiness and explicit roadmap approval through this procedure.
 
 Use this procedure when asked to start or resume a repository issue, including a short “start AGENT-X” request. The initiating thread is the **master**. An explicitly assigned child follows the [step-thread route](#step-thread-route), not a second master workflow.
 

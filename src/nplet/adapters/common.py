@@ -298,11 +298,13 @@ def lookup_required(event: core.JSONObject, host: str) -> bool:
     # Synthetic contexts without a native identity have no session assignment.
     if not isinstance(event.get("cwd"), str) or not isinstance(event.get("session_id"), str):
         return False
-    # Resolve the selected checkout before looking for a local assignment.
-    root, _, _ = core.repository(event["cwd"])
+    # A session outside every repository has no store and so no ticket-first assignment.
+    repository = task_boundary.project_repository(event["cwd"])
+    if repository is None:
+        return False
     key = core.participant_key({"host": host, "session_id": event["session_id"]})
     # Inspect the root store without creating a ticket or binding.
-    with core.Directory.absolute(root) as directory:
+    with core.Directory.absolute(repository[0]) as directory:
         # A missing store means no ticket-first assignment is active.
         if not directory.exists(".task"):
             return False
@@ -376,6 +378,9 @@ def existing_admission(event: core.JSONObject, host: str) -> core.JSONObject | N
     """
     # Translate native polling shape; storage and lock ownership remain inside the core.
     tool_id = native_token(event.get("tool_use_id"))
+    # A session outside every repository has no store that could hold an admission.
+    if task_boundary.project_repository(event["cwd"]) is None:
+        return None
     polling = event.get("tool_name") == "write_stdin"
     return core.existing_tool_request(
         {
@@ -1248,10 +1253,11 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
         if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], str):
             raise core.WorkspaceError("HOST_UNSUPPORTED_WORKSPACE")
         cwd = event.get("cwd", roots[0])
-        core.require(
-            isinstance(cwd, str) and core.repository(cwd)[0] == core.repository(roots[0])[0],
-            "REPOSITORY_MISMATCH",
-        )
+        core.require(isinstance(cwd, str), "REPOSITORY_MISMATCH")
+        # The working directory and workspace share one repository, or both lie outside any.
+        found = [task_boundary.project_repository(path) for path in (cwd, roots[0])]
+        tops = [None if repository is None else repository[0] for repository in found]
+        core.require(tops[0] == tops[1], "REPOSITORY_MISMATCH")
     else:
         # A child cannot be keyed without the parent session it runs under.
         if child:
@@ -1521,7 +1527,7 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         return
     effect = native_effect(event, host)
     tool = event["tool_name"]
-    # Validated parent reads, planning and notes need no task lifecycle admission.
+    # Validated parent reads, planning and external edits need no task lifecycle admission.
     operation = (
         tool[4:]
         if host == "cursor" and tool.startswith("MCP:")
@@ -1535,7 +1541,7 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         and event.get("child") is not True
     ) or task_boundary.task_free(effect, host, operation, roles):
         return
-    # Raw control-store mutation never becomes a readiness-authorized note.
+    # Raw control-store mutation never becomes a readiness-authorized edit.
     core.require("control" not in roles, "NOT_OWNER")
     core.require(not lookup_required(event, host), "TICKET_READ_REQUIRED")
     request = request_for(event, "ready", host)
@@ -1992,8 +1998,8 @@ def _recovery_route(code: str, host: str) -> str:
             "Next admitted operation: the configured Linear get_issue call with exactly "
             '{"id": "<selected issue>"} before protected implementation.'
             + preparation
-            + " Independent authorized task-free reads, planning, notes and administration "
-            "remain available."
+            + " Independent authorized task-free reads, planning, edits outside the project "
+            "code repositories and administration remain available."
         )
     # An unbound session starts or resumes only through the ticket-first route.
     if code == "BINDING_MISSING":
@@ -2002,8 +2008,8 @@ def _recovery_route(code: str, host: str) -> str:
             "exactly one `Task: <issue-id>` line, "
             "then read that ticket with the configured Linear get_issue call; startup "
             f"registers or resumes the workspace. A pre-registration diagnose uses {command}. "
-            "Independent authorized task-free reads, planning, notes and administration "
-            "remain available. "
+            "Independent authorized task-free reads, planning, edits outside the project "
+            "code repositories and administration remain available. "
             "Finite shell reads include canonical cat, rg --no-config, and "
             "git --no-pager -c core.fsmonitor=false "
             "forms documented in docs/runtime/host-hooks.md; arbitrary shell commands remain gated."

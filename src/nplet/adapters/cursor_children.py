@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from nplet.adapters import common, cursor_results, runner
+from nplet.adapters import common, cursor_results, runner, task_boundary
 from nplet.adapters import cursor_routing as routing
 from nplet.lifecycle import task_workspace as core
 
@@ -243,7 +243,11 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
     try:
         configured = registration(observed["cwd"])
     except core.WorkspaceError as error:
-        if error.code == "REGISTRATION_REQUIRED" and parent_call is None:
+        # An unregistered parent, or one outside every repository, has no store to route.
+        if parent_call is None and (
+            error.code == "REGISTRATION_REQUIRED"
+            or task_boundary.project_repository(observed["cwd"]) is None
+        ):
             return observed
         raise
     with core.Store(configured, create=False, bindings=False) as store:

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
-import stat
 from pathlib import Path
 
 from nplet.lifecycle import task_workspace as core
@@ -50,63 +50,6 @@ GITHUB_READS = frozenset(
     }
 )
 CONTROL_PARTS = frozenset({".task", ".git", ".codex", ".claude", ".cursor", ".agents"})
-PROTECTED_PARTS = CONTROL_PARTS | frozenset(
-    {
-        "src",
-        "source",
-        "tests",
-        "test",
-        "scripts",
-        "bin",
-        "build",
-        "dist",
-        "vendor",
-        "dependencies",
-        "deps",
-        "requirements",
-        "constraints",
-        "node_modules",
-        ".github",
-        ".venv",
-        "venv",
-        "config",
-        "configuration",
-        ".vscode",
-        ".idea",
-        ".config",
-        "resources",
-        "templates",
-        "skills",
-        "hooks",
-        "workflows",
-    }
-)
-DEPENDENCY_NAMES = frozenset(
-    {
-        "pyproject.toml",
-        "poetry.lock",
-        "pipfile",
-        "pipfile.lock",
-        "uv.lock",
-        "setup.py",
-        "setup.cfg",
-        "package.json",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "gemfile",
-        "gemfile.lock",
-        "cargo.toml",
-        "cargo.lock",
-        "go.mod",
-        "go.sum",
-        "environment.yml",
-        "environment.yaml",
-        "cmakelists.txt",
-        "makefile",
-        "justfile",
-    }
-)
 GH_FIELDS = frozenset(
     {
         "number",
@@ -141,79 +84,82 @@ COMMENTS_QUERY = (
 )
 
 
-def target_role(cwd: str, value: object, root: Path | None = None) -> str:
-    """Resolve lexical and actual target roles without relying on ancestor names.
+def project_repository(cwd: str) -> tuple[Path, Path, list[Path]] | None:
+    """Select the session's Git repository, whose worktrees hold the project code.
 
     Args:
-        cwd: Actual checkout working directory.
-        value: Native target path.
-        root: Already verified canonical checkout root, when supplied by a batch.
+        cwd: Native session working directory.
 
     Returns:
-        ``note``, ``protected`` or ``control``; uncertainty is protected.
+        The ``core.repository`` worktree root, common Git directory and linked worktree
+        roots, or None when Git reports that ``cwd`` is inside no work tree.
+
+    Raises:
+        core.WorkspaceError: If cwd is missing, its repository is bare, or the worktree list
+            is inconsistent.
+        subprocess.SubprocessError: If Git metadata cannot be queried in time.
+        OSError: If Git cannot be launched.
     """
-    # Establish checkout identity before comparing either target spelling.
+    # The ordinary repository lookup succeeds for every directory inside a work tree.
     try:
-        root = root if root is not None else core.repository(cwd)[0].resolve(strict=True)
-        if not isinstance(value, str) or not value or "\x00" in value:
-            return "protected"
-        path = Path(value)
-        path = path if path.is_absolute() else Path(cwd) / path
-        # Resolve the checkout alias once, retaining all internal lexical components.
-        anchor = next((p for p in reversed(path.parents) if p.resolve() == root), None)
-        if anchor is None:
-            return "protected"
-        relative = path.relative_to(anchor)
-        # Lexical control ownership survives links that resolve outside the checkout.
-        if CONTROL_PARTS.intersection(p.lower() for p in relative.parts):
-            return "control"
-        lexical = root / relative
-        actual = lexical.resolve(strict=False)
-        relatives = (relative, actual.relative_to(root))
-        # An ordinary lexical alias cannot hide a resolved control-store target.
-        if CONTROL_PARTS.intersection(p.lower() for p in relatives[1].parts):
-            return "control"
-        # A protected lexical role cannot be erased by an internal symlink or traversal.
-        for rel in relatives:
-            parts = [part.lower() for part in rel.parts]
-            if (
-                ".." in parts
-                or PROTECTED_PARTS.intersection(parts)
-                or any(
-                    part in {"agents.md", "claude.md", "skill.md", "context.md"} for part in parts
-                )
-                or any(part.startswith(("requirements", "constraints")) for part in parts)
-                or rel.name.lower() in DEPENDENCY_NAMES
-                or tuple(parts[:2]) in {("docs", "runtime"), ("docs", "framework")}
-                or parts == ["docs", "readme.md"]
-            ):
-                return "protected"
-        # Reject internal links and platform aliases whose write identity is ambiguous.
-        entries = [
-            root.joinpath(*relative.parts[: index + 1]) for index in range(len(relative.parts))
-        ]
-        if any(entry.is_symlink() or entry.is_junction() for entry in entries) or any(
-            part.endswith((".", " "))
-            or ":" in part
-            or "\\" in part
-            or re.fullmatch(r"(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?", part.lower())
-            for part in relative.parts
-        ):
-            return "protected"
-        # Existing files must have one identity and no executable behavior.
-        if actual.exists():
-            info = actual.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o111:
-                return "protected"
-        # Markdown prose and explicit note directories establish a narrow known role.
-        if actual.suffix.lower() == ".md" or (
-            actual.suffix.lower() == ".txt" and relative.parts[0].lower() in {"notes", "docs"}
-        ):
-            return "note"
-    # Escapes, dangling aliases and inaccessible paths cannot prove a note identity.
-    except (OSError, ValueError, RuntimeError, core.WorkspaceError):
+        return core.repository(cwd)
+    except core.WorkspaceError:
+        # Only an existing directory that Git places in no work tree has no project code.
+        try:
+            core.git(cwd, "rev-parse", "--is-inside-work-tree")
+        except core.WorkspaceError:
+            if Path(cwd).is_dir():
+                return None
+        raise
+
+
+def target_role(cwd: str, value: object, roots: list[Path]) -> str:
+    """Classify one edit target by whether it lies inside a project code repository.
+
+    Args:
+        cwd: Native session working directory that relative targets are joined to.
+        value: Native target path.
+        roots: The session repository's worktree roots.
+
+    Returns:
+        ``external`` outside every root, ``control`` for a control-store path inside a
+        root, and ``protected`` for any other in-root path or an unresolvable target.
+    """
+    # Malformed targets cannot be located and stay readiness-gated.
+    if not isinstance(value, str) or not value or "\x00" in value:
         return "protected"
-    return "protected"
+    try:
+        # Root identities match every alias spelling of a worktree directory.
+        identities = set()
+        for root in roots:
+            try:
+                info = root.stat()
+            except OSError:
+                continue
+            identities.add((info.st_dev, info.st_ino))
+        # Compare the lexical and link-resolved spellings so neither alias hides a root.
+        absolute = Path(cwd, value)
+        spellings = (Path(os.path.normpath(absolute)), absolute.resolve(strict=False))
+        inside = False
+        for spelling in spellings:
+            # The deepest existing ancestor that is a root owns the target.
+            for ancestor in (spelling, *spelling.parents):
+                try:
+                    info = ancestor.stat()
+                except OSError:
+                    continue
+                if (info.st_dev, info.st_ino) not in identities:
+                    continue
+                inside = True
+                # Control-store names below the root keep their own denial in either spelling.
+                below = spelling.relative_to(ancestor).parts
+                if CONTROL_PARTS.intersection(part.lower() for part in below):
+                    return "control"
+                break
+    # An unresolvable target cannot be proven external.
+    except (OSError, ValueError, RuntimeError):
+        return "protected"
+    return "protected" if inside else "external"
 
 
 def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
@@ -495,12 +441,13 @@ def task_free(
     if tool == "Bash":
         # Native adapters supply a canonical command after validating their transport metadata.
         return set(args) == {"command"} and read_command(args.get("command"), host)
+    # Edits are free only when every target lies outside the project code repositories.
     selected = edit_roles(event) if roles is None else roles
-    return bool(selected) and all(role == "note" for role in selected)
+    return bool(selected) and all(role == "external" for role in selected)
 
 
 def edit_roles(event: core.JSONObject) -> list[str]:
-    """Resolve checkout identity once for all deterministic native edit targets.
+    """Classify every deterministic native edit target against the project repositories.
 
     Args:
         event: Validated native tool and argument envelope.
@@ -509,13 +456,16 @@ def edit_roles(event: core.JSONObject) -> list[str]:
         Every target role, or an empty list for an unknown edit shape.
 
     Raises:
-        core.WorkspaceError: If checkout identity cannot be established.
-        OSError: If checkout identity cannot be read.
+        core.WorkspaceError: If the session repository is bare or inconsistent.
+        OSError: If Git or a repository root cannot be read.
     """
     # Unknown edits remain readiness-gated without guessing their targets.
     targets = edit_targets(event["tool_name"], event["tool_input"])
     if not targets:
         return []
-    # One canonical checkout identity covers the whole patch or single-file mutation.
-    root = core.repository(event["cwd"])[0].resolve(strict=True)
-    return [target_role(event["cwd"], target, root) for target in targets]
+    # A session outside every repository has no project code to protect.
+    repository = project_repository(event["cwd"])
+    if repository is None:
+        return ["external"] * len(targets)
+    # One worktree list covers the whole patch or single-file mutation.
+    return [target_role(event["cwd"], target, repository[2]) for target in targets]

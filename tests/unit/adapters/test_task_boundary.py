@@ -1,7 +1,6 @@
 """Verify finite effect contracts independently of lifecycle storage."""
 
 import shlex
-from pathlib import Path
 
 import pytest
 
@@ -203,43 +202,59 @@ def test_malformed_inputs_do_not_claim_a_free_effect() -> None:
     assert not boundary.read_command("cat '", "codex")
 
 
-def test_target_roles_use_a_proven_checkout_and_fail_closed(tmp_path, monkeypatch) -> None:
-    """Classify role names and uncertainty without repository discovery side effects.
+def test_target_roles_follow_the_project_repository_directory(tmp_path) -> None:
+    """Gate every in-repository target and free every target outside the repositories.
 
     Args:
-        tmp_path: Existing canonical target root.
-        monkeypatch: Replace only external Git checkout discovery.
+        tmp_path: Disposable parent holding a stand-in root and an external directory.
     """
-    # An already verified root lets each role decision remain a cheap local helper call.
-    root = tmp_path.resolve()
-    monkeypatch.setattr(boundary.core, "repository", lambda _cwd: (root, root, [root]))
-    assert boundary.target_role(str(root), "notes/research.md") == "note"
-    assert boundary.target_role(str(root), "src/research.md", root) == "protected"
-    assert (
-        boundary.target_role(str(root), "docs/runtime/contributor-workflow.md", root) == "protected"
-    )
-    assert boundary.target_role(str(root), "docs/framework/baseline.md", root) == "protected"
-    assert boundary.target_role(str(root), "docs/README.md", root) == "protected"
-    assert boundary.target_role(str(root), "docs/draft-review.md", root) == "note"
-    assert boundary.target_role(str(root), ".task/context/note.md", root) == "control"
-    assert boundary.target_role(str(root), "../outside.md", root) == "protected"
-    assert boundary.target_role(str(root), "CON.md", root) == "protected"
-    assert boundary.target_role(str(root), "note.md ", root) == "protected"
-    assert boundary.target_role(str(root), None, root) == "protected"
-    assert boundary.target_role(str(root), "unknown.txt", root) == "protected"
-    # Batch extraction resolves the checkout once and preserves every patch target role.
+    # Extension and purpose no longer matter inside a project code repository.
+    root = tmp_path / "repo"
+    root.mkdir()
+    roots = [root]
+    for target in ("notes/x.md", "README.md", "docs/draft.md", "src/x.py"):
+        assert boundary.target_role(str(root), target, roots) == "protected"
+    # Control-store paths keep their own role inside the repository.
+    for target in (".task/x", ".git/x", ".claude/x"):
+        assert boundary.target_role(str(root), target, roots) == "control"
+    # Absolute and traversing targets outside the repository are external.
+    assert boundary.target_role(str(root), str(tmp_path / "vault" / "x.md"), roots) == "external"
+    assert boundary.target_role(str(root), "../outside.md", roots) == "external"
+    # Malformed targets cannot be located and remain gated.
+    assert boundary.target_role(str(root), None, roots) == "protected"
+    assert boundary.target_role(str(root), "", roots) == "protected"
+
+
+def test_edit_roles_free_sessions_outside_repositories_and_keep_batch_roles(
+    tmp_path, monkeypatch
+) -> None:
+    """Classify every patch target and treat a non-repository session as all external.
+
+    Args:
+        tmp_path: Disposable non-Git directory standing in for the session root.
+        monkeypatch: Replace only Git repository discovery.
+    """
+    # A mixed patch keeps one role per target.
+    root = tmp_path / "repo"
+    root.mkdir()
     observed = {
         "cwd": str(root),
         "tool_name": "apply_patch",
         "tool_input": {
             "command": (
-                "*** Begin Patch\n*** Add File: note.md\n+prose\n"
+                f"*** Begin Patch\n*** Add File: {tmp_path / 'external.md'}\n+prose\n"
                 "*** Add File: src/app.py\n+source\n*** End Patch"
             )
         },
     }
-    assert boundary.edit_roles(observed) == ["note", "protected"]
+    monkeypatch.setattr(boundary, "project_repository", lambda _cwd: (root, root / ".git", [root]))
+    assert boundary.edit_roles(observed) == ["external", "protected"]
+    assert not boundary.task_free(observed, "codex", roles=["external", "protected"])
     assert boundary.edit_roles({"tool_name": "unknown", "tool_input": {}}) == []
+    # Without project roots every target, even one beside the session, is external.
+    monkeypatch.setattr(boundary, "project_repository", lambda _cwd: None)
+    assert boundary.edit_roles(observed) == ["external", "external"]
+    assert boundary.task_free(observed, "codex")
 
 
 def test_legacy_shell_reads_and_unverified_file_aliases_remain_gated() -> None:
@@ -254,64 +269,19 @@ def test_legacy_shell_reads_and_unverified_file_aliases_remain_gated() -> None:
     assert boundary.edit_targets("write_file", {"path": "note.md", "content": "prose"}) is None
 
 
-def test_control_roles_survive_external_and_internal_aliases(tmp_path, monkeypatch) -> None:
-    """Keep lexical controls unconditional and detect controls behind ordinary aliases.
+def test_control_alias_inside_the_repository_keeps_the_control_role(tmp_path) -> None:
+    """Detect a control store reached through an ordinary in-repository link.
 
     Args:
-        tmp_path: Proven checkout root.
-        monkeypatch: Supply resolved target identities without platform link requirements.
+        tmp_path: Disposable parent holding the stand-in repository.
     """
-    root = tmp_path.resolve()
-    resolve = Path.resolve
-    aliases = {
-        root / ".codex": root.parent / "external",
-        root / ".codex/config.md": root.parent / "external/config.md",
-        root / "notes": root / ".claude",
-        root / "notes/config.md": root / ".claude/config.md",
-    }
-    # Resolve only the observed aliases; checkout discovery retains its actual identity.
-    monkeypatch.setattr(
-        Path, "resolve", lambda path, **kwargs: aliases.get(path, resolve(path, **kwargs))
-    )
-    assert boundary.target_role(str(root), ".codex/config.md", root) == "control"
-    assert boundary.target_role(str(root), "notes/config.md", root) == "control"
+    from tests.platform_support import link_directory
 
-
-def test_checkout_anchor_stops_before_resolving_control_descendants(tmp_path, monkeypatch) -> None:
-    """Recognize lexical control ownership without inspecting a failing deeper alias.
-
-    Args:
-        tmp_path: Proven canonical checkout root.
-        monkeypatch: Inject the older runtime's loop-resolution failure.
-    """
-    root = tmp_path.resolve()
-    original_resolve = Path.resolve
-    attempted = []
-
-    def resolve(path, **kwargs):
-        """Record ancestor lookup and reject resolution inside the control directory.
-
-        Args:
-            path: Ancestor considered during checkout discovery.
-            **kwargs: Original pathlib resolution options.
-
-        Returns:
-            The actual resolved ancestor outside the control directory.
-
-        Raises:
-            RuntimeError: If discovery incorrectly resolves a control descendant.
-        """
-        # Model a symlink-loop failure without depending on the interpreter version.
-        attempted.append(path)
-        if path == root / ".codex":
-            raise RuntimeError("symlink loop")
-        return original_resolve(path, **kwargs)
-
-    # Discovery must stop at the checkout before consulting its deeper control alias.
-    monkeypatch.setattr(Path, "resolve", resolve)
-    assert boundary.target_role(str(root), ".codex/config.md", root) == "control"
-    assert root in attempted
-    assert root / ".codex" not in attempted
+    # The lexical spelling hides the control name; the resolved spelling exposes it.
+    root = tmp_path / "repo"
+    (root / ".task").mkdir(parents=True)
+    link_directory(root / "notes", root / ".task")
+    assert boundary.target_role(str(root), "notes/state.json", [root]) == "control"
 
 
 class ReadDirectory:
@@ -661,37 +631,6 @@ def test_existing_admission_does_not_reuse_another_hosts_start(admission_store) 
     tree[".task"][".bindings"][claude_key + ".lock"] = None
     state["participants"][claude_key] = {"generation": 1, "status": "ready", "pending": {}}
     assert common.existing_admission(observed, "claude-code") is None
-
-
-def test_note_identity_requires_regular_single_link_non_executable_metadata(
-    tmp_path, monkeypatch
-) -> None:
-    """Reject unknown, executable or shared file identities in the role classifier.
-
-    Args:
-        tmp_path: Proven root with external Git lookup omitted.
-        monkeypatch: Supply exact filesystem metadata at its external boundary.
-    """
-    import stat
-    from pathlib import Path
-    from types import SimpleNamespace
-
-    root = tmp_path.resolve()
-    assert boundary.target_role(str(root), str(root.parent / "outside.md"), root) == "protected"
-    # Metadata doubles isolate decisions; real aliases and hardlinks have integration controls.
-    monkeypatch.setattr(Path, "exists", lambda _path: True)
-    monkeypatch.setattr(
-        Path, "stat", lambda _path: SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_nlink=1)
-    )
-    assert boundary.target_role(str(root), "note.md", root) == "note"
-    monkeypatch.setattr(
-        Path, "stat", lambda _path: SimpleNamespace(st_mode=stat.S_IFREG | 0o700, st_nlink=1)
-    )
-    assert boundary.target_role(str(root), "note.md", root) == "protected"
-    monkeypatch.setattr(
-        Path, "resolve", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unavailable"))
-    )
-    assert boundary.target_role(str(root), "note.md", root) == "protected"
 
 
 def test_file_edit_shapes_enumerate_all_targets() -> None:
