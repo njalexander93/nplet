@@ -59,16 +59,126 @@ def test_cursor_same_checkout_shell_override_remains_task_free(checkout: Path) -
     Args:
         checkout: Unregistered checkout whose state must remain absent.
     """
-    # Both native spellings name the same foreground read effect.
+    # Native metadata does not change a proven read into protected work.
     subdirectory = checkout / "notes"
     subdirectory.mkdir()
     for args in (
         {"command": "pwd"},
         {"command": "pwd", "working_directory": str(checkout)},
         {"command": "pwd", "working_directory": str(subdirectory)},
+        {"command": "pwd", "cwd": "", "timeout": 30000},
+        {"command": "pwd", "cwd": str(checkout), "timeout": 30000},
+        {"command": "pwd", "cwd": str(subdirectory), "timeout": 30000},
+        {
+            "command": "git --no-pager -c core.fsmonitor=false status --short",
+            "cwd": "",
+            "timeout": 30000,
+        },
     ):
         assert cursor.handle(event(checkout, "cursor", "Shell", args)) == {"permission": "allow"}
         assert not (checkout / ".task").exists()
+
+
+@pytest.mark.parametrize("command", ["npm install package", "git rev-parse HEAD", "pwd && touch x"])
+def test_cursor_shell_metadata_requires_readiness(checkout: Path, command: str) -> None:
+    """Keep native timeout metadata from bypassing protected-work readiness.
+
+    Args:
+        checkout: Unregistered repository whose lifecycle storage must remain absent.
+        command: Mutation or command outside the existing finite read grammar.
+    """
+    # Use the same native metadata as the installed Cursor pwd callback.
+    observed = event(checkout, "cursor", "Shell", {"command": command, "cwd": "", "timeout": 30000})
+    response = cursor.handle(observed)
+    assert response["permission"] == "deny"
+    assert "REGISTRATION_REQUIRED" in str(response)
+    assert not (checkout / ".task").exists()
+    assert not (checkout / "node_modules").exists()
+    assert not (checkout / "x").exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "failure_type", "error_message"),
+    [
+        ("true", "timeout", "Timed out"),
+        ("exit 7", "error", "Command failed with exit code 7"),
+    ],
+)
+def test_cursor_read_metadata_preserves_existing_pending_work(
+    command: str, failure_type: str, error_message: str
+) -> None:
+    """Retain pending work and actionable recovery for untyped native Shell failures.
+
+    Args:
+        command: Protected Shell command whose original call must remain pending.
+        failure_type: Timeout or the observed nonzero-exit failure callback classification.
+        error_message: Native failure text, which supplies no typed terminal evidence.
+    """
+    # Establish actual ready Cursor state and a separate admitted implementation call.
+    case = Fixture()
+    case.setUp()
+    case.base["host"] = "cursor"
+    case.base["coordinator"] = core.participant_key(case.base)
+    try:
+        case.create()
+        protected = event(
+            case.root,
+            "cursor",
+            "Shell",
+            {"command": command, "cwd": "", "timeout": 30000},
+            call="protected",
+        )
+        protected.update(session_id="coordinator", conversation_id="coordinator")
+        # Valid transport cannot admit protected work before packet readiness.
+        unready = copy.deepcopy(case.state())
+        response = cursor.handle(protected)
+        assert response["permission"] == "deny"
+        assert "NOT_READY" in str(response)
+        assert case.state() == unready
+        case.ready()
+        assert cursor.handle(protected) == {"permission": "allow"}
+        before = copy.deepcopy(case.state())
+        pending = before["participants"][case.base["coordinator"]]["pending"]
+        assert cursor.cursor_children.call_token("protected") in pending
+        # A free read and its background result have no recorded lifecycle admission.
+        observed = event(
+            case.root,
+            "cursor",
+            "Shell",
+            {"command": "pwd", "cwd": "", "timeout": 30000},
+            call="free-read",
+        )
+        observed.update(session_id="coordinator", conversation_id="coordinator")
+        assert cursor.handle(observed) == {"permission": "allow"}
+        assert (
+            cursor.handle(
+                {
+                    **observed,
+                    "hook_event_name": "postToolUse",
+                    "tool_output": json.dumps({"backgroundTaskId": "read-background"}),
+                }
+            )
+            == {}
+        )
+        # Neither timeout nor textual exit status supplies typed terminal evidence.
+        uncertain = {
+            **protected,
+            "hook_event_name": "postToolUseFailure",
+            "error_message": error_message,
+            "failure_type": failure_type,
+            "is_interrupt": False,
+        }
+        response = cursor.handle(uncertain)
+        assert "HOST_UNSUPPORTED_ASYNC" in str(response)
+        assert "do not rerun" in str(response)
+        assert "original native terminal result" in str(response)
+        assert "independently verifying termination" in str(response)
+        assert "tool-complete" in str(response)
+        assert case.state() == before
+        assert not (case.root / "node_modules").exists()
+    # Fixture cleanup owns both registered repositories on assertion failure as well.
+    finally:
+        case.doCleanups()
 
 
 def test_cursor_shell_override_rejects_foreign_checkout_and_unknown_effect(
@@ -87,6 +197,14 @@ def test_cursor_shell_override_rejects_foreign_checkout_and_unknown_effect(
         checkout, "cursor", "Shell", {"command": "pwd", "working_directory": str(foreign)}
     )
     assert "REPOSITORY_MISMATCH" in str(cursor.handle(observed))
+    observed["tool_input"] = {
+        "command": "pwd",
+        "cwd": str(foreign),
+        "timeout": 30000,
+    }
+    response = cursor.handle(observed)
+    assert response["permission"] == "deny"
+    assert "REPOSITORY_MISMATCH" in str(response)
     # Same-checkout identity alone grants no task-free authority to an unknown command.
     observed["tool_input"] = {"command": "npm install package", "working_directory": str(checkout)}
     assert "REGISTRATION_REQUIRED" in str(cursor.handle(observed))

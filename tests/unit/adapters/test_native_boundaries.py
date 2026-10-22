@@ -949,7 +949,6 @@ def test_native_post_rejects_unproven_claude_bash_completion(
             {"tool_response": {"interrupted": False, "stdout": "ok", "stderr": ""}},
         ),
         ("cursor", "Read", {"tool_output": "file contents"}),
-        ("cursor", "Shell", {"tool_output": '{"exitCode":0}'}),
     ],
 )
 def test_native_post_settles_only_documented_synchronous_success(
@@ -1074,18 +1073,6 @@ def test_cursor_lifecycle_metadata_preserves_canonical_boundary(
     # Accepted metadata never turns an unrecognized command into lifecycle authority.
     monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: False)
     assert common.native_bootstrap(native, "cursor", ready=True) is False
-
-
-@pytest.mark.parametrize("metadata", [{"cwd": "", "timeout": 30000}, {"timeout": 30000}])
-def test_cursor_native_timeout_does_not_admit_ordinary_shell(metadata: dict[str, Any]) -> None:
-    """A timeout that can background execution remains outside generic Shell admission.
-
-    Args:
-        metadata: Observed or timeout-only native argument shape.
-    """
-    native = {**event(), "tool_input": {"command": "echo ok", **metadata}}
-    with pytest.raises(core.WorkspaceError, match="HOST_UNSUPPORTED_ASYNC"):
-        common.native_tool(native, "cursor")
 
 
 @pytest.mark.parametrize(

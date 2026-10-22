@@ -1275,16 +1275,19 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
 
 
 def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> None:
-    """Validate native Shell metadata for an independently authorized lifecycle command.
+    """Validate native Shell metadata without authorizing the command.
+
+    This validates transport fields only; timeout can background execution and
+    supplies no synchronous completion evidence.
 
     Args:
         event: Identity-validated Cursor event with its observed repository.
-        args: Native Shell input to an exact canonical lifecycle command.
+        args: Native Shell input whose command authority the caller checks separately.
 
     Raises:
         core.WorkspaceError: Fields, aliases, timeout or repository override are invalid.
     """
-    # Limit transport metadata without granting ordinary Shell or transaction authority.
+    # Metadata alone grants neither command authority nor lifecycle settlement.
     core.require(
         set(args) <= {"command", "working_directory", "cwd", "timeout"}
         and not {"working_directory", "cwd"} <= set(args),
@@ -1358,7 +1361,7 @@ CURSOR_SYNC_TOOLS = frozenset({"Read", "Write", "Edit", "Grep", "Delete"})
 
 
 def native_tool(event: core.JSONObject, host: str) -> str:
-    """Limit admission to tools whose synchronous completion can be correlated.
+    """Validate task-free inputs or tools with correlated synchronous completion.
 
     Args:
         event: Native envelope carrying the actual tool-use identifier.
@@ -1438,8 +1441,16 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             "HOST_UNSUPPORTED_ASYNC",
         )
         return tool
-    # Cursor Shell needs a bounded synchronous command.
+    # Parent Shell metadata grants neither readiness nor terminal completion evidence.
     if host == "cursor" and tool == "Shell":
+        if (
+            event.get("child") is not True
+            and set(args) <= {"command", "working_directory", "cwd", "timeout"}
+            and isinstance(args.get("command"), str)
+        ):
+            cursor_lifecycle_shell(event, args)
+            return tool
+        # Children and unsupported inputs retain their existing narrower contract.
         core.require(
             set(args) <= {"command", "working_directory"} and isinstance(args.get("command"), str),
             "HOST_UNSUPPORTED_ASYNC",
@@ -1487,7 +1498,7 @@ def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
     if host == "codex":
         return event
     tool = native_tool(event, host)
-    # Normalize only the foreground shell shape verified by the selected native host.
+    # Normalize validated shell effects; read metadata does not prove foreground completion.
     if (host, tool) in {("claude-code", "Bash"), ("cursor", "Shell")}:
         return {
             **event,
@@ -1562,6 +1573,9 @@ def native_pre(event: core.JSONObject, host: str) -> None:
 def native_post(event: core.JSONObject, host: str, failed: bool) -> None:
     """Settle only a documented synchronous result for the observed native tool ID.
 
+    Cursor Shell callbacks cannot prove termination. Their admitted work requires
+    independently verified explicit lifecycle recovery.
+
     Args:
         event: Identity-validated success or failure envelope.
         host: Explicit adapter identity.
@@ -1621,29 +1635,9 @@ def native_post(event: core.JSONObject, host: str, failed: bool) -> None:
             ),
             "HOST_UNSUPPORTED_ASYNC",
         )
-    # Cursor Shell completion must prove an exit code with no async marker.
+    # Cursor can report exitCode zero before a backgrounded process terminates.
     if host == "cursor" and tool == "Shell":
-        # A failure/timeout notification does not prove the spawned process terminated.
-        core.require(not failed, "HOST_UNSUPPORTED_ASYNC")
-        output = core.strict_json(event.get("tool_output", ""))
-        core.require(
-            isinstance(output, dict)
-            and type(output.get("exitCode")) is int
-            and not any(
-                key in output
-                for key in (
-                    "session_id",
-                    "sessionId",
-                    "task_id",
-                    "backgroundTaskId",
-                    "background",
-                    "run_in_background",
-                    "is_background",
-                    "async",
-                )
-            ),
-            "HOST_UNSUPPORTED_ASYNC",
-        )
+        raise core.WorkspaceError("HOST_UNSUPPORTED_ASYNC")
     # Success/failure hook events settle the supported synchronous file tools themselves.
     result = core.execute(
         {
@@ -1968,7 +1962,7 @@ def _recovery_route(code: str, host: str) -> str:
         host: Explicit adapter identity, which selects host-specific tool names.
 
     Returns:
-        One or two sentences naming the operation that can change the outcome.
+        Bounded guidance naming the next action and any retained uncertainty.
     """
     # Name the canonical command formatter once for every lifecycle route.
     command = "the exact lifecycle command from adapters.common.bootstrap_command"
@@ -2038,12 +2032,14 @@ def _recovery_route(code: str, host: str) -> str:
             "get_issue read to refresh a "
             f"roadmap-only packet; then read, acknowledge and ready, using {command}."
         )
-    # Background or asynchronous work must be re-issued in the foreground.
+    # Unsupported launch arguments and admitted completion uncertainty need different actions.
     if code in {"HOST_UNSUPPORTED_BACKGROUND", "HOST_UNSUPPORTED_ASYNC"}:
         return (
-            "No lifecycle operation changes this outcome. Re-issue the call in the "
-            "foreground, without background execution or isolation, so its completion can "
-            "be correlated."
+            "An execution denial needs supported foreground arguments without background "
+            "execution or isolation. For an admitted call still pending, do not rerun it; "
+            "inspect the original native terminal result. Only after independently verifying "
+            "termination, use explicit lifecycle tool-complete for the exact recorded tool_id "
+            "with completed: true. Otherwise retain pending work."
         )
     # A stale revision is resolved by rereading and reapplying the change.
     if code == "REVISION_CONFLICT":
@@ -2097,9 +2093,9 @@ def _recovery_route(code: str, host: str) -> str:
     if code == "PENDING_OPERATION":
         return (
             "Pending tool work or attached participants block this change; the binding is "
-            "unchanged. Let the pending tool calls complete so their completions settle "
-            "them, or have attached participants detach (an issue's coordinator moves only "
-            "after its other participants detach), then retry. To keep working meanwhile, "
+            "unchanged. Settle pending work through its supported completion or verified "
+            "recovery route, or have attached participants detach (an issue's coordinator moves "
+            "only after its other participants detach), then retry. To keep working meanwhile, "
             "submit `Task: <bound issue>` and repeat its ticket read."
         )
     # An unmanaged payload directory is imported only by explicit adoption.

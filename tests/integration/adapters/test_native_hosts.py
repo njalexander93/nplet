@@ -91,7 +91,7 @@ def native_event(host: NativeHost, case: Fixture, name: str, **fields: JsonValue
         "tool_input": (
             {"file_path": str(case.root / "src/protected.py"), "content": "protected"}
             if host == "claude"
-            else {"command": "true"}
+            else {"command": "true", "cwd": "", "timeout": 30000}
         ),
     }
     # Use Claude's session identifier and native Bash arguments.
@@ -620,6 +620,70 @@ def test_native_child_without_binding_cannot_inherit_root(native: NativeCase) ->
     assert case.state() == before
 
 
+@pytest.mark.parametrize("native", ["cursor"], indirect=True)
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_cursor_shell_exit_callback_retains_pending_work(
+    native: NativeCase, exit_code: int
+) -> None:
+    """Retain admitted Shell work despite a reported integer exit status.
+
+    Args:
+        native: Cursor fixture with real readiness and pending state.
+        exit_code: Reported callback status, which cannot establish process termination.
+    """
+    # Reproduce the admitted command shape from the premature native callback.
+    host, case = native
+    case.create()
+    case.ready()
+    observed = native_event(
+        host,
+        case,
+        "PreToolUse",
+        tool_input={"command": "sleep 2", "cwd": "", "timeout": 1000},
+    )
+    assert dispatch(host, observed) == {"permission": "allow"}
+    pending = case.state()["participants"][case.base["coordinator"]]["pending"]
+    assert set(pending) == {actual_tool_key(case)}
+    before = copy.deepcopy(case.state())
+    # Native success, integer exit status and duration still supply no terminal proof.
+    response = dispatch(
+        host,
+        {
+            **observed,
+            "hook_event_name": "postToolUse",
+            "tool_output": json.dumps({"output": "", "exitCode": exit_code}),
+            "duration": 1011.653,
+        },
+    )
+    assert "HOST_UNSUPPORTED_ASYNC" in str(response)
+    assert "independently verifying termination" in str(response)
+    assert case.state() == before
+    # The retained call blocks an otherwise valid binding change.
+    blocked = core.execute(
+        case.req(
+            "rebind",
+            new_issue_id="TEST-3",
+            issue_uuid="third",
+            evidence=case.evidence(),
+        )
+    )
+    assert blocked["code"] == "PENDING_OPERATION"
+    assert case.state() == before
+    assert not (case.root / ".task/TEST-3").exists()
+    # Model explicit recovery after independent verification; no process runs in this fixture.
+    case.call("tool-complete", tool_id=actual_tool_key(case), completed=True)
+    moved = core.execute(
+        case.req(
+            "rebind",
+            new_issue_id="TEST-3",
+            issue_uuid="third",
+            evidence=case.evidence(),
+        )
+    )
+    assert moved["ok"] is True
+    assert moved["issue_id"] == "TEST-3"
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -714,17 +778,30 @@ def test_native_synchronous_completion_settles_only_admitted_work(native: Native
     Raises:
         AssertionError: Valid completion leaves matching work pending or completes the issue.
     """
-    # Admit a supported native operation using real readiness and pending state.
+    # Admit a synchronous file operation using real readiness and pending state.
     host, case = native
     case.create()
     case.ready()
-    assert_decision(host, dispatch(host, native_event(host, case, "PreToolUse")), True)
+    inputs: JsonObject = {
+        "file_path": str(case.root / "src/protected.py"),
+        "content": "protected",
+    }
+    assert_decision(
+        host,
+        dispatch(
+            host, native_event(host, case, "PreToolUse", tool_name="Write", tool_input=inputs)
+        ),
+        True,
+    )
     # Use the documented native result representation for each host.
     fields: JsonObject = {"tool_response": {"content": "fixture file content"}}
-    # Cursor needs both generic and MCP-specific admission.
+    # Cursor file-tool completion carries a serialized output field.
     if host == "cursor":
-        fields = {"tool_output": json.dumps({"exitCode": 0, "stdout": "finished"})}
-    dispatch(host, native_event(host, case, "PostToolUse", **fields))
+        fields = {"tool_output": "fixture file content"}
+    dispatch(
+        host,
+        native_event(host, case, "PostToolUse", tool_name="Write", tool_input=inputs, **fields),
+    )
     # Tool completion retires only pending work, not the issue itself.
     state = case.state()
     assert state["participants"][case.base["coordinator"]]["pending"] == {}
