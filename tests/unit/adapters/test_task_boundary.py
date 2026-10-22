@@ -282,6 +282,10 @@ def test_control_alias_inside_the_repository_keeps_the_control_role(tmp_path) ->
     (root / ".task").mkdir(parents=True)
     link_directory(root / "notes", root / ".task")
     assert boundary.target_role(str(root), "notes/state.json", [root]) == "control"
+    # A control name aliasing the root itself still exposes the control name above it.
+    link_directory(root / ".codex", root)
+    assert boundary.target_role(str(root), ".codex/hooks.json", [root]) == "control"
+    assert boundary.target_role(str(root), ".codex/notes/x.md", [root]) == "control"
 
 
 class ReadDirectory:

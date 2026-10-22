@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 from nplet.lifecycle import task_workspace as core
@@ -92,11 +93,13 @@ def project_repository(cwd: str) -> tuple[Path, Path, list[Path]] | None:
 
     Returns:
         The ``core.repository`` worktree root, common Git directory and linked worktree
-        roots, or None when Git reports that ``cwd`` is inside no work tree.
+        roots, or None only when no ancestor of ``cwd`` has a ``.git`` entry and Git
+        reports that ``cwd`` is not in a repository.
 
     Raises:
-        core.WorkspaceError: If cwd is missing, its repository is bare, or the worktree list
-            is inconsistent.
+        core.WorkspaceError: If cwd is missing, its repository is bare, its worktree list
+            is inconsistent, or Git fails for any reason other than proven absence, such
+            as unreadable configuration or metadata.
         subprocess.SubprocessError: If Git metadata cannot be queried in time.
         OSError: If Git cannot be launched.
     """
@@ -104,12 +107,21 @@ def project_repository(cwd: str) -> tuple[Path, Path, list[Path]] | None:
     try:
         return core.repository(cwd)
     except core.WorkspaceError:
-        # Only an existing directory that Git places in no work tree has no project code.
-        try:
-            core.git(cwd, "rev-parse", "--is-inside-work-tree")
-        except core.WorkspaceError:
-            if Path(cwd).is_dir():
-                return None
+        # Any .git entry on the ancestor chain means discovery failed, not that Git is absent.
+        start = Path(cwd).absolute()
+        if any((ancestor / ".git").exists() for ancestor in (start, *start.parents)):
+            raise
+        # Only Git's own not-a-repository diagnosis proves absence; other failures stay errors.
+        probe = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--git-dir"],
+            env={**os.environ, "LC_ALL": "C"},
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if probe.returncode == 128 and "not a git repository" in probe.stderr:
+            return None
         raise
 
 
@@ -142,7 +154,7 @@ def target_role(cwd: str, value: object, roots: list[Path]) -> str:
         spellings = (Path(os.path.normpath(absolute)), absolute.resolve(strict=False))
         inside = False
         for spelling in spellings:
-            # The deepest existing ancestor that is a root owns the target.
+            # Control ownership accumulates across every ancestor that is a root identity.
             for ancestor in (spelling, *spelling.parents):
                 try:
                     info = ancestor.stat()
@@ -151,11 +163,10 @@ def target_role(cwd: str, value: object, roots: list[Path]) -> str:
                 if (info.st_dev, info.st_ino) not in identities:
                     continue
                 inside = True
-                # Control-store names below the root keep their own denial in either spelling.
+                # A control-store name below any matching root denies in either spelling.
                 below = spelling.relative_to(ancestor).parts
                 if CONTROL_PARTS.intersection(part.lower() for part in below):
                     return "control"
-                break
     # An unresolvable target cannot be proven external.
     except (OSError, ValueError, RuntimeError):
         return "protected"

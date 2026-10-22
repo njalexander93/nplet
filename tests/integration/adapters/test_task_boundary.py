@@ -247,6 +247,39 @@ def test_session_outside_any_repository_edits_without_a_gate(
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_failed_repository_discovery_is_not_absence(
+    checkout: Path, tmp_path: Path, host: str
+) -> None:
+    """Keep a repository with unreadable Git configuration readiness-gated.
+
+    Args:
+        checkout: Real checkout whose configuration is corrupted.
+        tmp_path: Disposable parent for a genuinely non-Git directory.
+        host: Native adapter.
+    """
+    adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
+    # A broken configuration makes every Git query fail without proving Git is absent.
+    (checkout / ".git/config").write_text("[broken\n")
+    with pytest.raises(core.WorkspaceError):
+        task_boundary.project_repository(str(checkout))
+    # The unbound in-repository edit is denied and leaves no target or task state.
+    target = checkout / "src/app.py"
+    observed = event(checkout, host, "Write", {"file_path": str(target), "content": "blocked"})
+    try:
+        response = adapter.handle(observed)
+    except core.WorkspaceError as error:
+        assert host == "codex"
+        response = codex.failure("PreToolUse", error.code)
+    assert not allowed(host, response)
+    assert not target.exists()
+    assert not (checkout / ".task").exists()
+    # A directory with no Git metadata on its ancestor chain is still proven external.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert task_boundary.project_repository(str(plain)) is None
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
 def test_native_package_mutation_denial_preserves_manifest_and_absent_task(
     checkout: Path, host: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,13 +340,14 @@ def test_real_aliases_follow_the_repository_directory(checkout: Path, tmp_path: 
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
-@pytest.mark.parametrize("layout", ["external-control", "internal-control-alias"])
+@pytest.mark.parametrize("layout", ["external-control", "internal-control-alias", "root-alias"])
 def test_ready_hosts_deny_control_aliases_without_changing_state(host: str, layout: str) -> None:
     """Deny raw control writes even after readiness and through directory aliases.
 
     Args:
         host: Native adapter whose process must emit a denial.
-        layout: Lexical external control link or ordinary alias to an internal control.
+        layout: Lexical external control link, ordinary alias to an internal control, or
+            control name aliasing the repository root.
     """
     # Use genuine ready state and unrelated admitted work to expose readiness fallthrough.
     case = Fixture()
@@ -332,13 +366,19 @@ def test_ready_hosts_deny_control_aliases_without_changing_state(host: str, layo
             for control in (".codex", ".claude", ".cursor", ".agents"):
                 link_directory(case.root / control, target)
                 paths.append(case.root / control / "config.md")
-        else:
+            sentinel = target / "config.md"
+        elif layout == "internal-control-alias":
             target = case.root / ".codex"
             target.mkdir()
             link_directory(case.root / "notes", target)
             paths = [case.root / "notes/config.md"]
+            sentinel = target / "config.md"
+        else:
+            target = case.root
+            link_directory(case.root / ".codex", target)
+            paths = [case.root / ".codex/hooks.json"]
+            sentinel = target / "hooks.json"
         # Preserve target contents and every existing task file before native admission.
-        sentinel = target / "config.md"
         sentinel.write_text("control sentinel")
         before = {
             str(p.relative_to(case.root)): p.read_bytes()
