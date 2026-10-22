@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -108,6 +109,34 @@ def test_repository_requires_nonbare_member_worktree(
         core.repository(root)
     # Confirm the rejected operation reports REPOSITORY_MISMATCH.
     assert captured.value.code == "REPOSITORY_MISMATCH"
+
+
+def test_project_repository_separates_present_absent_and_failed_discovery(
+    tmp_path: Path,
+) -> None:
+    """Return a repository, prove absence, or raise when Git metadata cannot be read.
+
+    Args:
+        tmp_path: Disposable parent for a real repository and a plain directory.
+    """
+    # A real repository resolves to its worktree root, common directory and members.
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    repository = core.project_repository(checkout)
+    assert repository is not None
+    root, common, trees = repository
+    assert root.resolve() == checkout.resolve()
+    assert common.resolve() == (checkout / ".git").resolve()
+    assert root in trees
+    # A directory without Git metadata on its ancestor chain is proven absent.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert core.project_repository(plain) is None
+    # Unreadable configuration is failed discovery, never absence.
+    (checkout / ".git/config").write_text("[broken\n")
+    with pytest.raises(core.WorkspaceError):
+        core.project_repository(checkout)
 
 
 class BindingDirectory:

@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from nplet.adapters import common, cursor_results, runner, task_boundary
+from nplet.adapters import common, cursor_results, runner
 from nplet.adapters import cursor_routing as routing
 from nplet.lifecycle import task_workspace as core
 
@@ -246,7 +246,7 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
         # An unregistered parent, or one outside every repository, has no store to route.
         if parent_call is None and (
             error.code == "REGISTRATION_REQUIRED"
-            or task_boundary.project_repository(observed["cwd"]) is None
+            or core.project_repository(observed["cwd"]) is None
         ):
             return observed
         raise

@@ -261,7 +261,7 @@ def test_failed_repository_discovery_is_not_absence(
     # A broken configuration makes every Git query fail without proving Git is absent.
     (checkout / ".git/config").write_text("[broken\n")
     with pytest.raises(core.WorkspaceError):
-        task_boundary.project_repository(str(checkout))
+        core.project_repository(str(checkout))
     # The unbound in-repository edit is denied and leaves no target or task state.
     target = checkout / "src/app.py"
     observed = event(checkout, host, "Write", {"file_path": str(target), "content": "blocked"})
@@ -276,7 +276,7 @@ def test_failed_repository_discovery_is_not_absence(
     # A directory with no Git metadata on its ancestor chain is still proven external.
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert task_boundary.project_repository(str(plain)) is None
+    assert core.project_repository(str(plain)) is None
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
@@ -321,7 +321,7 @@ def test_real_aliases_follow_the_repository_directory(checkout: Path, tmp_path: 
         checkout: Canonical Git checkout.
         tmp_path: Disposable parent for links and external directories.
     """
-    roots = core.repository(checkout)[2]
+    roots = task_boundary.root_identities(core.repository(checkout)[2])
     outside = tmp_path / "plain"
     outside.mkdir()
     # A link outside the repository that points into it is protected.
@@ -387,7 +387,7 @@ def test_ready_hosts_deny_control_aliases_without_changing_state(host: str, layo
         }
         # Exercise each native process, including Codex's exception-to-denial boundary.
         for index, path in enumerate(paths):
-            roots = core.repository(case.root)[2]
+            roots = task_boundary.root_identities(core.repository(case.root)[2])
             assert task_boundary.target_role(str(case.root), str(path), roots) == "control"
             observed = event(
                 case.root,
@@ -666,7 +666,7 @@ def test_same_free_input_changes_identity_before_completion(host: str) -> None:
         before = copy.deepcopy(case.state())
         external.rmdir()
         link_directory(external, case.root)
-        roots = core.repository(case.root)[2]
+        roots = task_boundary.root_identities(core.repository(case.root)[2])
         assert task_boundary.target_role(str(case.root), str(note), roots) == "protected"
         # The host returns exactly the original input; only the filesystem identity changed.
         completed = {

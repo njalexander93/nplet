@@ -299,12 +299,13 @@ def lookup_required(event: core.JSONObject, host: str) -> bool:
     if not isinstance(event.get("cwd"), str) or not isinstance(event.get("session_id"), str):
         return False
     # A session outside every repository has no store and so no ticket-first assignment.
-    repository = task_boundary.project_repository(event["cwd"])
+    repository = core.project_repository(event["cwd"])
     if repository is None:
         return False
+    root, _, _ = repository
     key = core.participant_key({"host": host, "session_id": event["session_id"]})
     # Inspect the root store without creating a ticket or binding.
-    with core.Directory.absolute(repository[0]) as directory:
+    with core.Directory.absolute(root) as directory:
         # A missing store means no ticket-first assignment is active.
         if not directory.exists(".task"):
             return False
@@ -379,7 +380,7 @@ def existing_admission(event: core.JSONObject, host: str) -> core.JSONObject | N
     # Translate native polling shape; storage and lock ownership remain inside the core.
     tool_id = native_token(event.get("tool_use_id"))
     # A session outside every repository has no store that could hold an admission.
-    if task_boundary.project_repository(event["cwd"]) is None:
+    if core.project_repository(event["cwd"]) is None:
         return None
     polling = event.get("tool_name") == "write_stdin"
     return core.existing_tool_request(
@@ -1214,6 +1215,22 @@ def native_token(value: object) -> str:
     return core.token(value)
 
 
+def project_root(path: str) -> Path | None:
+    """Select the worktree root of the project repository containing a directory.
+
+    Args:
+        path: Native working directory.
+
+    Returns:
+        The worktree root, or None when the directory is outside every repository.
+
+    Raises:
+        core.WorkspaceError: If repository discovery fails rather than proving absence.
+        OSError: If Git cannot be launched.
+    """
+    return None if (repository := core.project_repository(path)) is None else repository[0]
+
+
 def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
     """Validate native session and worktree identity without manufacturing either.
 
@@ -1255,9 +1272,7 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
         cwd = event.get("cwd", roots[0])
         core.require(isinstance(cwd, str), "REPOSITORY_MISMATCH")
         # The working directory and workspace share one repository, or both lie outside any.
-        found = [task_boundary.project_repository(path) for path in (cwd, roots[0])]
-        tops = [None if repository is None else repository[0] for repository in found]
-        core.require(tops[0] == tops[1], "REPOSITORY_MISMATCH")
+        core.require(project_root(cwd) == project_root(roots[0]), "REPOSITORY_MISMATCH")
     else:
         # A child cannot be keyed without the parent session it runs under.
         if child:

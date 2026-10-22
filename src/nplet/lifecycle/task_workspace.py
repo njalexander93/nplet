@@ -13,6 +13,7 @@ import argparse
 import base64
 import copy
 import json
+import os
 import re
 import subprocess
 import sys
@@ -414,6 +415,46 @@ def repository(path: str | Path) -> tuple[Path, Path, list[Path]]:
     ]
     require(root in trees, "REPOSITORY_MISMATCH")
     return root, common, trees
+
+
+def project_repository(path: str | Path) -> tuple[Path, Path, list[Path]] | None:
+    """Select the Git repository whose worktrees hold the project code, if one exists.
+
+    Args:
+        path: Native session working directory.
+
+    Returns:
+        Present: the ``repository`` worktree root, common Git directory and worktree roots.
+        Absent: None, only when no ancestor of ``path`` has a ``.git`` entry and Git reports
+        that ``path`` is not in a repository.
+
+    Raises:
+        WorkspaceError: Failed discovery: ``path`` is missing, its repository is bare, its
+            worktree list is inconsistent, or Git fails for any reason other than proven
+            absence, such as unreadable configuration or metadata.
+        subprocess.SubprocessError: If Git metadata cannot be queried in time.
+        OSError: If Git cannot be launched.
+    """
+    # The ordinary repository lookup succeeds for every directory inside a work tree.
+    try:
+        return repository(path)
+    except WorkspaceError:
+        # Any .git entry on the ancestor chain means discovery failed, not that Git is absent.
+        start = Path(path).absolute()
+        if any((ancestor / ".git").exists() for ancestor in (start, *start.parents)):
+            raise
+        # Only Git's own not-a-repository diagnosis proves absence; other failures stay errors.
+        probe = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-dir"],
+            env={**os.environ, "LC_ALL": "C"},
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if probe.returncode == 128 and "not a git repository" in probe.stderr:
+            return None
+        raise
 
 
 def fs_identity(path: str | Path) -> list[int]:

@@ -259,12 +259,13 @@ def startup_lookup_state(event: core.JSONObject, suffix: str) -> bool:
         Whether this session has the requested marker.
     """
     # A session outside every repository has no store and so no lookup marker.
-    repository = task_boundary.project_repository(event["cwd"])
+    repository = core.project_repository(event["cwd"])
     if repository is None:
         return False
+    root, _, _ = repository
     key = core.participant_key({"host": "codex", "session_id": event["session_id"]})
     # Inspect marker files through validated no-follow directory handles.
-    with core.Directory.absolute(repository[0]) as directory:
+    with core.Directory.absolute(root) as directory:
         # An absent task workspace cannot contain a pending lookup.
         if not directory.exists(".task"):
             # Let ordinary startup recovery handle the missing workspace.

@@ -211,7 +211,7 @@ def test_target_roles_follow_the_project_repository_directory(tmp_path) -> None:
     # Extension and purpose no longer matter inside a project code repository.
     root = tmp_path / "repo"
     root.mkdir()
-    roots = [root]
+    roots = boundary.root_identities([root])
     for target in ("notes/x.md", "README.md", "docs/draft.md", "src/x.py"):
         assert boundary.target_role(str(root), target, roots) == "protected"
     # Control-store paths keep their own role inside the repository.
@@ -247,12 +247,14 @@ def test_edit_roles_free_sessions_outside_repositories_and_keep_batch_roles(
             )
         },
     }
-    monkeypatch.setattr(boundary, "project_repository", lambda _cwd: (root, root / ".git", [root]))
+    monkeypatch.setattr(
+        boundary.core, "project_repository", lambda _cwd: (root, root / ".git", [root])
+    )
     assert boundary.edit_roles(observed) == ["external", "protected"]
     assert not boundary.task_free(observed, "codex", roles=["external", "protected"])
     assert boundary.edit_roles({"tool_name": "unknown", "tool_input": {}}) == []
     # Without project roots every target, even one beside the session, is external.
-    monkeypatch.setattr(boundary, "project_repository", lambda _cwd: None)
+    monkeypatch.setattr(boundary.core, "project_repository", lambda _cwd: None)
     assert boundary.edit_roles(observed) == ["external", "external"]
     assert boundary.task_free(observed, "codex")
 
@@ -281,11 +283,12 @@ def test_control_alias_inside_the_repository_keeps_the_control_role(tmp_path) ->
     root = tmp_path / "repo"
     (root / ".task").mkdir(parents=True)
     link_directory(root / "notes", root / ".task")
-    assert boundary.target_role(str(root), "notes/state.json", [root]) == "control"
+    identities = boundary.root_identities([root])
+    assert boundary.target_role(str(root), "notes/state.json", identities) == "control"
     # A control name aliasing the root itself still exposes the control name above it.
     link_directory(root / ".codex", root)
-    assert boundary.target_role(str(root), ".codex/hooks.json", [root]) == "control"
-    assert boundary.target_role(str(root), ".codex/notes/x.md", [root]) == "control"
+    assert boundary.target_role(str(root), ".codex/hooks.json", identities) == "control"
+    assert boundary.target_role(str(root), ".codex/notes/x.md", identities) == "control"
 
 
 class ReadDirectory:

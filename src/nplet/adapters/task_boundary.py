@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 from nplet.lifecycle import task_workspace as core
@@ -85,53 +85,53 @@ COMMENTS_QUERY = (
 )
 
 
-def project_repository(cwd: str) -> tuple[Path, Path, list[Path]] | None:
-    """Select the session's Git repository, whose worktrees hold the project code.
+def root_identities(roots: list[Path]) -> frozenset[tuple[int, int]]:
+    """Read the filesystem identities of the session repository's worktree roots.
 
     Args:
-        cwd: Native session working directory.
+        roots: The session repository's worktree roots.
 
     Returns:
-        The ``core.repository`` worktree root, common Git directory and linked worktree
-        roots, or None only when no ancestor of ``cwd`` has a ``.git`` entry and Git
-        reports that ``cwd`` is not in a repository.
-
-    Raises:
-        core.WorkspaceError: If cwd is missing, its repository is bare, its worktree list
-            is inconsistent, or Git fails for any reason other than proven absence, such
-            as unreadable configuration or metadata.
-        subprocess.SubprocessError: If Git metadata cannot be queried in time.
-        OSError: If Git cannot be launched.
+        The device/inode pair of every root that can be read; unreadable roots are skipped.
     """
-    # The ordinary repository lookup succeeds for every directory inside a work tree.
-    try:
-        return core.repository(cwd)
-    except core.WorkspaceError:
-        # Any .git entry on the ancestor chain means discovery failed, not that Git is absent.
-        start = Path(cwd).absolute()
-        if any((ancestor / ".git").exists() for ancestor in (start, *start.parents)):
-            raise
-        # Only Git's own not-a-repository diagnosis proves absence; other failures stay errors.
-        probe = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--git-dir"],
-            env={**os.environ, "LC_ALL": "C"},
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        if probe.returncode == 128 and "not a git repository" in probe.stderr:
-            return None
-        raise
+    # Root identities match every alias spelling of a worktree directory.
+    identities = set()
+    for root in roots:
+        try:
+            info = root.stat()
+        except OSError:
+            continue
+        identities.add((info.st_dev, info.st_ino))
+    return frozenset(identities)
 
 
-def target_role(cwd: str, value: object, roots: list[Path]) -> str:
+def matching_roots(spelling: Path, identities: frozenset[tuple[int, int]]) -> Iterator[Path]:
+    """Yield every ancestor of one target spelling that is a worktree root.
+
+    Args:
+        spelling: Absolute target path, checked first and then through each parent.
+        identities: Worktree root identities from ``root_identities``.
+
+    Yields:
+        Each matching ancestor, nearest first; unreadable ancestors are skipped.
+    """
+    # Every ancestor whose identity is a root anchors the spelling, not only the nearest.
+    for ancestor in (spelling, *spelling.parents):
+        try:
+            info = ancestor.stat()
+        except OSError:
+            continue
+        if (info.st_dev, info.st_ino) in identities:
+            yield ancestor
+
+
+def target_role(cwd: str, value: object, identities: frozenset[tuple[int, int]]) -> str:
     """Classify one edit target by whether it lies inside a project code repository.
 
     Args:
         cwd: Native session working directory that relative targets are joined to.
         value: Native target path.
-        roots: The session repository's worktree roots.
+        identities: Worktree root identities from ``root_identities``.
 
     Returns:
         ``external`` outside every root, ``control`` for a control-store path inside a
@@ -141,30 +141,16 @@ def target_role(cwd: str, value: object, roots: list[Path]) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         return "protected"
     try:
-        # Root identities match every alias spelling of a worktree directory.
-        identities = set()
-        for root in roots:
-            try:
-                info = root.stat()
-            except OSError:
-                continue
-            identities.add((info.st_dev, info.st_ino))
         # Compare the lexical and link-resolved spellings so neither alias hides a root.
         absolute = Path(cwd, value)
         spellings = (Path(os.path.normpath(absolute)), absolute.resolve(strict=False))
         inside = False
         for spelling in spellings:
             # Control ownership accumulates across every ancestor that is a root identity.
-            for ancestor in (spelling, *spelling.parents):
-                try:
-                    info = ancestor.stat()
-                except OSError:
-                    continue
-                if (info.st_dev, info.st_ino) not in identities:
-                    continue
+            for anchor in matching_roots(spelling, identities):
                 inside = True
                 # A control-store name below any matching root denies in either spelling.
-                below = spelling.relative_to(ancestor).parts
+                below = spelling.relative_to(anchor).parts
                 if CONTROL_PARTS.intersection(part.lower() for part in below):
                     return "control"
     # An unresolvable target cannot be proven external.
@@ -474,9 +460,9 @@ def edit_roles(event: core.JSONObject) -> list[str]:
     targets = edit_targets(event["tool_name"], event["tool_input"])
     if not targets:
         return []
-    # A session outside every repository has no project code to protect.
-    repository = project_repository(event["cwd"])
-    if repository is None:
-        return ["external"] * len(targets)
+    # A session outside every repository has no roots, so every well-formed target is external.
+    repository = core.project_repository(event["cwd"])
+    roots = [] if repository is None else repository[2]
     # One worktree list covers the whole patch or single-file mutation.
-    return [target_role(event["cwd"], target, repository[2]) for target in targets]
+    identities = root_identities(roots)
+    return [target_role(event["cwd"], target, identities) for target in targets]
