@@ -425,8 +425,9 @@ def project_repository(path: str | Path) -> tuple[Path, Path, list[Path]] | None
 
     Returns:
         Present: the ``repository`` worktree root, common Git directory and worktree roots.
-        Absent: None, only when no ancestor of ``path`` has a ``.git`` entry and Git reports
-        that ``path`` is not in a repository.
+        Absent: None, only when no ancestor of ``path``, in its lexical or link-resolved
+        spelling, has a ``.git`` entry (dangling links count) and Git reports that
+        ``path`` is not in a repository.
 
     Raises:
         WorkspaceError: Failed discovery: ``path`` is missing, its repository is bare, its
@@ -439,9 +440,14 @@ def project_repository(path: str | Path) -> tuple[Path, Path, list[Path]] | None
     try:
         return repository(path)
     except WorkspaceError:
-        # Any .git entry on the ancestor chain means discovery failed, not that Git is absent.
-        start = Path(path).absolute()
-        if any((ancestor / ".git").exists() for ancestor in (start, *start.parents)):
+        # Any .git entry, even a dangling link, on the lexical or resolved ancestor chain
+        # means discovery failed, not that Git is absent.
+        starts = (Path(path).absolute(), Path(path).resolve())
+        if any(
+            os.path.lexists(ancestor / ".git")
+            for start in starts
+            for ancestor in (start, *start.parents)
+        ):
             raise
         # Only Git's own not-a-repository diagnosis proves absence; other failures stay errors.
         probe = subprocess.run(

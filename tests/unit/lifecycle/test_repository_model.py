@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 
 from nplet.lifecycle import task_workspace as core
+from tests.platform_support import link_directory
 
 pytestmark = pytest.mark.unit
 
@@ -137,6 +139,17 @@ def test_project_repository_separates_present_absent_and_failed_discovery(
     (checkout / ".git/config").write_text("[broken\n")
     with pytest.raises(core.WorkspaceError):
         core.project_repository(checkout)
+    # A link into the broken checkout and a dangling .git link are failed discovery too.
+    alias = tmp_path / "alias"
+    link_directory(alias, checkout)
+    with pytest.raises(core.WorkspaceError):
+        core.project_repository(alias)
+    if os.name != "nt":
+        dangling = tmp_path / "dangling"
+        dangling.mkdir()
+        (dangling / ".git").symlink_to(tmp_path / "missing")
+        with pytest.raises(core.WorkspaceError):
+            core.project_repository(dangling)
 
 
 class BindingDirectory:
