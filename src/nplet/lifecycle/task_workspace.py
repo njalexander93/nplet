@@ -435,10 +435,11 @@ def project_repository(path: str | Path) -> tuple[Path, Path, list[Path]] | None
         ``path``, in its lexical or link-resolved spelling, has a ``.git`` entry.
 
     Raises:
-        WorkspaceError: Failed discovery: ``path`` is missing, its repository is bare, its
-            worktree list is inconsistent, a dangling ``.git`` link sits on its ancestor
-            chain, or Git fails for any reason other than proven absence, such as
-            unreadable configuration or metadata.
+        WorkspaceError: ``REPOSITORY_MISMATCH`` for failed discovery: ``path`` is missing,
+            its repository is bare, its worktree list is inconsistent, an unusable ``.git``
+            entry sits on its ancestor chain, or Git fails for any reason other than proven
+            absence, such as unreadable configuration or metadata. ``REPOSITORY_ABSENT``
+            is never raised here; it is returned as None.
         subprocess.SubprocessError: If Git metadata cannot be queried in time.
         OSError: If Git cannot be launched.
     """
@@ -449,14 +450,14 @@ def project_repository(path: str | Path) -> tuple[Path, Path, list[Path]] | None
         if error.code != "REPOSITORY_ABSENT":
             raise
         # Any .git entry, even a dangling link, on the lexical or resolved ancestor chain
-        # means discovery failed, not that Git is absent.
+        # is Git metadata Git cannot use: failed discovery, never absence.
         starts = (Path(path).absolute(), Path(path).resolve())
         if any(
             os.path.lexists(ancestor / ".git")
             for start in starts
             for ancestor in (start, *start.parents)
         ):
-            raise
+            raise WorkspaceError("REPOSITORY_MISMATCH") from error
         return None
 
 

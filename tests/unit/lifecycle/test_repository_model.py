@@ -154,18 +154,20 @@ def test_project_repository_separates_present_absent_and_failed_discovery(
     link_directory(alias, checkout)
     with pytest.raises(core.WorkspaceError):
         core.project_repository(alias)
-    # An empty .git directory makes Git report absence while the entry still exists.
+    # An empty .git directory makes Git report absence while the entry still exists,
+    # which is failed discovery under the mismatch code, never the absence code.
     hollow = tmp_path / "hollow"
     (hollow / ".git").mkdir(parents=True)
     with pytest.raises(core.WorkspaceError) as captured:
         core.project_repository(hollow)
-    assert captured.value.code == "REPOSITORY_ABSENT"
+    assert captured.value.code == "REPOSITORY_MISMATCH"
     if os.name != "nt":
         dangling = tmp_path / "dangling"
         dangling.mkdir()
         (dangling / ".git").symlink_to(tmp_path / "missing")
-        with pytest.raises(core.WorkspaceError):
+        with pytest.raises(core.WorkspaceError) as dangled:
             core.project_repository(dangling)
+        assert dangled.value.code == "REPOSITORY_MISMATCH"
 
 
 class BindingDirectory:
