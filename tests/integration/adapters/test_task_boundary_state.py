@@ -12,12 +12,7 @@ import pytest
 from nplet.adapters import claude, codex, common, cursor, task_boundary
 from nplet.lifecycle import task_workspace as core
 from tests.integration.adapters.native_events import event
-from tests.integration.adapters.task_boundary_support import (
-    allowed,
-)
-from tests.integration.adapters.task_boundary_support import (
-    checkout as checkout,
-)
+from tests.integration.adapters.task_boundary_support import allowed
 from tests.platform_support import link_directory
 from tests.support import Fixture
 
@@ -202,7 +197,7 @@ def test_same_free_input_changes_identity_before_completion(host: str) -> None:
         before = copy.deepcopy(case.state())
         external.rmdir()
         link_directory(external, case.root)
-        roots = task_boundary.root_anchors(core.repository(case.root)[2])
+        roots = task_boundary.root_test(core.repository(case.root)[2])
         assert task_boundary.target_role(str(case.root), str(note), roots) == "protected"
         # The host returns exactly the original input; only the filesystem identity changed.
         completed = {

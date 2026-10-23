@@ -374,20 +374,26 @@ def git(path: str | Path, *args: str) -> str:
         Stripped UTF-8 command output.
 
     Raises:
-        WorkspaceError: If Git returns a nonzero status.
+        WorkspaceError: ``REPOSITORY_ABSENT`` when Git reports that ``path`` is not in a
+            repository, or ``REPOSITORY_MISMATCH`` for any other nonzero status.
         subprocess.SubprocessError: If Git exceeds the timeout.
         OSError: If Git cannot be launched.
     """
-    # Query Git with separate arguments and a bounded runtime.
+    # Query Git with separate arguments, English diagnostics and a bounded runtime.
     result = subprocess.run(
         ["git", "-C", str(path), *args],
+        env={**os.environ, "LC_ALL": "C"},
         capture_output=True,
         text=True,
         encoding="utf-8",
         timeout=2,
         check=False,
     )
-    require(result.returncode == 0, "REPOSITORY_MISMATCH")
+    # Only Git's own not-a-repository diagnosis proves absence; other failures mismatch.
+    if result.returncode != 0:
+        if "not a git repository" in result.stderr:
+            raise WorkspaceError("REPOSITORY_ABSENT")
+        raise WorkspaceError("REPOSITORY_MISMATCH")
     return result.stdout.strip()
 
 
@@ -425,21 +431,23 @@ def project_repository(path: str | Path) -> tuple[Path, Path, list[Path]] | None
 
     Returns:
         Present: the ``repository`` worktree root, common Git directory and worktree roots.
-        Absent: None, only when no ancestor of ``path``, in its lexical or link-resolved
-        spelling, has a ``.git`` entry (dangling links count) and Git reports that
-        ``path`` is not in a repository.
+        Absent: None, only when Git reports ``REPOSITORY_ABSENT`` and no ancestor of
+        ``path``, in its lexical or link-resolved spelling, has a ``.git`` entry.
 
     Raises:
         WorkspaceError: Failed discovery: ``path`` is missing, its repository is bare, its
-            worktree list is inconsistent, or Git fails for any reason other than proven
-            absence, such as unreadable configuration or metadata.
+            worktree list is inconsistent, a dangling ``.git`` link sits on its ancestor
+            chain, or Git fails for any reason other than proven absence, such as
+            unreadable configuration or metadata.
         subprocess.SubprocessError: If Git metadata cannot be queried in time.
         OSError: If Git cannot be launched.
     """
     # The ordinary repository lookup succeeds for every directory inside a work tree.
     try:
         return repository(path)
-    except WorkspaceError:
+    except WorkspaceError as error:
+        if error.code != "REPOSITORY_ABSENT":
+            raise
         # Any .git entry, even a dangling link, on the lexical or resolved ancestor chain
         # means discovery failed, not that Git is absent.
         starts = (Path(path).absolute(), Path(path).resolve())
@@ -449,18 +457,7 @@ def project_repository(path: str | Path) -> tuple[Path, Path, list[Path]] | None
             for ancestor in (start, *start.parents)
         ):
             raise
-        # Only Git's own not-a-repository diagnosis proves absence; other failures stay errors.
-        probe = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--git-dir"],
-            env={**os.environ, "LC_ALL": "C"},
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        if probe.returncode == 128 and "not a git repository" in probe.stderr:
-            return None
-        raise
+        return None
 
 
 def fs_identity(path: str | Path) -> list[int]:

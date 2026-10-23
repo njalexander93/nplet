@@ -2080,6 +2080,12 @@ def _recovery_route(code: str, host: str) -> str:
             "(the old issue is preserved), or run an explicit rebind to a target that "
             f"already assigns this session, using {command}."
         )
+    # A working directory outside every repository has no protected checkout.
+    if code == "REPOSITORY_ABSENT":
+        return (
+            "This working directory is inside no Git repository. File edits here are "
+            "task-free; protected shell and lifecycle tools need a repository checkout."
+        )
     # Lifecycle requests must name the registered checkout.
     if code == "REPOSITORY_MISMATCH":
         return (

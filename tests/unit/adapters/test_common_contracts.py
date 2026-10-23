@@ -13,6 +13,7 @@ import pytest
 
 from nplet.adapters import common
 from nplet.lifecycle import task_workspace as core
+from tests.unit.adapters.native_event_support import native_event
 
 pytestmark = pytest.mark.unit
 
@@ -119,19 +120,6 @@ def test_native_identity_keeps_rejecting_cursor_agent_id(tmp_path: Path) -> None
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_identity(event, "cursor")
     assert captured.value.code == "HOST_UNSUPPORTED_CHILD_IDENTITY"
-
-
-def native_event(tool: str, args: dict[str, object] | None = None) -> dict[str, object]:
-    """Build one native tool event for the shared adapter contract.
-
-    Args:
-        tool: Native tool name presented to the adapter.
-        args: Arguments supplied to the helper under test.
-
-    Returns:
-        The host tool event with a stable call ID.
-    """
-    return {"tool_use_id": "tool-1", "tool_name": tool, "tool_input": {} if args is None else args}
 
 
 @pytest.mark.parametrize(
@@ -419,6 +407,7 @@ def test_recovery_message_preserves_exact_diagnostic_without_task_content() -> N
                 ("REVISION_CONFLICT", ["Read the current revision", "reapply"]),
                 ("BINDING_CONFLICT", ["Continue the bound issue", "rebind"]),
                 ("REPOSITORY_MISMATCH", ["registered checkout"]),
+                ("REPOSITORY_ABSENT", ["inside no Git repository", "task-free"]),
                 ("PROVIDER_RESPONSE_INVALID", ["exact selected-ticket get_issue", "new native"]),
                 (
                     "ISSUE_MISMATCH",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from nplet.lifecycle import task_workspace as core
@@ -85,65 +85,75 @@ COMMENTS_QUERY = (
 )
 
 
-Anchors = tuple[frozenset[Path], frozenset[tuple[int, int]]]
+def _stat(path: Path) -> os.stat_result | None:
+    """Read one path's status without failing on an unreadable path.
+
+    Args:
+        path: Path to read, following links.
+
+    Returns:
+        The status, or None when the path cannot be read.
+    """
+    # An unreadable path only loses its identity, never its lexical protection.
+    try:
+        return path.stat()
+    except OSError:
+        return None
 
 
-def root_anchors(roots: list[Path]) -> Anchors:
-    """Collect the lexical paths and filesystem identities of the worktree roots.
+def root_test(roots: list[Path]) -> Callable[[Path], bool]:
+    """Build a predicate that recognizes a worktree root by path or filesystem identity.
 
     Args:
         roots: The session repository's worktree roots.
 
     Returns:
-        Every root's normalized lexical path, and the device/inode pair of every root
-        that can be read. An unreadable root keeps lexical protection without an identity.
+        A predicate that is true for a root's normalized lexical path, including a listed
+        root missing on disk, and for any alias spelling of a readable root.
     """
-    # Lexical paths protect every root, including a listed root missing on disk.
-    paths = frozenset(Path(os.path.normpath(root)) for root in roots)
-    # Identities additionally match every alias spelling of a readable root.
-    identities = set()
-    for root in roots:
-        try:
-            info = root.stat()
-        except OSError:
-            continue
-        identities.add((info.st_dev, info.st_ino))
-    return paths, frozenset(identities)
+    # Collect lexical paths and readable identities once per edit.
+    paths = {Path(os.path.normpath(root)) for root in roots}
+    identities = {(info.st_dev, info.st_ino) for root in roots if (info := _stat(root))}
+
+    def is_root(path: Path) -> bool:
+        """Report whether one path is a worktree root.
+
+        Args:
+            path: Absolute candidate path.
+
+        Returns:
+            Whether the path equals a root path or shares a readable root identity.
+        """
+        # A lexical match needs no filesystem read; otherwise compare identities.
+        if path in paths:
+            return True
+        info = _stat(path)
+        return info is not None and (info.st_dev, info.st_ino) in identities
+
+    return is_root
 
 
-def matching_roots(spelling: Path, anchors: Anchors) -> Iterator[Path]:
+def matching_roots(spelling: Path, is_root: Callable[[Path], bool]) -> Iterator[Path]:
     """Yield every ancestor of one target spelling that is a worktree root.
 
     Args:
         spelling: Absolute target path, checked first and then through each parent.
-        anchors: Worktree root paths and identities from ``root_anchors``.
+        is_root: Worktree root predicate from ``root_test``.
 
-    Yields:
-        Each ancestor equal to a root path or sharing a root identity, nearest first.
+    Returns:
+        Each ancestor that is a root, nearest first.
     """
-    # Every ancestor that anchors a root counts, not only the nearest.
-    paths, identities = anchors
-    for ancestor in (spelling, *spelling.parents):
-        # A lexical root match needs no filesystem read.
-        if ancestor in paths:
-            yield ancestor
-            continue
-        # An unreadable ancestor only skips the alias identity test.
-        try:
-            info = ancestor.stat()
-        except OSError:
-            continue
-        if (info.st_dev, info.st_ino) in identities:
-            yield ancestor
+    # Every ancestor that is a root counts, not only the nearest.
+    return filter(is_root, (spelling, *spelling.parents))
 
 
-def target_role(cwd: str, value: object, anchors: Anchors) -> str:
+def target_role(cwd: str, value: object, is_root: Callable[[Path], bool]) -> str:
     """Classify one edit target by whether it lies inside a project code repository.
 
     Args:
         cwd: Native session working directory that relative targets are joined to.
         value: Native target path.
-        anchors: Worktree root paths and identities from ``root_anchors``.
+        is_root: Worktree root predicate from ``root_test``.
 
     Returns:
         ``external`` outside every root, ``control`` for a control-store path inside a
@@ -159,7 +169,7 @@ def target_role(cwd: str, value: object, anchors: Anchors) -> str:
         inside = False
         for spelling in spellings:
             # Control ownership accumulates across every ancestor that anchors a root.
-            for anchor in matching_roots(spelling, anchors):
+            for anchor in matching_roots(spelling, is_root):
                 inside = True
                 # A control-store name below any matching root denies in either spelling.
                 below = spelling.relative_to(anchor).parts
@@ -476,5 +486,5 @@ def edit_roles(event: core.JSONObject) -> list[str]:
     repository = core.project_repository(event["cwd"])
     roots = [] if repository is None else repository[2]
     # One worktree list covers the whole patch or single-file mutation.
-    anchors = root_anchors(roots)
-    return [target_role(event["cwd"], target, anchors) for target in targets]
+    is_root = root_test(roots)
+    return [target_role(event["cwd"], target, is_root) for target in targets]

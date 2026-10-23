@@ -15,9 +15,6 @@ from tests.integration.adapters.task_boundary_support import (
     allowed,
     commit_and_link_worktree,
 )
-from tests.integration.adapters.task_boundary_support import (
-    checkout as checkout,
-)
 from tests.platform_support import link_directory
 from tests.support import Fixture
 
@@ -300,7 +297,7 @@ def test_real_aliases_follow_the_repository_directory(checkout: Path, tmp_path: 
         checkout: Canonical Git checkout.
         tmp_path: Disposable parent for links and external directories.
     """
-    roots = task_boundary.root_anchors(core.repository(checkout)[2])
+    roots = task_boundary.root_test(core.repository(checkout)[2])
     outside = tmp_path / "plain"
     outside.mkdir()
     # A link outside the repository that points into it is protected.
@@ -366,7 +363,7 @@ def test_ready_hosts_deny_control_aliases_without_changing_state(host: str, layo
         }
         # Exercise each native process, including Codex's exception-to-denial boundary.
         for index, path in enumerate(paths):
-            roots = task_boundary.root_anchors(core.repository(case.root)[2])
+            roots = task_boundary.root_test(core.repository(case.root)[2])
             assert task_boundary.target_role(str(case.root), str(path), roots) == "control"
             observed = event(
                 case.root,

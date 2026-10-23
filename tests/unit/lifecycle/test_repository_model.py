@@ -69,7 +69,9 @@ def test_git_rejects_failed_repository_query(
     monkeypatch.setattr(
         core.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=128, stdout="secret detail"),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=128, stdout="secret detail", stderr="fatal: secret detail"
+        ),
     )
     # Reject a failed Git query with a bounded repository diagnostic.
     with pytest.raises(core.WorkspaceError) as captured:
@@ -135,10 +137,15 @@ def test_project_repository_separates_present_absent_and_failed_discovery(
     plain = tmp_path / "plain"
     plain.mkdir()
     assert core.project_repository(plain) is None
+    # Git itself reports the plain directory as absent rather than mismatched.
+    with pytest.raises(core.WorkspaceError) as absent:
+        core.git(plain, "rev-parse", "--show-toplevel")
+    assert absent.value.code == "REPOSITORY_ABSENT"
     # Unreadable configuration is failed discovery, never absence.
     (checkout / ".git/config").write_text("[broken\n")
-    with pytest.raises(core.WorkspaceError):
+    with pytest.raises(core.WorkspaceError) as broken:
         core.project_repository(checkout)
+    assert broken.value.code == "REPOSITORY_MISMATCH"
     # A missing directory fails discovery: Git reports no not-a-repository diagnosis.
     with pytest.raises(core.WorkspaceError):
         core.project_repository(tmp_path / "missing")

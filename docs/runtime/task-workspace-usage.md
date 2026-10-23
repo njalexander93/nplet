@@ -102,7 +102,8 @@ lifecycle operation changes the outcome and name the admitted alternative.
 non-isolated re-issue. `REVISION_CONFLICT` asks for a reread and reapply.
 `BINDING_CONFLICT` names the bound issue, the Task-line switch, or an explicit
 `rebind` to a target that already assigns the session. `REPOSITORY_MISMATCH` names
-the registered checkout or worktree. `PROVIDER_RESPONSE_INVALID` and
+the registered checkout or worktree. `REPOSITORY_ABSENT` says the working directory
+is inside no Git repository; file edits there are task-free. `PROVIDER_RESPONSE_INVALID` and
 `ISSUE_MISMATCH` ask for the exact selected-ticket `get_issue` under a new native
 call; a repeated `ISSUE_MISMATCH` points to an issue-level `diagnose` of the local
 workspace recorded under another provider UUID. `NOT_OWNER` and `SCOPE_MISSING`
