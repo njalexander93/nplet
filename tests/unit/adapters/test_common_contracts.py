@@ -984,3 +984,18 @@ def test_shared_retry_never_starts_expired_work_or_extends_backoff(
         common.retry_on_contention(attempt, 0.01)
     attempt.assert_called_once()
     assert delays == [0.01]
+
+
+def test_non_repository_session_has_no_lookup_or_admission(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Treat a working directory outside every repository as having no lifecycle store.
+
+    Args:
+        monkeypatch: Replace only repository discovery with a proven absence.
+        tmp_path: Disposable non-Git working directory.
+    """
+    monkeypatch.setattr(core, "project_repository", lambda _path: None)
+    observed = {**native_event("Write"), "cwd": str(tmp_path), "session_id": "fresh"}
+    assert common.lookup_required(observed, "claude-code") is False
+    assert common.existing_admission(observed, "claude-code") is None

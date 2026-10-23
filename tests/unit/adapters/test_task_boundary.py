@@ -795,3 +795,27 @@ def test_child_handback_keeps_existing_readiness_requirement(monkeypatch) -> Non
     )
     assert common.native_pre(observed, "claude-code") is None
     assert calls == ["ready"]
+
+
+def test_unreadable_roots_are_skipped_and_unresolvable_targets_stay_protected(
+    tmp_path, monkeypatch
+) -> None:
+    """Skip a root that cannot be read and gate a target whose resolution fails.
+
+    Args:
+        tmp_path: Disposable parent holding one readable stand-in root.
+        monkeypatch: Replace only path resolution at its filesystem boundary.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    # A missing root contributes no identity; the readable root still counts.
+    assert boundary.root_identities([tmp_path / "missing", root]) == boundary.root_identities(
+        [root]
+    )
+    assert boundary.root_identities([tmp_path / "missing"]) == frozenset()
+    # A target that cannot be resolved cannot be proven external.
+    identities = boundary.root_identities([root])
+    monkeypatch.setattr(
+        boundary.Path, "resolve", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("gone"))
+    )
+    assert boundary.target_role(str(root), "notes/x.md", identities) == "protected"

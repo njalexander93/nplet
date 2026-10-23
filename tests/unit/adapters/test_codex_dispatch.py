@@ -1602,3 +1602,17 @@ def test_ticket_completion_normalizes_only_observed_native_success(
     # Provider output remains unchanged and cannot be treated as a mutable authority channel.
     assert response.get("isError") is explicit_error
     directory.put.assert_not_called()
+
+
+def test_startup_lookup_state_is_false_outside_every_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Report no lookup marker for a session whose working directory has no repository.
+
+    Args:
+        monkeypatch: Replace only repository discovery with a proven absence.
+        tmp_path: Disposable non-Git working directory.
+    """
+    monkeypatch.setattr(core, "project_repository", lambda _path: None)
+    observed = {"cwd": str(tmp_path), "session_id": "s"}
+    assert codex.startup_lookup_state(observed, ".lookup-required.json") is False

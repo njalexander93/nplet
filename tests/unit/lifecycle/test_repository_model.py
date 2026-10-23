@@ -139,6 +139,9 @@ def test_project_repository_separates_present_absent_and_failed_discovery(
     (checkout / ".git/config").write_text("[broken\n")
     with pytest.raises(core.WorkspaceError):
         core.project_repository(checkout)
+    # A missing directory fails discovery: Git reports no not-a-repository diagnosis.
+    with pytest.raises(core.WorkspaceError):
+        core.project_repository(tmp_path / "missing")
     # A link into the broken checkout and a dangling .git link are failed discovery too.
     alias = tmp_path / "alias"
     link_directory(alias, checkout)
