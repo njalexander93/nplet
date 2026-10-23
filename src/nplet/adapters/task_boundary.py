@@ -85,16 +85,22 @@ COMMENTS_QUERY = (
 )
 
 
-def root_identities(roots: list[Path]) -> frozenset[tuple[int, int]]:
-    """Read the filesystem identities of the session repository's worktree roots.
+Anchors = tuple[frozenset[Path], frozenset[tuple[int, int]]]
+
+
+def root_anchors(roots: list[Path]) -> Anchors:
+    """Collect the lexical paths and filesystem identities of the worktree roots.
 
     Args:
         roots: The session repository's worktree roots.
 
     Returns:
-        The device/inode pair of every root that can be read; unreadable roots are skipped.
+        Every root's normalized lexical path, and the device/inode pair of every root
+        that can be read. An unreadable root keeps lexical protection without an identity.
     """
-    # Root identities match every alias spelling of a worktree directory.
+    # Lexical paths protect every root, including a listed root missing on disk.
+    paths = frozenset(Path(os.path.normpath(root)) for root in roots)
+    # Identities additionally match every alias spelling of a readable root.
     identities = set()
     for root in roots:
         try:
@@ -102,21 +108,27 @@ def root_identities(roots: list[Path]) -> frozenset[tuple[int, int]]:
         except OSError:
             continue
         identities.add((info.st_dev, info.st_ino))
-    return frozenset(identities)
+    return paths, frozenset(identities)
 
 
-def matching_roots(spelling: Path, identities: frozenset[tuple[int, int]]) -> Iterator[Path]:
+def matching_roots(spelling: Path, anchors: Anchors) -> Iterator[Path]:
     """Yield every ancestor of one target spelling that is a worktree root.
 
     Args:
         spelling: Absolute target path, checked first and then through each parent.
-        identities: Worktree root identities from ``root_identities``.
+        anchors: Worktree root paths and identities from ``root_anchors``.
 
     Yields:
-        Each matching ancestor, nearest first; unreadable ancestors are skipped.
+        Each ancestor equal to a root path or sharing a root identity, nearest first.
     """
-    # Every ancestor whose identity is a root anchors the spelling, not only the nearest.
+    # Every ancestor that anchors a root counts, not only the nearest.
+    paths, identities = anchors
     for ancestor in (spelling, *spelling.parents):
+        # A lexical root match needs no filesystem read.
+        if ancestor in paths:
+            yield ancestor
+            continue
+        # An unreadable ancestor only skips the alias identity test.
         try:
             info = ancestor.stat()
         except OSError:
@@ -125,13 +137,13 @@ def matching_roots(spelling: Path, identities: frozenset[tuple[int, int]]) -> It
             yield ancestor
 
 
-def target_role(cwd: str, value: object, identities: frozenset[tuple[int, int]]) -> str:
+def target_role(cwd: str, value: object, anchors: Anchors) -> str:
     """Classify one edit target by whether it lies inside a project code repository.
 
     Args:
         cwd: Native session working directory that relative targets are joined to.
         value: Native target path.
-        identities: Worktree root identities from ``root_identities``.
+        anchors: Worktree root paths and identities from ``root_anchors``.
 
     Returns:
         ``external`` outside every root, ``control`` for a control-store path inside a
@@ -146,8 +158,8 @@ def target_role(cwd: str, value: object, identities: frozenset[tuple[int, int]])
         spellings = (Path(os.path.normpath(absolute)), absolute.resolve(strict=False))
         inside = False
         for spelling in spellings:
-            # Control ownership accumulates across every ancestor that is a root identity.
-            for anchor in matching_roots(spelling, identities):
+            # Control ownership accumulates across every ancestor that anchors a root.
+            for anchor in matching_roots(spelling, anchors):
                 inside = True
                 # A control-store name below any matching root denies in either spelling.
                 below = spelling.relative_to(anchor).parts
@@ -464,5 +476,5 @@ def edit_roles(event: core.JSONObject) -> list[str]:
     repository = core.project_repository(event["cwd"])
     roots = [] if repository is None else repository[2]
     # One worktree list covers the whole patch or single-file mutation.
-    identities = root_identities(roots)
-    return [target_role(event["cwd"], target, identities) for target in targets]
+    anchors = root_anchors(roots)
+    return [target_role(event["cwd"], target, anchors) for target in targets]

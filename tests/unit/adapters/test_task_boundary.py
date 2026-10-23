@@ -211,7 +211,7 @@ def test_target_roles_follow_the_project_repository_directory(tmp_path) -> None:
     # Extension and purpose no longer matter inside a project code repository.
     root = tmp_path / "repo"
     root.mkdir()
-    roots = boundary.root_identities([root])
+    roots = boundary.root_anchors([root])
     for target in ("notes/x.md", "README.md", "docs/draft.md", "src/x.py"):
         assert boundary.target_role(str(root), target, roots) == "protected"
     # Control-store paths keep their own role inside the repository.
@@ -283,12 +283,12 @@ def test_control_alias_inside_the_repository_keeps_the_control_role(tmp_path) ->
     root = tmp_path / "repo"
     (root / ".task").mkdir(parents=True)
     link_directory(root / "notes", root / ".task")
-    identities = boundary.root_identities([root])
-    assert boundary.target_role(str(root), "notes/state.json", identities) == "control"
+    anchors = boundary.root_anchors([root])
+    assert boundary.target_role(str(root), "notes/state.json", anchors) == "control"
     # A control name aliasing the root itself still exposes the control name above it.
     link_directory(root / ".codex", root)
-    assert boundary.target_role(str(root), ".codex/hooks.json", identities) == "control"
-    assert boundary.target_role(str(root), ".codex/notes/x.md", identities) == "control"
+    assert boundary.target_role(str(root), ".codex/hooks.json", anchors) == "control"
+    assert boundary.target_role(str(root), ".codex/notes/x.md", anchors) == "control"
 
 
 class ReadDirectory:
@@ -797,10 +797,10 @@ def test_child_handback_keeps_existing_readiness_requirement(monkeypatch) -> Non
     assert calls == ["ready"]
 
 
-def test_unreadable_roots_are_skipped_and_unresolvable_targets_stay_protected(
+def test_unreadable_roots_stay_lexically_protected_and_unresolvable_targets_stay_protected(
     tmp_path, monkeypatch
 ) -> None:
-    """Skip a root that cannot be read and gate a target whose resolution fails.
+    """Protect a root that cannot be read by its path and gate an unresolvable target.
 
     Args:
         tmp_path: Disposable parent holding one readable stand-in root.
@@ -808,14 +808,18 @@ def test_unreadable_roots_are_skipped_and_unresolvable_targets_stay_protected(
     """
     root = tmp_path / "repo"
     root.mkdir()
-    # A missing root contributes no identity; the readable root still counts.
-    assert boundary.root_identities([tmp_path / "missing", root]) == boundary.root_identities(
-        [root]
-    )
-    assert boundary.root_identities([tmp_path / "missing"]) == frozenset()
+    missing = tmp_path / "missing"
+    # A missing root keeps its lexical path; only the readable root has an identity.
+    paths, identities = boundary.root_anchors([missing, root])
+    assert paths == {missing, root}
+    assert identities == boundary.root_anchors([root])[1]
+    assert boundary.root_anchors([missing])[1] == frozenset()
+    # A target under the missing root path is still protected.
+    anchors = boundary.root_anchors([missing, root])
+    assert boundary.target_role(str(root), str(missing / "src/app.py"), anchors) == "protected"
     # A target that cannot be resolved cannot be proven external.
-    identities = boundary.root_identities([root])
+    anchors = boundary.root_anchors([root])
     monkeypatch.setattr(
         boundary.Path, "resolve", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("gone"))
     )
-    assert boundary.target_role(str(root), "notes/x.md", identities) == "protected"
+    assert boundary.target_role(str(root), "notes/x.md", anchors) == "protected"
