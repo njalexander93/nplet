@@ -906,3 +906,35 @@ def test_canonical_bootstrap_rejects_oversized_or_unparseable_command(
     assert (
         common.canonical_bootstrap(event, "not a lifecycle command", "codex", ready=False) is False
     )
+
+
+def test_bootstrap_worktree_must_match_the_session_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse a well-formed recovery command whose worktree is another repository.
+
+    Args:
+        monkeypatch: Supply the session repository and a different command worktree.
+    """
+    other = Path(Path.cwd().anchor) / "other"
+    # The session carries one repository; the command's worktree resolves to another.
+    monkeypatch.setattr(
+        common.core,
+        "project_repository",
+        lambda _path: common.core.Repository(CHECKOUT, CHECKOUT / ".git", [CHECKOUT]),
+    )
+    monkeypatch.setattr(
+        common.core,
+        "repository",
+        lambda _path: common.core.Repository(other, other / ".git", [other]),
+    )
+    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
+    command = common.bootstrap_command(base("diagnose"), "codex")
+    assert common.canonical_bootstrap(event, command, "codex", ready=False) is False
+
+
+def test_rebind_from_a_subagent_is_never_admitted() -> None:
+    """Keep a coordinator-scoped child from moving its parent's binding."""
+    request = rebind("TEST-1", "TEST-2")
+    # The child check precedes every store read, so no store double is needed.
+    assert common.rebind_admitted(request, {"child": True}, {"issue_id": "TEST-2"}) is False
