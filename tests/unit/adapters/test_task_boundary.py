@@ -257,6 +257,10 @@ def test_edit_roles_free_sessions_outside_repositories_and_keep_batch_roles(
     monkeypatch.setattr(boundary.core, "project_repository", lambda _cwd: None)
     assert boundary.edit_roles(observed) == ["external", "external"]
     assert boundary.task_free(observed, "codex")
+    # A caller-selected repository is used as given, without discovery.
+    monkeypatch.setattr(boundary.core, "project_repository", lambda _cwd: pytest.fail("probed"))
+    selected = (root, root / ".git", [root])
+    assert boundary.edit_roles(observed, selected) == ["external", "protected"]
 
 
 def test_legacy_shell_reads_and_unverified_file_aliases_remain_gated() -> None:

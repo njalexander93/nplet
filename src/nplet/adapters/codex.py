@@ -258,7 +258,8 @@ def startup_lookup_state(event: core.JSONObject, suffix: str) -> bool:
     Returns:
         Whether this session has the requested marker.
     """
-    # A session outside every repository has no store and so no lookup marker.
+    # Codex events carry no identity-time repository, so discover it here; a session
+    # outside every repository has no store and so no lookup marker.
     repository = core.project_repository(event["cwd"])
     if repository is None:
         return False
@@ -443,6 +444,9 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         core.WorkspaceError: If required binding or store validation fails.
         OSError: If the registered store cannot be accessed.
     """
+    # Codex payloads carry no identity-time repository; discard any such field so the
+    # shared helpers always discover the repository from the working directory.
+    event.pop("repository", None)
     # Select the event-specific host response and lifecycle action.
     name = event.get("hook_event_name")
     # Route native child UUIDs exclusively through their own participant and bounded tools.

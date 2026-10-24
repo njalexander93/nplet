@@ -14,6 +14,8 @@ from tests.integration.adapters.native_events import event
 from tests.integration.adapters.task_boundary_support import (
     allowed,
     commit_and_link_worktree,
+    pre_decision,
+    task_store_snapshot,
 )
 from tests.platform_support import link_directory
 from tests.support import Fixture
@@ -125,12 +127,7 @@ def test_fresh_reads_and_external_edits_leave_no_task_while_repository_edits_are
         observed = event(
             checkout, host, "Write", {"file_path": str(checkout / path), "content": "blocked"}
         )
-        try:
-            response = adapter.handle(observed)
-        except core.WorkspaceError as error:
-            assert host == "codex"
-            response = codex.failure("PreToolUse", error.code)
-        assert not allowed(host, response)
+        assert not allowed(host, pre_decision(host, observed))
         assert not (checkout / path).exists()
         assert not (checkout / ".task").exists()
 
@@ -143,17 +140,11 @@ def test_linked_worktrees_are_project_code_for_each_other(checkout: Path, host: 
         checkout: Real main checkout.
         host: Native adapter.
     """
-    adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
     linked = commit_and_link_worktree(checkout)
     # Either worktree is part of the session's repository, whichever one is the cwd.
     for cwd, target in ((checkout, linked / "notes/x.md"), (linked, checkout / "notes/x.md")):
         observed = event(cwd, host, "Write", {"file_path": str(target), "content": "blocked"})
-        try:
-            response = adapter.handle(observed)
-        except core.WorkspaceError as error:
-            assert host == "codex"
-            response = codex.failure("PreToolUse", error.code)
-        assert not allowed(host, response)
+        assert not allowed(host, pre_decision(host, observed))
         assert not target.exists()
     assert not (checkout / ".task").exists()
 
@@ -168,25 +159,19 @@ def test_linked_worktree_missing_on_disk_keeps_its_listed_path_protected(
         checkout: Real main checkout.
         host: Native adapter.
     """
-    adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
     # Renaming without pruning leaves Git listing a root that no longer exists on disk.
     linked = commit_and_link_worktree(checkout)
     os.rename(linked, linked.parent / "moved")
     # The unbound edit under the listed path is denied and leaves no target or task state.
     target = linked / "src/app.py"
     observed = event(checkout, host, "Write", {"file_path": str(target), "content": "blocked"})
-    try:
-        response = adapter.handle(observed)
-    except core.WorkspaceError as error:
-        assert host == "codex"
-        response = codex.failure("PreToolUse", error.code)
-    assert not allowed(host, response)
+    assert not allowed(host, pre_decision(host, observed))
     assert not target.exists()
     assert not (checkout / ".task").exists()
     # A plain external file beside the missing root is still admitted.
     external = linked.parent / "external.md"
     observed = event(checkout, host, "Write", {"file_path": str(external), "content": "prose"})
-    assert allowed(host, adapter.handle(observed))
+    assert allowed(host, pre_decision(host, observed))
     assert not (checkout / ".task").exists()
 
 
@@ -233,7 +218,6 @@ def test_failed_repository_discovery_is_not_absence(
         tmp_path: Disposable parent for a genuinely non-Git directory.
         host: Native adapter.
     """
-    adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
     # A broken configuration makes every Git query fail without proving Git is absent.
     (checkout / ".git/config").write_text("[broken\n")
     with pytest.raises(core.WorkspaceError):
@@ -241,12 +225,7 @@ def test_failed_repository_discovery_is_not_absence(
     # The unbound in-repository edit is denied and leaves no target or task state.
     target = checkout / "src/app.py"
     observed = event(checkout, host, "Write", {"file_path": str(target), "content": "blocked"})
-    try:
-        response = adapter.handle(observed)
-    except core.WorkspaceError as error:
-        assert host == "codex"
-        response = codex.failure("PreToolUse", error.code)
-    assert not allowed(host, response)
+    assert not allowed(host, pre_decision(host, observed))
     assert not target.exists()
     assert not (checkout / ".task").exists()
     # A directory with no Git metadata on its ancestor chain is still proven external.
@@ -356,11 +335,7 @@ def test_ready_hosts_deny_control_aliases_without_changing_state(host: str, layo
             sentinel = target / "hooks.json"
         # Preserve target contents and every existing task file before native admission.
         sentinel.write_text("control sentinel")
-        before = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
+        before = task_store_snapshot(case.root)
         # Exercise each native process, including Codex's exception-to-denial boundary.
         for index, path in enumerate(paths):
             roots = task_boundary.root_test(core.repository(case.root)[2])
@@ -385,11 +360,7 @@ def test_ready_hosts_deny_control_aliases_without_changing_state(host: str, layo
             assert "NOT_OWNER" in str(response)
             assert sentinel.read_text() == "control sentinel"
         # No denied call may append admission, revision or settlement state.
-        after = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
+        after = task_store_snapshot(case.root)
         assert after == before
     # Release both registered worktrees even when a native assertion fails.
     finally:

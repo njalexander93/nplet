@@ -219,7 +219,7 @@ def prompt(event: core.JSONObject, host: str) -> core.JSONObject:
     # Build the request from explicit caller or observed session identities.
     identifier = lines[0][6:]
     request = {"host": host, "session_id": event["session_id"]}
-    root, _, _ = core.repository(event["cwd"])
+    root = session_root(event)
     # Lock assignment storage before recording or comparing Task identity.
     with (
         core.Directory.absolute(root) as worktree,
@@ -299,7 +299,7 @@ def lookup_required(event: core.JSONObject, host: str) -> bool:
     if not isinstance(event.get("cwd"), str) or not isinstance(event.get("session_id"), str):
         return False
     # A session outside every repository has no store and so no ticket-first assignment.
-    repository = core.project_repository(event["cwd"])
+    repository = session_repository(event)
     if repository is None:
         return False
     root, _, _ = repository
@@ -337,7 +337,7 @@ def selected_lookup(event: core.JSONObject, host: str, complete: bool = False) -
     # No assignment means no reserved startup call.
     if not lookup_required(event, host):
         return False
-    root = core.repository(event["cwd"])[0]
+    root = session_root(event)
     key = core.participant_key({"host": host, "session_id": event["session_id"]})
     # Read the actual assignment without creating any directories or locks.
     with (
@@ -380,7 +380,7 @@ def existing_admission(event: core.JSONObject, host: str) -> core.JSONObject | N
     # Translate native polling shape; storage and lock ownership remain inside the core.
     tool_id = native_token(event.get("tool_use_id"))
     # A session outside every repository has no store that could hold an admission.
-    if core.project_repository(event["cwd"]) is None:
+    if session_repository(event) is None:
         return None
     polling = event.get("tool_name") == "write_stdin"
     return core.existing_tool_request(
@@ -574,8 +574,8 @@ def _preparation_path(event: core.JSONObject, value: object, exact: bool = False
     # Require an absolute textual path before consulting the checkout.
     if not isinstance(value, str) or not Path(value).is_absolute():
         return False
-    # Resolve the selected checkout root from the observed working directory.
-    root, _, _ = core.repository(event["cwd"])
+    # Select the session repository's worktree root.
+    root = session_root(event)
     # Compare lexically so neither ".." nor a symbolic link can redirect the read.
     for relative in PREPARATION_FILES:
         expected = root / relative
@@ -732,7 +732,7 @@ def native_ticket_lookup(
     if selected is None:
         return None
     token, arguments = selected
-    root, _, _ = core.repository(event["cwd"])
+    root = session_root(event)
     key = core.participant_key({"host": host, "session_id": event["session_id"]})
     # Lock the session assignment while admitting or settling one provider call.
     with (
@@ -904,7 +904,7 @@ def native_ticket_failed(event: core.JSONObject, host: str) -> None:
         if selected is None:
             raise core.WorkspaceError("BINDING_CONFLICT")
         token, arguments = selected
-    root, _, _ = core.repository(event["cwd"])
+    root = session_root(event)
     key = core.participant_key({"host": host, "session_id": event["session_id"]})
     # Remove only the matching native failure under the assignment lock.
     with core.Directory.absolute(root) as directory, directory.child(".task") as task:
@@ -1159,7 +1159,7 @@ def canonical_bootstrap(
         if request.get("session_id") != event["session_id"] or request.get("host", "codex") != host:
             return False
         # Require the bootstrap worktree to match the observed hook worktree.
-        if core.repository(request["worktree"])[0] != core.repository(event["cwd"])[0]:
+        if core.repository(request["worktree"])[0] != session_root(event):
             return False
         # Keep registration and pre-registration diagnostics free of arbitrary issue/tool fields.
         identity = {"schema_version", "operation", "request_id", "worktree", "host", "session_id"}
@@ -1176,7 +1176,7 @@ def canonical_bootstrap(
             return False
         # Require the bootstrap issue to match the session assignment stored in this worktree.
         with (
-            core.Directory.absolute(core.repository(event["cwd"])[0]) as root,
+            core.Directory.absolute(session_root(event)) as root,
             root.child(".task") as local,
         ):
             # Read the recorded assignment through the local binding directory.
@@ -1231,6 +1231,53 @@ def project_root(path: str) -> Path | None:
     return None if (repository := core.project_repository(path)) is None else repository[0]
 
 
+def session_repository(event: core.JSONObject) -> tuple[Path, Path, list[Path]] | None:
+    """Select this session's project repository, preferring the identity-time result.
+
+    Args:
+        event: Native event; Claude and Cursor events carry ``repository`` from
+            ``native_identity``, while Codex events select it from ``cwd``.
+
+    Returns:
+        The worktree root, common Git directory and worktree roots, or None when the
+        session lies outside every repository.
+
+    Raises:
+        core.WorkspaceError: If uncarried repository discovery fails rather than proving
+            absence.
+        OSError: If Git cannot be launched.
+    """
+    # Codex events never pass through native identity, so discover from the working directory.
+    if "repository" not in event:
+        return core.project_repository(event["cwd"])
+    # Convert the carried JSON-safe text back into paths.
+    carried = event["repository"]
+    if carried is None:
+        return None
+    return Path(carried["root"]), Path(carried["common"]), [Path(t) for t in carried["trees"]]
+
+
+def session_root(event: core.JSONObject) -> Path:
+    """Select the worktree root of this session's project repository.
+
+    Args:
+        event: Native event with a carried or discoverable repository.
+
+    Returns:
+        The session's worktree root.
+
+    Raises:
+        core.WorkspaceError: ``REPOSITORY_ABSENT`` when the session lies outside every
+            repository, or a discovery failure from ``session_repository``.
+        OSError: If Git cannot be launched.
+    """
+    # A session outside every repository has no root to open.
+    repository = session_repository(event)
+    if repository is None:
+        raise core.WorkspaceError("REPOSITORY_ABSENT")
+    return repository[0]
+
+
 def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
     """Validate native session and worktree identity without manufacturing either.
 
@@ -1239,13 +1286,16 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
         host: Either claude-code or cursor, selected by the entry point.
 
     Returns:
-        A normalized envelope retaining native tool IDs and inputs. A Claude subagent
+        A normalized envelope retaining native tool IDs and inputs, with ``repository``
+        holding the session's project repository as text (root, common Git directory
+        and worktree roots), or None outside every repository. A Claude subagent
         event is keyed by ``<session_id>/agent/<agent_id>``, marked ``child`` and keeps
         the raw parent session in ``parent_session_id``.
 
     Raises:
         core.WorkspaceError: If identity is absent, ambiguous, or belongs to an
-            unsupported child.
+            unsupported child, or repository discovery fails rather than proving absence.
+        OSError: If Git cannot be launched.
     """
     # Only Claude's documented agent_id marks a supported child; every other child,
     # remote or background marker has no supported binding here.
@@ -1271,8 +1321,13 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
             raise core.WorkspaceError("HOST_UNSUPPORTED_WORKSPACE")
         cwd = event.get("cwd", roots[0])
         core.require(isinstance(cwd, str), "REPOSITORY_MISMATCH")
-        # The working directory and workspace share one repository, or both lie outside any.
-        core.require(project_root(cwd) == project_root(roots[0]), "REPOSITORY_MISMATCH")
+        # Resolve the session repository once; the workspace root must share it, or both
+        # must lie outside every repository.
+        repository = core.project_repository(cwd)
+        core.require(
+            (None if repository is None else repository[0]) == project_root(roots[0]),
+            "REPOSITORY_MISMATCH",
+        )
     else:
         # A child cannot be keyed without the parent session it runs under.
         if child:
@@ -1291,7 +1346,20 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
             )
             normalized.update(child=True, parent_session_id=session)
             session = core.token(session + "/agent/" + agent)
-    normalized.update(session_id=session, cwd=cwd)
+        # Resolve the session repository once from the validated working directory.
+        repository = core.project_repository(str(cwd))
+    # Carry the repository as JSON-safe text so later phases never probe Git again.
+    normalized.update(
+        session_id=session,
+        cwd=cwd,
+        repository=None
+        if repository is None
+        else {
+            "root": str(repository[0]),
+            "common": str(repository[1]),
+            "trees": [str(tree) for tree in repository[2]],
+        },
+    )
     return normalized
 
 
@@ -1323,7 +1391,8 @@ def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> Non
         core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
         if key == "cwd" and directory == "":
             return
-        core.require(project_root(directory) == project_root(event["cwd"]), "REPOSITORY_MISMATCH")
+        session = None if (repository := session_repository(event)) is None else repository[0]
+        core.require(project_root(directory) == session, "REPOSITORY_MISMATCH")
 
 
 def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> bool:
@@ -1466,10 +1535,8 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         # A shell working-directory override shares the session's repository, or both
         # lie outside every repository.
         if "working_directory" in args:
-            core.require(
-                project_root(args["working_directory"]) == project_root(event["cwd"]),
-                "REPOSITORY_MISMATCH",
-            )
+            session = None if (repository := session_repository(event)) is None else repository[0]
+            core.require(project_root(args["working_directory"]) == session, "REPOSITORY_MISMATCH")
         return tool
     # A child may also hand its report back; every other host keeps its own set.
     supported = (
@@ -1541,13 +1608,19 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         return
     effect = native_effect(event, host)
     tool = event["tool_name"]
-    # Validated parent reads, planning and external edits need no task lifecycle admission.
+    # Select the provider operation and classify edit targets against the session
+    # repository; only an edit needs the repository.
     operation = (
         tool[4:]
         if host == "cursor" and tool.startswith("MCP:")
         else _linear_provider_tool(event, host)
     )
-    roles = task_boundary.edit_roles(event)
+    roles = (
+        task_boundary.edit_roles(event, session_repository(event))
+        if task_boundary.edit_targets(event["tool_name"], event["tool_input"])
+        else []
+    )
+    # Validated parent reads, planning and external edits need no task lifecycle admission.
     if (
         host == "claude-code"
         and tool
@@ -1716,7 +1789,7 @@ def record_agent_call(event: core.JSONObject, host: str) -> None:
         OSError: If the binding directory cannot be written.
     """
     # Resolve this checkout's binding directory under the shared assignment lock.
-    root, _, _ = core.repository(event["cwd"])
+    root = session_root(event)
     name = _agent_calls_name(event, host)
     with (
         core.Directory.absolute(root) as worktree,
@@ -1932,7 +2005,7 @@ def child_start(event: core.JSONObject, host: str) -> str:
     state = _issue_state(parent)
     pending = set(state["participants"][core.participant_key(parent)]["pending"])
     child_key = core.participant_key({"host": host, "session_id": event["session_id"]})
-    root, _, _ = core.repository(event["cwd"])
+    root = session_root(event)
     # Require a pending admitted Agent call, then record the child's issue assignment.
     with (
         core.Directory.absolute(root) as worktree,

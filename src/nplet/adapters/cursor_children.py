@@ -245,8 +245,7 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
     except core.WorkspaceError as error:
         # An unregistered parent, or one outside every repository, has no store to route.
         if parent_call is None and (
-            error.code == "REGISTRATION_REQUIRED"
-            or core.project_repository(observed["cwd"]) is None
+            error.code == "REGISTRATION_REQUIRED" or common.session_repository(observed) is None
         ):
             return observed
         raise

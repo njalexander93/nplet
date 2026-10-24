@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -115,59 +116,160 @@ def test_repository_requires_nonbare_member_worktree(
     assert captured.value.code == "REPOSITORY_MISMATCH"
 
 
-def test_project_repository_separates_present_absent_and_failed_discovery(
-    tmp_path: Path,
-) -> None:
-    """Return a repository, prove absence, or raise when Git metadata cannot be read.
+def present_layout(tmp_path: Path) -> Path:
+    """Initialize a real repository.
 
     Args:
-        tmp_path: Disposable parent for a real repository and a plain directory.
+        tmp_path: Disposable parent for the layout.
+
+    Returns:
+        The repository's worktree root.
     """
-    # A real repository resolves to its worktree root, common directory and members.
     checkout = tmp_path / "checkout"
-    checkout.mkdir()
     subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-    repository = core.project_repository(checkout)
-    assert repository is not None
-    root, common, trees = repository
-    assert root.resolve() == checkout.resolve()
-    assert common.resolve() == (checkout / ".git").resolve()
-    assert root in trees
-    # A directory without Git metadata on its ancestor chain is proven absent.
+    return checkout
+
+
+def plain_layout(tmp_path: Path) -> Path:
+    """Create a directory with no Git metadata on its ancestor chain.
+
+    Args:
+        tmp_path: Disposable parent for the layout.
+
+    Returns:
+        The plain directory.
+    """
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert core.project_repository(plain) is None
-    # Git itself reports the plain directory as absent rather than mismatched.
-    with pytest.raises(core.WorkspaceError) as absent:
-        core.git(plain, "rev-parse", "--show-toplevel")
-    assert absent.value.code == "REPOSITORY_ABSENT"
-    # Unreadable configuration is failed discovery, never absence.
+    return plain
+
+
+def broken_config_layout(tmp_path: Path) -> Path:
+    """Initialize a repository whose configuration Git cannot parse.
+
+    Args:
+        tmp_path: Disposable parent for the layout.
+
+    Returns:
+        The broken repository's worktree root.
+    """
+    checkout = present_layout(tmp_path)
     (checkout / ".git/config").write_text("[broken\n")
-    with pytest.raises(core.WorkspaceError) as broken:
-        core.project_repository(checkout)
-    assert broken.value.code == "REPOSITORY_MISMATCH"
-    # A missing directory fails discovery: Git reports no not-a-repository diagnosis.
-    with pytest.raises(core.WorkspaceError):
-        core.project_repository(tmp_path / "missing")
-    # A link into the broken checkout and a dangling .git link are failed discovery too.
+    return checkout
+
+
+def missing_layout(tmp_path: Path) -> Path:
+    """Name a directory that does not exist.
+
+    Args:
+        tmp_path: Disposable parent for the layout.
+
+    Returns:
+        The absent path.
+    """
+    return tmp_path / "missing"
+
+
+def alias_into_broken_layout(tmp_path: Path) -> Path:
+    """Link a directory alias into a repository with unreadable configuration.
+
+    Args:
+        tmp_path: Disposable parent for the layout.
+
+    Returns:
+        The alias path.
+    """
     alias = tmp_path / "alias"
-    link_directory(alias, checkout)
-    with pytest.raises(core.WorkspaceError):
-        core.project_repository(alias)
-    # An empty .git directory makes Git report absence while the entry still exists,
-    # which is failed discovery under the mismatch code, never the absence code.
+    # Skip rather than fail where the platform cannot create the directory link.
+    try:
+        link_directory(alias, broken_config_layout(tmp_path))
+    except (OSError, subprocess.CalledProcessError) as error:
+        pytest.skip(f"directory links unsupported: {error}")
+    return alias
+
+
+def hollow_git_layout(tmp_path: Path) -> Path:
+    """Create a directory whose ``.git`` entry is an empty directory.
+
+    Args:
+        tmp_path: Disposable parent for the layout.
+
+    Returns:
+        The directory holding the empty ``.git``.
+    """
     hollow = tmp_path / "hollow"
     (hollow / ".git").mkdir(parents=True)
-    with pytest.raises(core.WorkspaceError) as captured:
-        core.project_repository(hollow)
-    assert captured.value.code == "REPOSITORY_MISMATCH"
-    if os.name != "nt":
-        dangling = tmp_path / "dangling"
-        dangling.mkdir()
-        (dangling / ".git").symlink_to(tmp_path / "missing")
-        with pytest.raises(core.WorkspaceError) as dangled:
-            core.project_repository(dangling)
-        assert dangled.value.code == "REPOSITORY_MISMATCH"
+    return hollow
+
+
+def dangling_git_link_layout(tmp_path: Path) -> Path:
+    """Create a directory whose ``.git`` entry is a symbolic link to nothing.
+
+    Args:
+        tmp_path: Disposable parent for the layout.
+
+    Returns:
+        The directory holding the dangling link.
+    """
+    # Windows symbolic links need privileges this suite does not assume.
+    if os.name == "nt":
+        pytest.skip("symbolic links need extra privileges on Windows")
+    dangling = tmp_path / "dangling"
+    dangling.mkdir()
+    (dangling / ".git").symlink_to(tmp_path / "missing")
+    return dangling
+
+
+@pytest.mark.parametrize(
+    ("build", "expected"),
+    [
+        pytest.param(present_layout, "present", id="present"),
+        pytest.param(plain_layout, None, id="plain"),
+        pytest.param(broken_config_layout, "REPOSITORY_MISMATCH", id="broken_config"),
+        pytest.param(missing_layout, "REPOSITORY_MISMATCH", id="missing"),
+        pytest.param(alias_into_broken_layout, "REPOSITORY_MISMATCH", id="alias_into_broken"),
+        pytest.param(hollow_git_layout, "REPOSITORY_MISMATCH", id="hollow_git"),
+        pytest.param(dangling_git_link_layout, "REPOSITORY_MISMATCH", id="dangling_git_link"),
+    ],
+)
+def test_project_repository_separates_present_absent_and_failed_discovery(
+    tmp_path: Path, build: Callable[[Path], Path], expected: str | None
+) -> None:
+    """Return a repository, prove absence, or raise when Git metadata cannot be used.
+
+    Args:
+        tmp_path: Disposable parent for one freshly built layout.
+        build: Builder returning the directory to discover from.
+        expected: ``"present"``, None for proven absence, or the exact failure code.
+    """
+    path = build(tmp_path)
+    # A real repository resolves to its worktree root, common directory and members.
+    if expected == "present":
+        repository = core.project_repository(path)
+        assert repository is not None
+        root, common, trees = repository
+        assert root.resolve() == path.resolve()
+        assert common.resolve() == (path / ".git").resolve()
+        assert root in trees
+    # A directory without Git metadata on its ancestor chain is proven absent.
+    elif expected is None:
+        assert core.project_repository(path) is None
+    # Unusable metadata or a missing directory is failed discovery, never absence.
+    else:
+        with pytest.raises(core.WorkspaceError) as captured:
+            core.project_repository(path)
+        assert captured.value.code == expected
+
+
+def test_git_reports_a_plain_directory_as_absent(tmp_path: Path) -> None:
+    """Have Git itself report a plain directory as absent rather than mismatched.
+
+    Args:
+        tmp_path: Disposable parent for the plain directory.
+    """
+    with pytest.raises(core.WorkspaceError) as absent:
+        core.git(plain_layout(tmp_path), "rev-parse", "--show-toplevel")
+    assert absent.value.code == "REPOSITORY_ABSENT"
 
 
 class BindingDirectory:

@@ -12,7 +12,7 @@ import pytest
 from nplet.adapters import claude, codex, common, cursor, task_boundary
 from nplet.lifecycle import task_workspace as core
 from tests.integration.adapters.native_events import event
-from tests.integration.adapters.task_boundary_support import allowed
+from tests.integration.adapters.task_boundary_support import allowed, task_store_snapshot
 from tests.platform_support import link_directory
 from tests.support import Fixture
 
@@ -37,11 +37,7 @@ def test_pending_ticket_allows_unrelated_work_without_consuming_reservation(chec
         checkout, "codex", "mcp__codex_apps__linear__get_issue", {"id": "TEST-1"}, call="selected"
     )
     assert codex.handle(ticket) == {}
-    before = {
-        str(p.relative_to(checkout)): p.read_bytes()
-        for p in (checkout / ".task").rglob("*")
-        if p.is_file()
-    }
+    before = task_store_snapshot(checkout)
     # Another issue read and an administrative update cannot bind or settle the selected call.
     for tool, args in [
         ("mcp__codex_apps__linear__get_issue", {"id": "TEST-2"}),
@@ -56,11 +52,7 @@ def test_pending_ticket_allows_unrelated_work_without_consuming_reservation(chec
             )
             == {}
         )
-    after = {
-        str(p.relative_to(checkout)): p.read_bytes()
-        for p in (checkout / ".task").rglob("*")
-        if p.is_file()
-    }
+    after = task_store_snapshot(checkout)
     assert after == before
 
 
@@ -87,11 +79,7 @@ def test_pending_new_task_fences_codex_special_routes_without_state_changes(rout
                 "prompt": "Task: TEST-2",
             }
         )
-        before = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
+        before = task_store_snapshot(case.root)
         tools = {
             "archive": ("mcp__codex_apps__linear_save_document", export["parts"][0]),
             "spawn": ("spawn_agent", {"message": "bounded reader", "fork_context": False}),
@@ -102,11 +90,7 @@ def test_pending_new_task_fences_codex_special_routes_without_state_changes(rout
         observed["session_id"] = "coordinator"
         # Native denial must precede archive uncertainty or child pending/receipt mutation.
         assert codex.handle(observed) == codex.denial("TICKET_READ_REQUIRED")
-        after = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
+        after = task_store_snapshot(case.root)
         assert after == before
     # Preserve normal fixture cleanup even when the regression exposes admission.
     finally:
@@ -277,11 +261,7 @@ def test_free_work_preserves_bound_pending_or_stale_state(
             required.write_text("changed required source")
             # Preserve readable ownership: later staleness must reflect changed bytes.
             assert core.external_source(str(required)) == b"changed required source"
-        before = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
+        before = task_store_snapshot(case.root)
         # Each host validates its native provider identity before the shared free effect.
         provider = (
             "mcp__codex_apps__linear__save_issue"
@@ -348,11 +328,7 @@ def test_free_work_preserves_bound_pending_or_stale_state(
         package.update(session_id="coordinator", conversation_id="coordinator")
         assert not allowed(host, adapter.handle(package))
         assert not (case.root / "node_modules").exists()
-        after = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
+        after = task_store_snapshot(case.root)
         assert after == before
         assert not (case.root / "src/blocked.py").exists()
     finally:
@@ -381,19 +357,11 @@ def test_registered_unbound_completion_does_not_create_missing_store_directories
             name="PostToolUse",
         )
         observed.update(tool_response={"content": []}, tool_output="{}")
-        before = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
+        before = task_store_snapshot(case.root)
         assert adapter.handle(observed) == {}
         assert not (case.root / ".task/.bindings").exists()
         assert not (case.root / ".task/.control/issues").exists()
-        after = {
-            str(p.relative_to(case.root)): p.read_bytes()
-            for p in (case.root / ".task").rglob("*")
-            if p.is_file()
-        }
+        after = task_store_snapshot(case.root)
         assert after == before
     finally:
         case.doCleanups()

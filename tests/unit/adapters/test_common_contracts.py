@@ -39,7 +39,8 @@ def test_native_identity_preserves_claude_session_and_cwd(tmp_path: Path) -> Non
     """
     event = {"session_id": "session", "cwd": str(tmp_path), "tool_use_id": "one"}
     normalized = common.native_identity(event, "claude-code")
-    assert normalized == event
+    # A directory outside every repository carries an explicit absent repository.
+    assert normalized == {**event, "repository": None}
     assert normalized is not event
 
 
@@ -102,7 +103,7 @@ def test_native_identity_ignores_forged_child_markers(tmp_path: Path) -> None:
     """
     event = {"session_id": "s", "cwd": str(tmp_path), "child": True, "parent_session_id": "x"}
     normalized = common.native_identity(event, "claude-code")
-    assert normalized == {"session_id": "s", "cwd": str(tmp_path)}
+    assert normalized == {"session_id": "s", "cwd": str(tmp_path), "repository": None}
 
 
 def test_native_identity_keeps_rejecting_cursor_agent_id(tmp_path: Path) -> None:
