@@ -180,11 +180,8 @@ def alias_into_broken_layout(tmp_path: Path) -> Path:
         The alias path.
     """
     alias = tmp_path / "alias"
-    # Skip rather than fail where the platform cannot create the directory link.
-    try:
-        link_directory(alias, broken_config_layout(tmp_path))
-    except (OSError, subprocess.CalledProcessError) as error:
-        pytest.skip(f"directory links unsupported: {error}")
+    # The shared helper uses a junction on Windows, so no platform needs a skip here.
+    link_directory(alias, broken_config_layout(tmp_path))
     return alias
 
 
@@ -202,8 +199,24 @@ def hollow_git_layout(tmp_path: Path) -> Path:
     return hollow
 
 
+def dangling_gitfile_layout(tmp_path: Path) -> Path:
+    """Create a directory whose ``.git`` file points at a missing Git directory.
+
+    Args:
+        tmp_path: Disposable parent for the layout.
+
+    Returns:
+        The directory holding the dangling gitfile.
+    """
+    # Git reports a dangling gitfile as not a repository while the entry still exists.
+    dangling = tmp_path / "dangling-file"
+    dangling.mkdir()
+    (dangling / ".git").write_text(f"gitdir: {tmp_path / 'missing'}\n")
+    return dangling
+
+
 def dangling_git_link_layout(tmp_path: Path) -> Path:
-    """Create a directory whose ``.git`` entry is a symbolic link to nothing.
+    """Create a directory whose ``.git`` entry is a link to nothing.
 
     Args:
         tmp_path: Disposable parent for the layout.
@@ -211,9 +224,10 @@ def dangling_git_link_layout(tmp_path: Path) -> Path:
     Returns:
         The directory holding the dangling link.
     """
-    # Windows symbolic links need privileges this suite does not assume.
+    # Windows symbolic links need privileges this suite does not assume, so the
+    # gitfile layout stands in for the dangling entry there.
     if os.name == "nt":
-        pytest.skip("symbolic links need extra privileges on Windows")
+        return dangling_gitfile_layout(tmp_path)
     dangling = tmp_path / "dangling"
     dangling.mkdir()
     (dangling / ".git").symlink_to(tmp_path / "missing")
@@ -230,6 +244,7 @@ def dangling_git_link_layout(tmp_path: Path) -> Path:
         pytest.param(alias_into_broken_layout, "REPOSITORY_MISMATCH", id="alias_into_broken"),
         pytest.param(hollow_git_layout, "REPOSITORY_MISMATCH", id="hollow_git"),
         pytest.param(dangling_git_link_layout, "REPOSITORY_MISMATCH", id="dangling_git_link"),
+        pytest.param(dangling_gitfile_layout, "REPOSITORY_MISMATCH", id="dangling_gitfile"),
     ],
 )
 def test_project_repository_separates_present_absent_and_failed_discovery(
