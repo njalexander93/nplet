@@ -387,27 +387,90 @@ def test_native_tool_claude_bash_requires_background_disabled(
     assert captured.value.code == "HOST_UNSUPPORTED_ASYNC"
 
 
+@pytest.mark.parametrize("child", [False, True])
 def test_native_tool_cursor_shell_rejects_foreign_directory(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, child: bool
 ) -> None:
-    """Cursor shell work cannot redirect to an unbound repository.
+    """Parent and child Cursor shells cannot redirect to an unbound repository.
 
     Args:
         monkeypatch: Replaces repository or lifecycle boundaries for the case.
+        child: Whether the native event uses the narrower child Shell contract.
     """
+    # Model distinct checkout roots without creating repositories.
     monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
     checkout = Path(Path.cwd().anchor) / "checkout"
     other = Path(Path.cwd().anchor) / "other"
     native = {
         **native_event("Shell", {"command": "echo ok", "working_directory": str(other)}),
         "cwd": str(checkout),
+        "child": child,
     }
     # Tool-supplied working directory cannot redirect to another checkout.
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_tool(native, "cursor")
     assert captured.value.code == "REPOSITORY_MISMATCH"
+    # An explicit bound root and an omitted override both retain Shell admission.
     native["tool_input"] = {"command": "echo ok", "working_directory": str(checkout)}
     assert common.native_tool(native, "cursor") == "Shell"
+    native["tool_input"] = {"command": "echo ok"}
+    assert common.native_tool(native, "cursor") == "Shell"
+
+
+@pytest.mark.parametrize("command", ["pwd", "true"])
+@pytest.mark.parametrize("timeout", [1, 30000, 2147483647])
+def test_cursor_parent_shell_accepts_native_timeout_metadata(command: str, timeout: int) -> None:
+    """Validate parent read and protected Shell transport without granting readiness.
+
+    Args:
+        command: Finite read or protected command using the same native transport.
+        timeout: Native transport timeout at a boundary or the captured host default.
+    """
+    assert (
+        common.native_tool(
+            native_event("Shell", {"command": command, "cwd": "", "timeout": timeout}), "cursor"
+        )
+        == "Shell"
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "code"),
+    [
+        ({"timeout": True}, "HOST_UNSUPPORTED_TOOL"),
+        ({"timeout": 0}, "HOST_UNSUPPORTED_TOOL"),
+        ({"timeout": -1}, "HOST_UNSUPPORTED_TOOL"),
+        ({"timeout": 2147483648}, "HOST_UNSUPPORTED_TOOL"),
+        ({"timeout": 30000.0}, "HOST_UNSUPPORTED_TOOL"),
+        ({"timeout": "30000"}, "HOST_UNSUPPORTED_TOOL"),
+        ({"cwd": "", "working_directory": "/checkout"}, "HOST_UNSUPPORTED_TOOL"),
+        ({"async": True}, "HOST_UNSUPPORTED_ASYNC"),
+        ({"run_in_background": True}, "HOST_UNSUPPORTED_ASYNC"),
+        ({"background": True}, "HOST_UNSUPPORTED_ASYNC"),
+        ({"unexpected": True}, "HOST_UNSUPPORTED_ASYNC"),
+    ],
+)
+def test_cursor_parent_shell_rejects_invalid_transport_metadata(extra: dict, code: str) -> None:
+    """Reject malformed or unrecognized metadata for protected parent Shell.
+
+    Args:
+        extra: Invalid timeout, ambiguous directory alias or unsupported transport field.
+        code: Existing transport diagnostic or invalid supported-metadata diagnostic.
+    """
+    with pytest.raises(core.WorkspaceError) as captured:
+        common.native_tool(native_event("Shell", {"command": "true", **extra}), "cursor")
+    assert captured.value.code == code
+
+
+def test_cursor_child_does_not_inherit_parent_shell_metadata_authority() -> None:
+    """Keep native child Shell input outside the parent's transport contract."""
+    observed = {
+        **native_event("Shell", {"command": "pwd", "cwd": "", "timeout": 30000}),
+        "child": True,
+    }
+    with pytest.raises(core.WorkspaceError) as captured:
+        common.native_tool(observed, "cursor")
+    assert captured.value.code == "HOST_UNSUPPORTED_ASYNC"
 
 
 def test_canonical_bootstrap_rejects_foreign_session_before_store_access(
@@ -509,8 +572,23 @@ def test_recovery_message_preserves_exact_diagnostic_without_task_content() -> N
         *[
             (code, host, fragments)
             for code, fragments in (
-                ("HOST_UNSUPPORTED_BACKGROUND", ["Re-issue the call in the foreground"]),
-                ("HOST_UNSUPPORTED_ASYNC", ["Re-issue the call in the foreground"]),
+                *[
+                    (
+                        code,
+                        [
+                            "supported foreground arguments",
+                            "admitted call still pending",
+                            "do not rerun",
+                            "original native terminal result",
+                            "independently verifying termination",
+                            "tool-complete",
+                            "exact recorded tool_id",
+                            "completed: true",
+                            "Otherwise retain pending work",
+                        ],
+                    )
+                    for code in ("HOST_UNSUPPORTED_BACKGROUND", "HOST_UNSUPPORTED_ASYNC")
+                ],
                 ("REVISION_CONFLICT", ["Read the current revision", "reapply"]),
                 ("BINDING_CONFLICT", ["Continue the bound issue", "rebind"]),
                 ("REPOSITORY_MISMATCH", ["registered checkout"]),
@@ -526,7 +604,12 @@ def test_recovery_message_preserves_exact_diagnostic_without_task_content() -> N
                 ),
                 (
                     "PENDING_OPERATION",
-                    ["binding is unchanged", "complete", "detach", "then retry"],
+                    [
+                        "binding is unchanged",
+                        "supported completion or verified recovery route",
+                        "detach",
+                        "then retry",
+                    ],
                 ),
                 ("ADOPTION_REQUIRED", ["adopt request", "inventory", "owners and evidence"]),
             )
