@@ -10,7 +10,8 @@ Authorized task-free work needs no local registration or Task line. See the
 [task boundary](task-workspace.md#task-free-and-protected-work) and the exact
 [host operation contracts](host-hooks.md#task-free-parent-operations). The setup
 below establishes lifecycle state for issue work; it is not a prerequisite for
-independent research, review, planning, ordinary notes or administration.
+independent research, review, planning, notes outside the project code repositories
+or administration.
 
 ## Usage
 
@@ -101,7 +102,8 @@ lifecycle operation changes the outcome and name the admitted alternative.
 non-isolated re-issue. `REVISION_CONFLICT` asks for a reread and reapply.
 `BINDING_CONFLICT` names the bound issue, the Task-line switch, or an explicit
 `rebind` to a target that already assigns the session. `REPOSITORY_MISMATCH` names
-the registered checkout or worktree. `PROVIDER_RESPONSE_INVALID` and
+the registered checkout or worktree. `REPOSITORY_ABSENT` says the working directory
+is inside no Git repository; file edits there are task-free. `PROVIDER_RESPONSE_INVALID` and
 `ISSUE_MISMATCH` ask for the exact selected-ticket `get_issue` under a new native
 call; a repeated `ISSUE_MISMATCH` points to an issue-level `diagnose` of the local
 workspace recorded under another provider UUID. `NOT_OWNER` and `SCOPE_MISSING`
@@ -337,7 +339,7 @@ clearing stale task state.
 Task-free completions do not create task or pending records. Completion handling
 opens existing state without creating directories or lock files. Exact pending
 call IDs, durable start-request replays and unique participant-local poll handles
-select existing settlement; missing admission is ignored. Mutable note targets
+select existing settlement; missing admission is ignored. Mutable edit targets
 are not classified again at completion. Invalid registered or transactional state
 remains an error.
 

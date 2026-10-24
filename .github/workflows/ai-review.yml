@@ -19,10 +19,10 @@ jobs:
       (!github.event.pull_request.draft &&
        github.event.pull_request.head.repo.full_name == github.repository)
     # Keep the workflow and trusted implementation on the same reviewed commit.
-    uses: njalexander93/ai-reviewer/.github/workflows/review.yml@e64f7571bbe747332cec155e4699d90d944a19b8
+    uses: njalexander93/ai-reviewer/.github/workflows/review.yml@cdcb97d2d2cf379b82b510e530d0393872656373
     with:
       pr-number: ${{ github.event.pull_request.number || inputs.pr-number }}
-      implementation-ref: e64f7571bbe747332cec155e4699d90d944a19b8
+      implementation-ref: cdcb97d2d2cf379b82b510e530d0393872656373
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

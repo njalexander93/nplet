@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -9,6 +11,7 @@ from typing import Any
 import pytest
 
 from nplet.lifecycle import task_workspace as core
+from tests.platform_support import link_directory
 
 pytestmark = pytest.mark.unit
 
@@ -66,7 +69,9 @@ def test_git_rejects_failed_repository_query(
     monkeypatch.setattr(
         core.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=128, stdout="secret detail"),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=128, stdout="secret detail", stderr="fatal: secret detail"
+        ),
     )
     # Reject a failed Git query with a bounded repository diagnostic.
     with pytest.raises(core.WorkspaceError) as captured:
@@ -108,6 +113,61 @@ def test_repository_requires_nonbare_member_worktree(
         core.repository(root)
     # Confirm the rejected operation reports REPOSITORY_MISMATCH.
     assert captured.value.code == "REPOSITORY_MISMATCH"
+
+
+def test_project_repository_separates_present_absent_and_failed_discovery(
+    tmp_path: Path,
+) -> None:
+    """Return a repository, prove absence, or raise when Git metadata cannot be read.
+
+    Args:
+        tmp_path: Disposable parent for a real repository and a plain directory.
+    """
+    # A real repository resolves to its worktree root, common directory and members.
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    repository = core.project_repository(checkout)
+    assert repository is not None
+    root, common, trees = repository
+    assert root.resolve() == checkout.resolve()
+    assert common.resolve() == (checkout / ".git").resolve()
+    assert root in trees
+    # A directory without Git metadata on its ancestor chain is proven absent.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert core.project_repository(plain) is None
+    # Git itself reports the plain directory as absent rather than mismatched.
+    with pytest.raises(core.WorkspaceError) as absent:
+        core.git(plain, "rev-parse", "--show-toplevel")
+    assert absent.value.code == "REPOSITORY_ABSENT"
+    # Unreadable configuration is failed discovery, never absence.
+    (checkout / ".git/config").write_text("[broken\n")
+    with pytest.raises(core.WorkspaceError) as broken:
+        core.project_repository(checkout)
+    assert broken.value.code == "REPOSITORY_MISMATCH"
+    # A missing directory fails discovery: Git reports no not-a-repository diagnosis.
+    with pytest.raises(core.WorkspaceError):
+        core.project_repository(tmp_path / "missing")
+    # A link into the broken checkout and a dangling .git link are failed discovery too.
+    alias = tmp_path / "alias"
+    link_directory(alias, checkout)
+    with pytest.raises(core.WorkspaceError):
+        core.project_repository(alias)
+    # An empty .git directory makes Git report absence while the entry still exists,
+    # which is failed discovery under the mismatch code, never the absence code.
+    hollow = tmp_path / "hollow"
+    (hollow / ".git").mkdir(parents=True)
+    with pytest.raises(core.WorkspaceError) as captured:
+        core.project_repository(hollow)
+    assert captured.value.code == "REPOSITORY_MISMATCH"
+    if os.name != "nt":
+        dangling = tmp_path / "dangling"
+        dangling.mkdir()
+        (dangling / ".git").symlink_to(tmp_path / "missing")
+        with pytest.raises(core.WorkspaceError) as dangled:
+            core.project_repository(dangling)
+        assert dangled.value.code == "REPOSITORY_MISMATCH"
 
 
 class BindingDirectory:

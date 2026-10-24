@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
-import stat
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from nplet.lifecycle import task_workspace as core
@@ -50,63 +51,6 @@ GITHUB_READS = frozenset(
     }
 )
 CONTROL_PARTS = frozenset({".task", ".git", ".codex", ".claude", ".cursor", ".agents"})
-PROTECTED_PARTS = CONTROL_PARTS | frozenset(
-    {
-        "src",
-        "source",
-        "tests",
-        "test",
-        "scripts",
-        "bin",
-        "build",
-        "dist",
-        "vendor",
-        "dependencies",
-        "deps",
-        "requirements",
-        "constraints",
-        "node_modules",
-        ".github",
-        ".venv",
-        "venv",
-        "config",
-        "configuration",
-        ".vscode",
-        ".idea",
-        ".config",
-        "resources",
-        "templates",
-        "skills",
-        "hooks",
-        "workflows",
-    }
-)
-DEPENDENCY_NAMES = frozenset(
-    {
-        "pyproject.toml",
-        "poetry.lock",
-        "pipfile",
-        "pipfile.lock",
-        "uv.lock",
-        "setup.py",
-        "setup.cfg",
-        "package.json",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "gemfile",
-        "gemfile.lock",
-        "cargo.toml",
-        "cargo.lock",
-        "go.mod",
-        "go.sum",
-        "environment.yml",
-        "environment.yaml",
-        "cmakelists.txt",
-        "makefile",
-        "justfile",
-    }
-)
 GH_FIELDS = frozenset(
     {
         "number",
@@ -141,79 +85,100 @@ COMMENTS_QUERY = (
 )
 
 
-def target_role(cwd: str, value: object, root: Path | None = None) -> str:
-    """Resolve lexical and actual target roles without relying on ancestor names.
+def _stat(path: Path) -> os.stat_result | None:
+    """Read one path's status without failing on an unreadable path.
 
     Args:
-        cwd: Actual checkout working directory.
-        value: Native target path.
-        root: Already verified canonical checkout root, when supplied by a batch.
+        path: Path to read, following links.
 
     Returns:
-        ``note``, ``protected`` or ``control``; uncertainty is protected.
+        The status, or None when the path cannot be read.
     """
-    # Establish checkout identity before comparing either target spelling.
+    # An unreadable path only loses its identity, never its lexical protection.
     try:
-        root = root if root is not None else core.repository(cwd)[0].resolve(strict=True)
-        if not isinstance(value, str) or not value or "\x00" in value:
-            return "protected"
-        path = Path(value)
-        path = path if path.is_absolute() else Path(cwd) / path
-        # Resolve the checkout alias once, retaining all internal lexical components.
-        anchor = next((p for p in reversed(path.parents) if p.resolve() == root), None)
-        if anchor is None:
-            return "protected"
-        relative = path.relative_to(anchor)
-        # Lexical control ownership survives links that resolve outside the checkout.
-        if CONTROL_PARTS.intersection(p.lower() for p in relative.parts):
-            return "control"
-        lexical = root / relative
-        actual = lexical.resolve(strict=False)
-        relatives = (relative, actual.relative_to(root))
-        # An ordinary lexical alias cannot hide a resolved control-store target.
-        if CONTROL_PARTS.intersection(p.lower() for p in relatives[1].parts):
-            return "control"
-        # A protected lexical role cannot be erased by an internal symlink or traversal.
-        for rel in relatives:
-            parts = [part.lower() for part in rel.parts]
-            if (
-                ".." in parts
-                or PROTECTED_PARTS.intersection(parts)
-                or any(
-                    part in {"agents.md", "claude.md", "skill.md", "context.md"} for part in parts
-                )
-                or any(part.startswith(("requirements", "constraints")) for part in parts)
-                or rel.name.lower() in DEPENDENCY_NAMES
-                or tuple(parts[:2]) in {("docs", "runtime"), ("docs", "framework")}
-                or parts == ["docs", "readme.md"]
-            ):
-                return "protected"
-        # Reject internal links and platform aliases whose write identity is ambiguous.
-        entries = [
-            root.joinpath(*relative.parts[: index + 1]) for index in range(len(relative.parts))
-        ]
-        if any(entry.is_symlink() or entry.is_junction() for entry in entries) or any(
-            part.endswith((".", " "))
-            or ":" in part
-            or "\\" in part
-            or re.fullmatch(r"(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?", part.lower())
-            for part in relative.parts
-        ):
-            return "protected"
-        # Existing files must have one identity and no executable behavior.
-        if actual.exists():
-            info = actual.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o111:
-                return "protected"
-        # Markdown prose and explicit note directories establish a narrow known role.
-        if actual.suffix.lower() == ".md" or (
-            actual.suffix.lower() == ".txt" and relative.parts[0].lower() in {"notes", "docs"}
-        ):
-            return "note"
-    # Escapes, dangling aliases and inaccessible paths cannot prove a note identity.
-    except (OSError, ValueError, RuntimeError, core.WorkspaceError):
+        return path.stat()
+    except OSError:
+        return None
+
+
+def root_test(roots: list[Path]) -> Callable[[Path], bool]:
+    """Build a predicate that recognizes a worktree root by path or filesystem identity.
+
+    Args:
+        roots: The session repository's worktree roots.
+
+    Returns:
+        A predicate that is true for a root's normalized lexical path, including a listed
+        root missing on disk, and for any alias spelling of a readable root.
+    """
+    # Collect lexical paths and readable identities once per edit.
+    paths = {Path(os.path.normpath(root)) for root in roots}
+    identities = {(info.st_dev, info.st_ino) for root in roots if (info := _stat(root))}
+
+    def is_root(path: Path) -> bool:
+        """Report whether one path is a worktree root.
+
+        Args:
+            path: Absolute candidate path.
+
+        Returns:
+            Whether the path equals a root path or shares a readable root identity.
+        """
+        # A lexical match needs no filesystem read; otherwise compare identities.
+        if path in paths:
+            return True
+        info = _stat(path)
+        return info is not None and (info.st_dev, info.st_ino) in identities
+
+    return is_root
+
+
+def matching_roots(spelling: Path, is_root: Callable[[Path], bool]) -> Iterator[Path]:
+    """Yield every ancestor of one target spelling that is a worktree root.
+
+    Args:
+        spelling: Absolute target path, checked first and then through each parent.
+        is_root: Worktree root predicate from ``root_test``.
+
+    Returns:
+        Each ancestor that is a root, nearest first.
+    """
+    # Every ancestor that is a root counts, not only the nearest.
+    return filter(is_root, (spelling, *spelling.parents))
+
+
+def target_role(cwd: str, value: object, is_root: Callable[[Path], bool]) -> str:
+    """Classify one edit target by whether it lies inside a project code repository.
+
+    Args:
+        cwd: Native session working directory that relative targets are joined to.
+        value: Native target path.
+        is_root: Worktree root predicate from ``root_test``.
+
+    Returns:
+        ``external`` outside every root, ``control`` for a control-store path inside a
+        root, and ``protected`` for any other in-root path or an unresolvable target.
+    """
+    # Malformed targets cannot be located and stay readiness-gated.
+    if not isinstance(value, str) or not value or "\x00" in value:
         return "protected"
-    return "protected"
+    try:
+        # Compare the lexical and link-resolved spellings so neither alias hides a root.
+        absolute = Path(cwd, value)
+        spellings = (Path(os.path.normpath(absolute)), absolute.resolve(strict=False))
+        inside = False
+        for spelling in spellings:
+            # Control ownership accumulates across every ancestor that anchors a root.
+            for anchor in matching_roots(spelling, is_root):
+                inside = True
+                # A control-store name below any matching root denies in either spelling.
+                below = spelling.relative_to(anchor).parts
+                if CONTROL_PARTS.intersection(part.lower() for part in below):
+                    return "control"
+    # An unresolvable target cannot be proven external.
+    except (OSError, ValueError, RuntimeError):
+        return "protected"
+    return "protected" if inside else "external"
 
 
 def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
@@ -495,12 +460,13 @@ def task_free(
     if tool == "Bash":
         # Native adapters supply a canonical command after validating their transport metadata.
         return set(args) == {"command"} and read_command(args.get("command"), host)
+    # Edits are free only when every target lies outside the project code repositories.
     selected = edit_roles(event) if roles is None else roles
-    return bool(selected) and all(role == "note" for role in selected)
+    return bool(selected) and all(role == "external" for role in selected)
 
 
 def edit_roles(event: core.JSONObject) -> list[str]:
-    """Resolve checkout identity once for all deterministic native edit targets.
+    """Classify every deterministic native edit target against the project repositories.
 
     Args:
         event: Validated native tool and argument envelope.
@@ -509,13 +475,16 @@ def edit_roles(event: core.JSONObject) -> list[str]:
         Every target role, or an empty list for an unknown edit shape.
 
     Raises:
-        core.WorkspaceError: If checkout identity cannot be established.
-        OSError: If checkout identity cannot be read.
+        core.WorkspaceError: If the session repository is bare or inconsistent.
+        OSError: If Git or a repository root cannot be read.
     """
     # Unknown edits remain readiness-gated without guessing their targets.
     targets = edit_targets(event["tool_name"], event["tool_input"])
     if not targets:
         return []
-    # One canonical checkout identity covers the whole patch or single-file mutation.
-    root = core.repository(event["cwd"])[0].resolve(strict=True)
-    return [target_role(event["cwd"], target, root) for target in targets]
+    # A session outside every repository has no roots, so every well-formed target is external.
+    repository = core.project_repository(event["cwd"])
+    roots = [] if repository is None else repository[2]
+    # One worktree list covers the whole patch or single-file mutation.
+    is_root = root_test(roots)
+    return [target_role(event["cwd"], target, is_root) for target in targets]

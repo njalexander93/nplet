@@ -298,8 +298,11 @@ def lookup_required(event: core.JSONObject, host: str) -> bool:
     # Synthetic contexts without a native identity have no session assignment.
     if not isinstance(event.get("cwd"), str) or not isinstance(event.get("session_id"), str):
         return False
-    # Resolve the selected checkout before looking for a local assignment.
-    root, _, _ = core.repository(event["cwd"])
+    # A session outside every repository has no store and so no ticket-first assignment.
+    repository = core.project_repository(event["cwd"])
+    if repository is None:
+        return False
+    root, _, _ = repository
     key = core.participant_key({"host": host, "session_id": event["session_id"]})
     # Inspect the root store without creating a ticket or binding.
     with core.Directory.absolute(root) as directory:
@@ -376,6 +379,9 @@ def existing_admission(event: core.JSONObject, host: str) -> core.JSONObject | N
     """
     # Translate native polling shape; storage and lock ownership remain inside the core.
     tool_id = native_token(event.get("tool_use_id"))
+    # A session outside every repository has no store that could hold an admission.
+    if core.project_repository(event["cwd"]) is None:
+        return None
     polling = event.get("tool_name") == "write_stdin"
     return core.existing_tool_request(
         {
@@ -1209,6 +1215,22 @@ def native_token(value: object) -> str:
     return core.token(value)
 
 
+def project_root(path: str) -> Path | None:
+    """Select the worktree root of the project repository containing a directory.
+
+    Args:
+        path: Native working directory.
+
+    Returns:
+        The worktree root, or None when the directory is outside every repository.
+
+    Raises:
+        core.WorkspaceError: If repository discovery fails rather than proving absence.
+        OSError: If Git cannot be launched.
+    """
+    return None if (repository := core.project_repository(path)) is None else repository[0]
+
+
 def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
     """Validate native session and worktree identity without manufacturing either.
 
@@ -1248,10 +1270,9 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
         if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], str):
             raise core.WorkspaceError("HOST_UNSUPPORTED_WORKSPACE")
         cwd = event.get("cwd", roots[0])
-        core.require(
-            isinstance(cwd, str) and core.repository(cwd)[0] == core.repository(roots[0])[0],
-            "REPOSITORY_MISMATCH",
-        )
+        core.require(isinstance(cwd, str), "REPOSITORY_MISMATCH")
+        # The working directory and workspace share one repository, or both lie outside any.
+        core.require(project_root(cwd) == project_root(roots[0]), "REPOSITORY_MISMATCH")
     else:
         # A child cannot be keyed without the parent session it runs under.
         if child:
@@ -1294,17 +1315,15 @@ def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> Non
     if "timeout" in args:
         timeout = args["timeout"]
         core.require(type(timeout) is int and 1 <= timeout <= 2147483647, "HOST_UNSUPPORTED_TOOL")
-    # Empty native cwd supplies no override; a supplied directory must stay in this repository.
+    # Empty native cwd supplies no override; a supplied directory must share the session's
+    # repository, or both must lie outside every repository.
     key = "cwd" if "cwd" in args else "working_directory"
     if key in args:
         directory = args[key]
         core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
         if key == "cwd" and directory == "":
             return
-        core.require(
-            core.repository(directory)[0] == core.repository(event["cwd"])[0],
-            "REPOSITORY_MISMATCH",
-        )
+        core.require(project_root(directory) == project_root(event["cwd"]), "REPOSITORY_MISMATCH")
 
 
 def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> bool:
@@ -1444,10 +1463,11 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             set(args) <= {"command", "working_directory"} and isinstance(args.get("command"), str),
             "HOST_UNSUPPORTED_ASYNC",
         )
-        # A shell working-directory override must remain in the checkout.
+        # A shell working-directory override shares the session's repository, or both
+        # lie outside every repository.
         if "working_directory" in args:
             core.require(
-                core.repository(args["working_directory"])[0] == core.repository(event["cwd"])[0],
+                project_root(args["working_directory"]) == project_root(event["cwd"]),
                 "REPOSITORY_MISMATCH",
             )
         return tool
@@ -1521,7 +1541,7 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         return
     effect = native_effect(event, host)
     tool = event["tool_name"]
-    # Validated parent reads, planning and notes need no task lifecycle admission.
+    # Validated parent reads, planning and external edits need no task lifecycle admission.
     operation = (
         tool[4:]
         if host == "cursor" and tool.startswith("MCP:")
@@ -1535,7 +1555,7 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         and event.get("child") is not True
     ) or task_boundary.task_free(effect, host, operation, roles):
         return
-    # Raw control-store mutation never becomes a readiness-authorized note.
+    # Raw control-store mutation never becomes a readiness-authorized edit.
     core.require("control" not in roles, "NOT_OWNER")
     core.require(not lookup_required(event, host), "TICKET_READ_REQUIRED")
     request = request_for(event, "ready", host)
@@ -1992,8 +2012,8 @@ def _recovery_route(code: str, host: str) -> str:
             "Next admitted operation: the configured Linear get_issue call with exactly "
             '{"id": "<selected issue>"} before protected implementation.'
             + preparation
-            + " Independent authorized task-free reads, planning, notes and administration "
-            "remain available."
+            + " Independent authorized task-free reads, planning, edits outside the project "
+            "code repositories and administration remain available."
         )
     # An unbound session starts or resumes only through the ticket-first route.
     if code == "BINDING_MISSING":
@@ -2002,8 +2022,8 @@ def _recovery_route(code: str, host: str) -> str:
             "exactly one `Task: <issue-id>` line, "
             "then read that ticket with the configured Linear get_issue call; startup "
             f"registers or resumes the workspace. A pre-registration diagnose uses {command}. "
-            "Independent authorized task-free reads, planning, notes and administration "
-            "remain available. "
+            "Independent authorized task-free reads, planning, edits outside the project "
+            "code repositories and administration remain available. "
             "Finite shell reads include canonical cat, rg --no-config, and "
             "git --no-pager -c core.fsmonitor=false "
             "forms documented in docs/runtime/host-hooks.md; arbitrary shell commands remain gated."
@@ -2058,6 +2078,12 @@ def _recovery_route(code: str, host: str) -> str:
             "submit `Task: <other-issue>` and read that ticket so startup rebinds you "
             "(the old issue is preserved), or run an explicit rebind to a target that "
             f"already assigns this session, using {command}."
+        )
+    # A working directory outside every repository has no protected checkout.
+    if code == "REPOSITORY_ABSENT":
+        return (
+            "This working directory is inside no Git repository. File edits here are "
+            "task-free; protected shell and lifecycle tools need a repository checkout."
         )
     # Lifecycle requests must name the registered checkout.
     if code == "REPOSITORY_MISMATCH":
