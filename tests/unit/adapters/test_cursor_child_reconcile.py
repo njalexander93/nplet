@@ -188,9 +188,10 @@ def test_internal_transition_stops_on_invalid_identity_or_retry_limit(
     control.json.return_value = {"revision": 10}
     execute = MagicMock(return_value={"ok": False, "code": code})
     monkeypatch.setattr(children.core, "execute_internal", execute)
+    # Eight attempts sleep 0.56s between them; a loaded runner needs headroom beyond one second.
     with pytest.raises(core.WorkspaceError) as error:
         children.execute_current(
-            {"issue_id": "TEST-1", "operation": "cursor-retire"}, time.monotonic() + 1
+            {"issue_id": "TEST-1", "operation": "cursor-retire"}, time.monotonic() + 5
         )
     assert error.value.code == code
     assert execute.call_count == attempts

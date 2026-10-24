@@ -363,11 +363,12 @@ def test_source_transition_exhausts_contention_without_changing_request(
     monkeypatch.setattr(children.common, "request_for", lambda *_args: bound)
     execute = MagicMock(return_value={"ok": False, "code": "BUSY"})
     monkeypatch.setattr(children.core, "execute_internal", execute)
+    # Eight attempts sleep 0.56s between them; a loaded runner needs headroom beyond one second.
     with pytest.raises(core.WorkspaceError, match="BUSY"):
         cursor_sources.source_transition(
             {"child": True, "tool_use_id": "call"},
             "failure",
-            time.monotonic() + 1,
+            time.monotonic() + 5,
             source_path="/source",
         )
     assert execute.call_count == 8
