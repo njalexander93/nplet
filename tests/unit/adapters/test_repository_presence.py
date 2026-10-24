@@ -71,3 +71,34 @@ def test_non_repository_session_has_no_lookup_or_admission(
     observed = {**native_event("Write"), "cwd": str(tmp_path), "session_id": "fresh"}
     assert common.lookup_required(observed, "claude-code") is False
     assert common.existing_admission(observed, "claude-code") is None
+
+
+def test_cursor_shell_metadata_outside_every_repository_stays_admissible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Accept Shell directory metadata when the session and the override lack a repository.
+
+    Args:
+        monkeypatch: Replace only repository discovery with a proven absence.
+        tmp_path: Disposable non-Git working directory.
+    """
+    monkeypatch.setattr(common.core, "project_repository", lambda _path: None)
+    plain = tmp_path / "plain"
+    # A Shell override naming the same non-Git directory is still admissible.
+    native = {
+        **native_event("Shell", {"command": "pwd", "working_directory": str(plain)}),
+        "cwd": str(plain),
+    }
+    assert common.native_tool(native, "cursor") == "Shell"
+    # Lifecycle-command metadata follows the same rule.
+    common.cursor_lifecycle_shell(native, {"command": "pwd", "cwd": str(plain)})
+    # A session outside any repository cannot redirect into one.
+    monkeypatch.setattr(
+        common.core,
+        "project_repository",
+        lambda path: None if path == str(plain) else (Path(path), None, [Path(path)]),
+    )
+    native["tool_input"] = {"command": "pwd", "working_directory": str(tmp_path / "repo")}
+    with pytest.raises(core.WorkspaceError) as captured:
+        common.native_tool(native, "cursor")
+    assert captured.value.code == "REPOSITORY_MISMATCH"

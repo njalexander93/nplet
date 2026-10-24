@@ -1315,17 +1315,15 @@ def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> Non
     if "timeout" in args:
         timeout = args["timeout"]
         core.require(type(timeout) is int and 1 <= timeout <= 2147483647, "HOST_UNSUPPORTED_TOOL")
-    # Empty native cwd supplies no override; a supplied directory must stay in this repository.
+    # Empty native cwd supplies no override; a supplied directory must share the session's
+    # repository, or both must lie outside every repository.
     key = "cwd" if "cwd" in args else "working_directory"
     if key in args:
         directory = args[key]
         core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
         if key == "cwd" and directory == "":
             return
-        core.require(
-            core.repository(directory)[0] == core.repository(event["cwd"])[0],
-            "REPOSITORY_MISMATCH",
-        )
+        core.require(project_root(directory) == project_root(event["cwd"]), "REPOSITORY_MISMATCH")
 
 
 def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> bool:
@@ -1465,10 +1463,11 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             set(args) <= {"command", "working_directory"} and isinstance(args.get("command"), str),
             "HOST_UNSUPPORTED_ASYNC",
         )
-        # A shell working-directory override must remain in the checkout.
+        # A shell working-directory override shares the session's repository, or both
+        # lie outside every repository.
         if "working_directory" in args:
             core.require(
-                core.repository(args["working_directory"])[0] == core.repository(event["cwd"])[0],
+                project_root(args["working_directory"]) == project_root(event["cwd"]),
                 "REPOSITORY_MISMATCH",
             )
         return tool
