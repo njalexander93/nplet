@@ -1228,54 +1228,82 @@ def project_root(path: str) -> Path | None:
         core.WorkspaceError: If repository discovery fails rather than proving absence.
         OSError: If Git cannot be launched.
     """
-    return None if (repository := core.project_repository(path)) is None else repository[0]
+    return None if (repository := core.project_repository(path)) is None else repository.root
 
 
-def session_repository(event: core.JSONObject) -> tuple[Path, Path, list[Path]] | None:
-    """Select this session's project repository, preferring the identity-time result.
+def carry_repository(event: core.JSONObject) -> core.JSONObject:
+    """Record the session repository discovered from ``cwd`` in the event.
+
+    Overwriting the field also neutralizes any value the raw host payload supplied.
 
     Args:
-        event: Native event; Claude and Cursor events carry ``repository`` from
-            ``native_identity``, while Codex events select it from ``cwd``.
+        event: Native event whose ``cwd`` is a string.
 
     Returns:
-        The worktree root, common Git directory and worktree roots, or None when the
-        session lies outside every repository.
+        The same event with ``repository`` set to the encoded repository, or None
+        outside every repository.
 
     Raises:
-        core.WorkspaceError: If uncarried repository discovery fails rather than proving
-            absence.
+        core.WorkspaceError: If repository discovery fails rather than proving absence.
         OSError: If Git cannot be launched.
     """
-    # Codex events never pass through native identity, so discover from the working directory.
-    if "repository" not in event:
-        return core.project_repository(event["cwd"])
-    # Convert the carried JSON-safe text back into paths.
+    # Discover once and overwrite any payload-supplied value with the JSON-safe encoding.
+    repository = core.project_repository(event["cwd"])
+    event["repository"] = None if repository is None else repository.to_json()
+    return event
+
+
+def session_repository(event: core.JSONObject) -> core.Repository | None:
+    """Decode this session's repository recorded by ``carry_repository``.
+
+    Args:
+        event: Native event carrying ``repository``.
+
+    Returns:
+        The session repository, or None when the session lies outside every repository.
+
+    Raises:
+        core.WorkspaceError: ``INVALID_REQUEST`` if the event carries no repository or a
+            malformed one.
+    """
+    # Every adapter carries the repository before use; never rediscover it here.
+    core.require("repository" in event, "INVALID_REQUEST")
     carried = event["repository"]
-    if carried is None:
-        return None
-    return Path(carried["root"]), Path(carried["common"]), [Path(t) for t in carried["trees"]]
+    return None if carried is None else core.Repository.from_json(carried)
+
+
+def session_project_root(event: core.JSONObject) -> Path | None:
+    """Select the worktree root of this session's carried project repository.
+
+    Args:
+        event: Native event carrying ``repository``.
+
+    Returns:
+        The worktree root, or None when the session lies outside every repository.
+
+    Raises:
+        core.WorkspaceError: If the carried repository is missing or malformed.
+    """
+    return None if (repository := session_repository(event)) is None else repository.root
 
 
 def session_root(event: core.JSONObject) -> Path:
     """Select the worktree root of this session's project repository.
 
     Args:
-        event: Native event with a carried or discoverable repository.
+        event: Native event carrying ``repository``.
 
     Returns:
         The session's worktree root.
 
     Raises:
         core.WorkspaceError: ``REPOSITORY_ABSENT`` when the session lies outside every
-            repository, or a discovery failure from ``session_repository``.
-        OSError: If Git cannot be launched.
+            repository, or a carrier failure from ``session_repository``.
     """
     # A session outside every repository has no root to open.
-    repository = session_repository(event)
-    if repository is None:
+    if (root := session_project_root(event)) is None:
         raise core.WorkspaceError("REPOSITORY_ABSENT")
-    return repository[0]
+    return root
 
 
 def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
@@ -1323,10 +1351,10 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
         core.require(isinstance(cwd, str), "REPOSITORY_MISMATCH")
         # Resolve the session repository once; the workspace root must share it, or both
         # must lie outside every repository.
-        repository = core.project_repository(cwd)
+        normalized["cwd"] = cwd
+        carry_repository(normalized)
         core.require(
-            (None if repository is None else repository[0]) == project_root(roots[0]),
-            "REPOSITORY_MISMATCH",
+            project_root(roots[0]) == session_project_root(normalized), "REPOSITORY_MISMATCH"
         )
     else:
         # A child cannot be keyed without the parent session it runs under.
@@ -1347,19 +1375,10 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
             normalized.update(child=True, parent_session_id=session)
             session = core.token(session + "/agent/" + agent)
         # Resolve the session repository once from the validated working directory.
-        repository = core.project_repository(str(cwd))
-    # Carry the repository as JSON-safe text so later phases never probe Git again.
-    normalized.update(
-        session_id=session,
-        cwd=cwd,
-        repository=None
-        if repository is None
-        else {
-            "root": str(repository[0]),
-            "common": str(repository[1]),
-            "trees": [str(tree) for tree in repository[2]],
-        },
-    )
+        normalized["cwd"] = cwd
+        carry_repository(normalized)
+    # Key the envelope by the validated native session.
+    normalized["session_id"] = session
     return normalized
 
 
@@ -1391,8 +1410,7 @@ def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> Non
         core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
         if key == "cwd" and directory == "":
             return
-        session = None if (repository := session_repository(event)) is None else repository[0]
-        core.require(project_root(directory) == session, "REPOSITORY_MISMATCH")
+        core.require(project_root(directory) == session_project_root(event), "REPOSITORY_MISMATCH")
 
 
 def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> bool:
@@ -1535,8 +1553,10 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         # A shell working-directory override shares the session's repository, or both
         # lie outside every repository.
         if "working_directory" in args:
-            session = None if (repository := session_repository(event)) is None else repository[0]
-            core.require(project_root(args["working_directory"]) == session, "REPOSITORY_MISMATCH")
+            core.require(
+                project_root(args["working_directory"]) == session_project_root(event),
+                "REPOSITORY_MISMATCH",
+            )
         return tool
     # A child may also hand its report back; every other host keeps its own set.
     supported = (
@@ -1608,18 +1628,15 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         return
     effect = native_effect(event, host)
     tool = event["tool_name"]
-    # Select the provider operation and classify edit targets against the session
-    # repository; only an edit needs the repository.
+    # Select the provider operation and classify edit targets against the carried
+    # session repository's worktrees.
     operation = (
         tool[4:]
         if host == "cursor" and tool.startswith("MCP:")
         else _linear_provider_tool(event, host)
     )
-    roles = (
-        task_boundary.edit_roles(event, session_repository(event))
-        if task_boundary.edit_targets(event["tool_name"], event["tool_input"])
-        else []
-    )
+    repository = session_repository(event)
+    roles = task_boundary.edit_roles(event, [] if repository is None else repository.trees)
     # Validated parent reads, planning and external edits need no task lifecycle admission.
     if (
         host == "claude-code"

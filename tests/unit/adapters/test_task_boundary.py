@@ -225,14 +225,11 @@ def test_target_roles_follow_the_project_repository_directory(tmp_path) -> None:
     assert boundary.target_role(str(root), "", roots) == "protected"
 
 
-def test_edit_roles_free_sessions_outside_repositories_and_keep_batch_roles(
-    tmp_path, monkeypatch
-) -> None:
+def test_edit_roles_free_sessions_outside_repositories_and_keep_batch_roles(tmp_path) -> None:
     """Classify every patch target and treat a non-repository session as all external.
 
     Args:
         tmp_path: Disposable non-Git directory standing in for the session root.
-        monkeypatch: Replace only Git repository discovery.
     """
     # A mixed patch keeps one role per target.
     root = tmp_path / "repo"
@@ -247,20 +244,14 @@ def test_edit_roles_free_sessions_outside_repositories_and_keep_batch_roles(
             )
         },
     }
-    monkeypatch.setattr(
-        boundary.core, "project_repository", lambda _cwd: (root, root / ".git", [root])
-    )
-    assert boundary.edit_roles(observed) == ["external", "protected"]
+    assert boundary.edit_roles(observed, [root]) == ["external", "protected"]
     assert not boundary.task_free(observed, "codex", roles=["external", "protected"])
-    assert boundary.edit_roles({"tool_name": "unknown", "tool_input": {}}) == []
+    assert boundary.edit_roles({"tool_name": "unknown", "tool_input": {}}, [root]) == []
     # Without project roots every target, even one beside the session, is external.
-    monkeypatch.setattr(boundary.core, "project_repository", lambda _cwd: None)
-    assert boundary.edit_roles(observed) == ["external", "external"]
-    assert boundary.task_free(observed, "codex")
-    # A caller-selected repository is used as given, without discovery.
-    monkeypatch.setattr(boundary.core, "project_repository", lambda _cwd: pytest.fail("probed"))
-    selected = (root, root / ".git", [root])
-    assert boundary.edit_roles(observed, selected) == ["external", "protected"]
+    assert boundary.edit_roles(observed, []) == ["external", "external"]
+    assert boundary.task_free(observed, "codex", roles=["external", "external"])
+    # Uncomputed roles keep the edit gated.
+    assert not boundary.task_free(observed, "codex")
 
 
 def test_legacy_shell_reads_and_unverified_file_aliases_remain_gated() -> None:
@@ -431,11 +422,13 @@ def admission_store(tmp_path, monkeypatch):
         }
     }
     # Creating opens or lifecycle transactions fail instead of passing unnoticed.
-    monkeypatch.setattr(common.core, "repository", lambda _path: (root, root / ".git", [root]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(root, root / ".git", [root])
+    )
     monkeypatch.setattr(common.core, "fs_identity", lambda _path: [1, 2])
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: ReadDirectory(tree))
     monkeypatch.setattr(common.core, "execute", lambda *_args: pytest.fail("lifecycle mutation"))
-    return tree, observed, key, state
+    return tree, common.carry_repository(observed), key, state
 
 
 @pytest.mark.parametrize("missing", ["bindings", "binding"])
@@ -755,6 +748,7 @@ def test_claude_planning_provenance_and_no_admission(tool: str, args: dict, monk
         "tool_use_id": "plan",
         "tool_input": args,
         "mcp_server": {"name": "ccd_turn", "source": "sdk"},
+        "repository": None,
     }
     assert common.native_tool(observed, "claude-code") == tool
     for changed in [
@@ -787,6 +781,7 @@ def test_child_handback_keeps_existing_readiness_requirement(monkeypatch) -> Non
         "tool_use_id": "report",
         "tool_input": {},
         "child": True,
+        "repository": None,
     }
     calls = []
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)

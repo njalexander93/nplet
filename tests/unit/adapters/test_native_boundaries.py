@@ -30,7 +30,9 @@ def test_claude_bootstrap_preserves_checkout_boundary(
     native = {"tool_name": "Bash", "cwd": "same", "tool_input": {"command": "canonical"}}
     if directory is not None:
         native["tool_input"]["working_directory"] = directory
-    monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(
+        common.core, "repository", lambda path: common.core.Repository(Path(path), None, [])
+    )
     parsed = []
     monkeypatch.setattr(common, "canonical_bootstrap", lambda *args: parsed.append(args) or True)
     assert common.native_bootstrap(native, "claude-code", ready=True) is accepted
@@ -53,6 +55,7 @@ def event() -> dict[str, Any]:
         "tool_use_id": "tool-1",
         "tool_name": "Shell",
         "tool_input": {"command": "echo ok"},
+        "repository": core.Repository(CHECKOUT, CHECKOUT, [CHECKOUT]).to_json(),
     }
 
 
@@ -95,7 +98,9 @@ def test_native_bootstrap_rejects_foreign_working_directory(
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
     """
-    monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(
+        common.core, "repository", lambda path: common.core.Repository(Path(path), None, [])
+    )
     monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: pytest.fail("parsed"))
     altered = {**event(), "tool_input": {"command": "echo ok", "working_directory": str(OTHER)}}
     assert common.native_bootstrap(altered, "cursor") is False
@@ -1067,7 +1072,9 @@ def test_cursor_lifecycle_metadata_preserves_canonical_boundary(
         accepted: Whether those fields fit the verified native schema.
     """
     # Separate envelope admission from the mandatory canonical command decision.
-    monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(
+        common.core, "repository", lambda path: common.core.Repository(Path(path), None, [])
+    )
     monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: True)
     native = {**event(), "tool_input": {"command": "exact-command", **metadata}}
     assert common.native_bootstrap(native, "cursor", ready=True) is accepted
@@ -1113,7 +1120,9 @@ def test_native_effect_preserves_original_and_exact_host_authority(
     """
     # Count real native validation and preserve original input for later correlation.
     monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
-    monkeypatch.setattr(core, "repository", lambda _path: (CHECKOUT, CHECKOUT, [CHECKOUT]))
+    monkeypatch.setattr(
+        core, "repository", lambda _path: core.Repository(CHECKOUT, CHECKOUT, [CHECKOUT])
+    )
     validate = common.native_tool
     calls = []
 

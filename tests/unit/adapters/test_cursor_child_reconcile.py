@@ -84,7 +84,10 @@ def test_reconcile_command_preserves_unrelated_shell_and_rejects_cwd_redirect(
         "cwd": "/checkout",
     }
     assert children.recognize_reconcile(event) is None
-    monkeypatch.setattr(children.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(
+        children.core, "repository", lambda path: children.core.Repository(Path(path), None, [])
+    )
+    children.common.carry_repository(event)
     event["tool_input"] = {
         "command": children.reconcile_command("TEST-1", children.call_token("call")),
         "working_directory": "/foreign",

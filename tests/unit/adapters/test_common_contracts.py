@@ -31,12 +31,16 @@ def test_native_token_rejects_nonstring_identity(value: object) -> None:
     assert captured.value.code == "INVALID_REQUEST"
 
 
-def test_native_identity_preserves_claude_session_and_cwd(tmp_path: Path) -> None:
+def test_native_identity_preserves_claude_session_and_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Native identity preserves claude session and cwd.
 
     Args:
         tmp_path: Absolute checkout path used in the native event.
+        monkeypatch: Replace repository discovery with a proven absence.
     """
+    monkeypatch.setattr(common.core, "project_repository", lambda _path: None)
     event = {"session_id": "session", "cwd": str(tmp_path), "tool_use_id": "one"}
     normalized = common.native_identity(event, "claude-code")
     # A directory outside every repository carries an explicit absent repository.
@@ -95,12 +99,16 @@ def test_native_identity_keys_claude_child_under_parent_session(tmp_path: Path) 
     )
 
 
-def test_native_identity_ignores_forged_child_markers(tmp_path: Path) -> None:
+def test_native_identity_ignores_forged_child_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Drop envelope-supplied child markers from a main-thread Claude event.
 
     Args:
         tmp_path: Absolute checkout path used in the native event.
+        monkeypatch: Replace repository discovery with a proven absence.
     """
+    monkeypatch.setattr(common.core, "project_repository", lambda _path: None)
     event = {"session_id": "s", "cwd": str(tmp_path), "child": True, "parent_session_id": "x"}
     normalized = common.native_identity(event, "claude-code")
     assert normalized == {"session_id": "s", "cwd": str(tmp_path), "repository": None}

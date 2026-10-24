@@ -117,7 +117,9 @@ def setup_prompt(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, object]
         Recorded Task assignment and binding fixtures.
     """
     data: dict[str, dict[str, object]] = {}
-    monkeypatch.setattr(common.core, "repository", lambda _cwd: (ROOT, None, []))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _cwd: common.core.Repository(ROOT, None, [])
+    )
     monkeypatch.setattr(common.core.Directory, "absolute", lambda path: Directory(str(path), data))
     return data
 
@@ -166,7 +168,7 @@ def test_prompt_records_exact_lookup_marker_for_codex(
     """
     data = setup_prompt(monkeypatch)
     event = {"cwd": str(ROOT), "session_id": "session", "prompt": "Task: TEST-30"}
-    result = common.prompt(event, "codex")
+    result = common.prompt(common.carry_repository(event), "codex")
     key = core.participant_key({"host": "codex", "session_id": "session"})
     bindings = data[BINDINGS]
     assert bindings[key + ".assignment.json"] == {"issue_id": "TEST-30"}
@@ -195,7 +197,7 @@ def test_task_with_explicit_stop_records_identity_without_startup(
         "session_id": "session",
         "prompt": "Task: TEST-30\nDo not call tools or start setup. Record this identity and stop.",
     }
-    result = common.prompt(event, host)
+    result = common.prompt(common.carry_repository(event), host)
     key = core.participant_key({"host": host, "session_id": "session"})
     assert data == {
         BINDINGS: {
@@ -225,7 +227,7 @@ def test_prompt_refuses_switch_from_existing_assignment(
     key = core.participant_key({"host": "codex", "session_id": "session"})
     data[BINDINGS] = {key + ".assignment.json": {"issue_id": "TEST-30"}}
     event = {"cwd": str(ROOT), "session_id": "session", "prompt": "Task: TEST-31"}
-    result = common.prompt(event, "codex")
+    result = common.prompt(common.carry_repository(event), "codex")
     assert result["decision"] == "block"
     assert data[BINDINGS] == {key + ".assignment.json": {"issue_id": "TEST-30"}}
 
@@ -247,7 +249,7 @@ def test_prompt_records_pending_switch_for_bound_session_without_touching_bindin
         key + ".lookup.json": {"id": "TEST-30", "tool_id": "old", "completed": True},
     }
     event = {"cwd": str(ROOT), "session_id": "session", "prompt": "Task: TEST-31"}
-    result = common.prompt(event, "claude-code")
+    result = common.prompt(common.carry_repository(event), "claude-code")
     # The binding stays on the old issue; only the pending assignment and gate move.
     assert data[BINDINGS] == {
         key + ".json": binding,
@@ -278,7 +280,7 @@ def test_prompt_returns_to_bound_issue_after_unfinished_switch(
         key + ".lookup.json": {"id": "TEST-31", "tool_id": "read-1", "completed": True},
     }
     event = {"cwd": str(ROOT), "session_id": "session", "prompt": "Task: TEST-30"}
-    result = common.prompt(event, "codex")
+    result = common.prompt(common.carry_repository(event), "codex")
     assert "decision" not in result
     assert data[BINDINGS] == {
         key + ".json": binding,
@@ -306,7 +308,7 @@ def test_prompt_keeps_matching_lookup_correlation_for_repeated_switch(
         key + ".lookup.json": retry,
     }
     event = {"cwd": str(ROOT), "session_id": "session", "prompt": "Task: TEST-31"}
-    common.prompt(event, "codex")
+    common.prompt(common.carry_repository(event), "codex")
     assert data[BINDINGS][key + ".lookup.json"] == retry
 
 

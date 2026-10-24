@@ -50,14 +50,14 @@ def test_canonical_bootstrap_allows_exact_diagnostic_and_rejects_extra_unready_f
     monkeypatch.setattr(
         common.core,
         "repository",
-        lambda _path: (CHECKOUT, CHECKOUT.parent / "common", [CHECKOUT]),
+        lambda _path: common.core.Repository(CHECKOUT, CHECKOUT.parent / "common", [CHECKOUT]),
     )
     monkeypatch.setattr(
         common.core.Directory,
         "absolute",
         lambda _path: pytest.fail("opened binding for diagnosis"),
     )
-    event = {"cwd": str(CHECKOUT), "session_id": "session"}
+    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     valid = common.bootstrap_command(base("diagnose"), "codex")
     assert common.canonical_bootstrap(event, valid, "codex", ready=False) is True
     # Extra fields and unknown operations cannot use the narrow unready exception.
@@ -159,9 +159,11 @@ def test_canonical_bootstrap_requires_issue_to_match_persisted_assignment(
             return {"issue_id": "TEST-30"}
 
     # Compare an exact issue request with a command-supplied foreign issue.
-    monkeypatch.setattr(common.core, "repository", lambda _path: (root, None, [root]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(root, None, [root])
+    )
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: Node())
-    event = {"cwd": str(CHECKOUT), "session_id": "session"}
+    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     matching = common.bootstrap_command(base("read", issue_id="TEST-30"), "codex")
     foreign = common.bootstrap_command(base("read", issue_id="TEST-31"), "codex")
     assert common.canonical_bootstrap(event, matching, "codex", ready=False) is True
@@ -221,9 +223,11 @@ def test_canonical_bootstrap_admits_exact_issue_level_diagnose(
         ready: Whether ordinary readiness was already established.
     """
     # Bind the observed session to TEST-30 through a persisted assignment.
-    monkeypatch.setattr(common.core, "repository", lambda _path: (CHECKOUT, None, [CHECKOUT]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(CHECKOUT, None, [CHECKOUT])
+    )
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: AssignmentDirectory())
-    event = {"cwd": str(CHECKOUT), "session_id": "session"}
+    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     issue = {"repo_id": "repo", "issue_id": "TEST-30"}
 
     def admitted(request: dict[str, Any]) -> bool:
@@ -263,7 +267,9 @@ def test_canonical_bootstrap_rejects_foreign_worktree_before_binding_lookup(
         monkeypatch: Replaces repository and binding access boundaries.
     """
     # Detect a command redirected away from the observed checkout.
-    monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(
+        common.core, "repository", lambda path: common.core.Repository(Path(path), None, [])
+    )
     monkeypatch.setattr(
         common.core.Directory,
         "absolute",
@@ -424,7 +430,9 @@ def install_state(monkeypatch: pytest.MonkeyPatch, state: dict[str, Any]) -> Non
         state: Committed issue state served from the issue control directory.
     """
     # Bind the session to TEST-30 and serve the supplied committed state file.
-    monkeypatch.setattr(common.core, "repository", lambda _path: (CHECKOUT, None, [CHECKOUT]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(CHECKOUT, None, [CHECKOUT])
+    )
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: AssignmentDirectory())
     control = IssueControl(state)
 
@@ -507,7 +515,7 @@ def admitted_unready(request: dict[str, Any]) -> bool:
     Returns:
         Whether the hook would admit the command before readiness.
     """
-    event = {"cwd": str(CHECKOUT), "session_id": "session"}
+    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     command = common.bootstrap_command(request, "codex")
     return common.canonical_bootstrap(event, command, "codex", ready=False)
 
@@ -618,7 +626,7 @@ def test_ready_scope_keeps_its_existing_admission(monkeypatch: pytest.MonkeyPatc
     # A ready coordinator may still scope another participant with owned paths.
     install_state(monkeypatch, coordinator_state())
     request = refresh(refreshed(), target_participant=READER_KEY, owned_paths=["context/n.md"])
-    event = {"cwd": str(CHECKOUT), "session_id": "session"}
+    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     command = common.bootstrap_command(request, "codex")
     assert common.canonical_bootstrap(event, command, "codex", ready=True) is True
 
@@ -713,7 +721,9 @@ def install_targets(
         The log of issue IDs the hook inspected.
     """
     # Serve the TEST-30 assignment and a store whose issues directory is modeled.
-    monkeypatch.setattr(common.core, "repository", lambda _path: (CHECKOUT, None, [CHECKOUT]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(CHECKOUT, None, [CHECKOUT])
+    )
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: AssignmentDirectory())
     opened: list[str] = []
 
@@ -753,7 +763,7 @@ def test_rebind_to_recorded_task_target_is_admitted_without_store_reads(
     """
     # The assignment names TEST-30 while the binding still names TEST-29.
     opened = install_targets(monkeypatch, set())
-    event = {"cwd": str(CHECKOUT), "session_id": "session"}
+    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
 
     def admitted(request: dict[str, Any]) -> bool:
         """Evaluate one rebind command through the canonical parser.

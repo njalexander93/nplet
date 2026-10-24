@@ -509,10 +509,15 @@ def test_startup_lookup_reads_only_explicit_session_marker(
             assert name == (".task" if self.level == 0 else ".bindings")
             return Node(self.level + 1)
 
-    monkeypatch.setattr(codex.core, "repository", lambda _cwd: (root, None, [root]))
+    monkeypatch.setattr(
+        codex.core, "repository", lambda _cwd: codex.core.Repository(root, None, [root])
+    )
     monkeypatch.setattr(codex.core.Directory, "absolute", lambda _path: Node())
     assert (
-        codex.startup_lookup_state({"cwd": str(root), "session_id": "s"}, ".lookup-required.json")
+        codex.startup_lookup_state(
+            common.carry_repository({"cwd": str(root), "session_id": "s"}),
+            ".lookup-required.json",
+        )
         is expected
     )
 
@@ -1614,5 +1619,5 @@ def test_startup_lookup_state_is_false_outside_every_repository(
         tmp_path: Disposable non-Git working directory.
     """
     monkeypatch.setattr(core, "project_repository", lambda _path: None)
-    observed = {"cwd": str(tmp_path), "session_id": "s"}
+    observed = common.carry_repository({"cwd": str(tmp_path), "session_id": "s"})
     assert codex.startup_lookup_state(observed, ".lookup-required.json") is False

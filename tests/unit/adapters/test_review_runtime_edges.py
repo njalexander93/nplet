@@ -131,7 +131,9 @@ def install_bindings(monkeypatch: pytest.MonkeyPatch, host: str) -> dict[str, An
         f"/.task/.bindings/{key}.lookup-required.json": copy.deepcopy(assignment),
     }
     # Keep repository discovery and all binding I/O inside the test's memory map.
-    monkeypatch.setattr(common.core, "repository", lambda _cwd: (ROOT, None, [ROOT]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _cwd: common.core.Repository(ROOT, None, [ROOT])
+    )
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _root: MemoryDirectory(entries))
     return entries
 
@@ -147,8 +149,13 @@ def event(host: str, token: str = "call-1", **changes: object) -> dict[str, Any]
     Returns:
         A callback with explicit session and provider fields.
     """
-    # Start with one observed session and native call ID.
-    base: dict[str, Any] = {"cwd": str(ROOT), "session_id": "session", "tool_use_id": token}
+    # Start with one observed session, its carried repository and a native call ID.
+    base: dict[str, Any] = {
+        "cwd": str(ROOT),
+        "session_id": "session",
+        "tool_use_id": token,
+        "repository": core.Repository(ROOT, ROOT, [ROOT]).to_json(),
+    }
     # Encode each host's documented tool name and provider metadata.
     if host == "claude-code":
         base.update(
@@ -216,7 +223,7 @@ def test_cursor_ordinary_provider_specific_hook_validates_provenance_and_object_
     """
     # Exercise actual native identity and the ordinary provider branch, without ticket startup.
     monkeypatch.delenv("CURSOR_CODE_REMOTE", raising=False)
-    monkeypatch.setattr(core, "repository", lambda _cwd: (ROOT, None, [ROOT]))
+    monkeypatch.setattr(core, "repository", lambda _cwd: core.Repository(ROOT, None, [ROOT]))
     monkeypatch.setattr(common, "selected_lookup", lambda *_args: pytest.fail("looked up Task"))
     monkeypatch.setattr(
         common, "native_ticket_lookup", lambda *_args, **_kwargs: pytest.fail("reserved ticket")

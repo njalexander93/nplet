@@ -120,7 +120,7 @@ class LifecycleTests(Fixture):
             "session_id": "coordinator",
             "prompt": "Task: TEST-1",
         }
-        common.prompt(event, "codex")
+        common.prompt(common.carry_repository(event), "codex")
         # Stand in for the completed ticket read so the bootstrap route is reachable.
         key = common.core.participant_key({"host": "codex", "session_id": "coordinator"})
         with (
@@ -188,7 +188,7 @@ class LifecycleTests(Fixture):
         """
         # Start a fresh ticket lookup with no ready participant.
         event = {"cwd": str(self.root), "session_id": "coordinator", "prompt": "Task: TEST-1"}
-        common.prompt(event, "codex")
+        common.prompt(common.carry_repository(event), "codex")
         event.update(hook_event_name="PreToolUse", tool_name="Bash", tool_use_id="prepare")
         # Both governing paths remain read-only preparation across pre/post callbacks.
         for relative in ("AGENTS.md", "docs/runtime/contributor-workflow.md"):

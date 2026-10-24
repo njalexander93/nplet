@@ -226,12 +226,14 @@ class ReviewRegressions(Fixture):
         # Create and explicitly bind the coordinator before recovery admission.
         self.create()
         common.prompt(
-            {
-                "hook_event_name": "UserPromptSubmit",
-                "cwd": str(self.root),
-                "session_id": "coordinator",
-                "prompt": "Task: TEST-1",
-            },
+            common.carry_repository(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "cwd": str(self.root),
+                    "session_id": "coordinator",
+                    "prompt": "Task: TEST-1",
+                }
+            ),
             "codex",
         )
         # Exercise each supported recovery operation with its exact allowed fields.

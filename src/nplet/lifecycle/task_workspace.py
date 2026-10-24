@@ -23,7 +23,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any, NamedTuple, NotRequired, TypedDict
 
 from nplet.lifecycle import _invocation_policy as invocation_policy
 from nplet.lifecycle import _invocation_records as invocation_records
@@ -397,14 +397,66 @@ def git(path: str | Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def repository(path: str | Path) -> tuple[Path, Path, list[Path]]:
+class Repository(NamedTuple):
+    """A non-bare Git repository as seen from one of its worktrees.
+
+    Attributes:
+        root: Worktree root containing the observed directory.
+        common: Common Git directory shared by every worktree.
+        trees: Every worktree root the repository lists.
+    """
+
+    root: Path
+    common: Path
+    trees: list[Path]
+
+    def to_json(self) -> dict[str, Any]:
+        """Encode the repository as JSON-safe text.
+
+        Returns:
+            The ``root``, ``common`` and ``trees`` paths as strings.
+        """
+        return {
+            "root": str(self.root),
+            "common": str(self.common),
+            "trees": [str(tree) for tree in self.trees],
+        }
+
+    @classmethod
+    def from_json(cls, data: object) -> Repository:
+        """Decode a repository previously encoded by ``to_json``.
+
+        Args:
+            data: Untrusted decoded JSON value.
+
+        Returns:
+            The repository with its paths restored.
+
+        Raises:
+            WorkspaceError: ``INVALID_REQUEST`` if the value is not exactly the encoded shape.
+        """
+        # Accept only the exact keys with text paths; anything else is a malformed carrier.
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"root", "common", "trees"}
+            or not isinstance(data["root"], str)
+            or not isinstance(data["common"], str)
+            or not isinstance(data["trees"], list)
+            or not all(isinstance(tree, str) for tree in data["trees"])
+        ):
+            raise WorkspaceError("INVALID_REQUEST")
+        # Restore every text path.
+        return cls(Path(data["root"]), Path(data["common"]), [Path(t) for t in data["trees"]])
+
+
+def repository(path: str | Path) -> Repository:
     """Resolve a non-bare worktree to its common Git directory and member roots.
 
     Args:
         path: Directory inside the requested Git worktree.
 
     Returns:
-        A tuple of worktree root, common Git directory and worktree paths.
+        The worktree root, common Git directory and worktree paths.
 
     Raises:
         WorkspaceError: If the repository is unsupported or membership is inconsistent.
@@ -420,10 +472,10 @@ def repository(path: str | Path) -> tuple[Path, Path, list[Path]]:
         if line.startswith("worktree ")
     ]
     require(root in trees, "REPOSITORY_MISMATCH")
-    return root, common, trees
+    return Repository(root, common, trees)
 
 
-def project_repository(path: str | Path) -> tuple[Path, Path, list[Path]] | None:
+def project_repository(path: str | Path) -> Repository | None:
     """Select the Git repository whose worktrees hold the project code, if one exists.
 
     Args:

@@ -432,7 +432,7 @@ def task_free(
         event: Native envelope whose identity, provenance and child policy passed.
         host: Actual adapter identity.
         provider_operation: Provenance-validated Linear operation, when applicable.
-        roles: Already computed edit roles for this invocation, when available.
+        roles: Edit roles the caller computed for this invocation; None keeps an edit gated.
 
     Returns:
         Whether the call requires no task lifecycle admission.
@@ -460,14 +460,13 @@ def task_free(
     if tool == "Bash":
         # Native adapters supply a canonical command after validating their transport metadata.
         return set(args) == {"command"} and read_command(args.get("command"), host)
-    # Edits are free only when every target lies outside the project code repositories.
-    selected = edit_roles(event) if roles is None else roles
+    # Edits are free only when every caller-classified target lies outside the project
+    # code repositories; unclassified edits stay gated.
+    selected = roles or []
     return bool(selected) and all(role == "external" for role in selected)
 
 
-def edit_roles(
-    event: core.JSONObject, repository: tuple[Path, Path, list[Path]] | None = None
-) -> list[str]:
+def edit_roles(event: core.JSONObject, roots: list[Path]) -> list[str]:
     """Classify every deterministic native edit target against the project repositories.
 
     The gate covers the session's Git repository and its linked worktrees only. A
@@ -476,25 +475,17 @@ def edit_roles(
 
     Args:
         event: Validated native tool and argument envelope.
-        repository: The session repository the caller already selected; None, as from
-            a Codex caller, discovers it from ``cwd``.
+        roots: Worktree roots of the session repository the caller selected; empty
+            when the session lies outside every repository, so every well-formed
+            target is external.
 
     Returns:
         Every target role, or an empty list for an unknown edit shape.
-
-    Raises:
-        core.WorkspaceError: If the session repository is bare or inconsistent.
-        OSError: If Git or a repository root cannot be read.
     """
     # Unknown edits remain readiness-gated without guessing their targets.
     targets = edit_targets(event["tool_name"], event["tool_input"])
     if not targets:
         return []
-    # Discover the repository only when the caller did not select it; a session outside
-    # every repository has no roots, so every well-formed target is external.
-    if repository is None:
-        repository = core.project_repository(event["cwd"])
-    roots = [] if repository is None else repository[2]
     # One worktree list covers the whole patch or single-file mutation.
     is_root = root_test(roots)
     return [target_role(event["cwd"], target, is_root) for target in targets]

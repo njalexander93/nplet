@@ -392,7 +392,7 @@ def test_completion_probe_rejects_transactional_or_corrupt_existing_state() -> N
         transaction.write_text("{}")
         # The probe refuses transaction uncertainty without rolling it forward.
         with pytest.raises(core.WorkspaceError) as captured:
-            common.existing_admission(observed, "codex")
+            common.existing_admission(common.carry_repository(observed), "codex")
         assert captured.value.code == "RECOVERY_REQUIRED"
         assert transaction.read_text() == "{}"
         transaction.unlink()

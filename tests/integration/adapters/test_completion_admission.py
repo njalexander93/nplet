@@ -164,7 +164,7 @@ def test_completion_lookup_does_not_recreate_missing_locks(lock: str) -> None:
         observed = event(case.root, "codex", "Write", {}, call="finished")
         observed["session_id"] = "coordinator"
         with pytest.raises(core.WorkspaceError) as failure:
-            common.existing_admission(observed, "codex")
+            common.existing_admission(common.carry_repository(observed), "codex")
         assert failure.value.code == "RECOVERY_REQUIRED"
         assert not path.exists()
         after = {

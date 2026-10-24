@@ -257,13 +257,14 @@ def startup_lookup_state(event: core.JSONObject, suffix: str) -> bool:
 
     Returns:
         Whether this session has the requested marker.
+
+    Raises:
+        core.WorkspaceError: If the event carries no repository or a malformed one.
     """
-    # Codex events carry no identity-time repository, so discover it here; a session
-    # outside every repository has no store and so no lookup marker.
-    repository = core.project_repository(event["cwd"])
-    if repository is None:
+    # A session outside every repository has no store and so no lookup marker.
+    root = common.session_project_root(event)
+    if root is None:
         return False
-    root, _, _ = repository
     key = core.participant_key({"host": "codex", "session_id": event["session_id"]})
     # Inspect marker files through validated no-follow directory handles.
     with core.Directory.absolute(root) as directory:
@@ -444,9 +445,10 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         core.WorkspaceError: If required binding or store validation fails.
         OSError: If the registered store cannot be accessed.
     """
-    # Codex payloads carry no identity-time repository; discard any such field so the
-    # shared helpers always discover the repository from the working directory.
-    event.pop("repository", None)
+    # Carry the repository discovered from a textual working directory, overwriting any
+    # payload field; other cwd values keep failing their existing validation.
+    if isinstance(event.get("cwd"), str):
+        common.carry_repository(event)
     # Select the event-specific host response and lifecycle action.
     name = event.get("hook_event_name")
     # Route native child UUIDs exclusively through their own participant and bounded tools.
@@ -524,7 +526,11 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         common.native_token(event.get("session_id"))
         common.native_token(event.get("tool_use_id"))
         core.require(isinstance(event.get("tool_input"), dict), "INVALID_REQUEST")
-        roles = task_boundary.edit_roles(event)
+        # Only a deterministic edit consults the carried repository; payloads without a
+        # textual cwd carry none and have no edit to classify.
+        edit = task_boundary.edit_targets(tool, event["tool_input"])
+        repository = common.session_repository(event) if edit else None
+        roles = task_boundary.edit_roles(event, [] if repository is None else repository.trees)
         if task_boundary.task_free(common.native_effect(event, "codex"), "codex", roles=roles):
             return {}
         core.require("control" not in roles, "NOT_OWNER")

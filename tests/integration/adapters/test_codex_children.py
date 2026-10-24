@@ -46,14 +46,16 @@ class ChildTests(Fixture):
         Returns:
             Child identity envelope with no lifecycle binding yet.
         """
-        return children.identity(
-            {
-                "session_id": "coordinator",
-                "cwd": str(self.root),
-                "agent_id": str(uuid.uuid4()),
-                "agent_type": "default",
-                "hook_event_name": "SubagentStart",
-            }
+        return common.carry_repository(
+            children.identity(
+                {
+                    "session_id": "coordinator",
+                    "cwd": str(self.root),
+                    "agent_id": str(uuid.uuid4()),
+                    "agent_type": "default",
+                    "hook_event_name": "SubagentStart",
+                }
+            )
         )
 
     def command(self, event: dict, request: dict) -> dict:
@@ -500,7 +502,7 @@ class ChildTests(Fixture):
         self.call("attach", worktree=str(self.other))
         launch = {**self.launch(1), "cwd": str(self.other)}
         children.admit_spawn(launch)
-        peer = {**self.child(), "cwd": str(self.other)}
+        peer = common.carry_repository({**self.child(), "cwd": str(self.other)})
         context = children.start(peer)
         commands = [line.split(". ", 1)[1] for line in context.splitlines()[1:]]
         path = self.root / ".task/TEST-1/roadmap.md"

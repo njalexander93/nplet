@@ -276,6 +276,37 @@ def test_project_repository_separates_present_absent_and_failed_discovery(
         assert captured.value.code == expected
 
 
+def test_repository_json_round_trips_and_rejects_malformed_shapes(tmp_path: Path) -> None:
+    """Encode a repository as text, decode it back and reject any other shape.
+
+    Args:
+        tmp_path: Disposable root standing in for repository paths.
+    """
+    # The encoded text restores the same named paths.
+    repository = core.Repository(tmp_path, tmp_path / ".git", [tmp_path, tmp_path / "linked"])
+    encoded = repository.to_json()
+    assert encoded == {
+        "root": str(tmp_path),
+        "common": str(tmp_path / ".git"),
+        "trees": [str(tmp_path), str(tmp_path / "linked")],
+    }
+    assert core.Repository.from_json(encoded) == repository
+    # Non-objects, missing or extra keys and nontext paths are malformed carriers.
+    for malformed in (
+        None,
+        [],
+        {"root": str(tmp_path), "common": str(tmp_path)},
+        {**encoded, "extra": "x"},
+        {**encoded, "root": 1},
+        {**encoded, "common": None},
+        {**encoded, "trees": str(tmp_path)},
+        {**encoded, "trees": [1]},
+    ):
+        with pytest.raises(core.WorkspaceError) as captured:
+            core.Repository.from_json(malformed)
+        assert captured.value.code == "INVALID_REQUEST"
+
+
 def test_git_reports_a_plain_directory_as_absent(tmp_path: Path) -> None:
     """Have Git itself report a plain directory as absent rather than mismatched.
 

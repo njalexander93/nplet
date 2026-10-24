@@ -11,6 +11,11 @@ def native_event(tool: str, args: dict[str, object] | None = None) -> dict[str, 
         args: Arguments supplied to the helper under test.
 
     Returns:
-        The host tool event with a stable call ID.
+        The host tool event with a stable call ID, carrying no session repository.
     """
-    return {"tool_use_id": "tool-1", "tool_name": tool, "tool_input": {} if args is None else args}
+    return {
+        "tool_use_id": "tool-1",
+        "tool_name": tool,
+        "tool_input": {} if args is None else args,
+        "repository": None,
+    }
