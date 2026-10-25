@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nplet.adapters import cursor_children as children
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 from tests.unit.adapters.cursor_children_support import cursor_mock_store, cursor_record
 
@@ -87,7 +88,7 @@ def test_reconcile_command_preserves_unrelated_shell_and_rejects_cwd_redirect(
     monkeypatch.setattr(
         children.core, "repository", lambda path: children.core.Repository(Path(path), None, [])
     )
-    children.common.carry_repository(event)
+    event = carrier.carry_repository(event)
     event["tool_input"] = {
         "command": children.reconcile_command("TEST-1", children.call_token("call")),
         "working_directory": "/foreign",

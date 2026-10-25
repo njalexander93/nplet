@@ -12,6 +12,7 @@ import pytest
 from nplet.adapters import cursor_child_session as child_session
 from nplet.adapters import cursor_children as children
 from nplet.adapters import cursor_sources as cursor_sources
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -522,7 +523,7 @@ def test_child_lifecycle_requires_matching_native_working_directory(
     monkeypatch.setattr(
         children.core, "repository", lambda path: children.core.Repository(Path(path), None, [])
     )
-    event = children.common.carry_repository(
+    event = carrier.carry_repository(
         {
             "child": True,
             "session_id": bound["session_id"],

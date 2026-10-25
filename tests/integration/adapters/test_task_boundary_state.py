@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from nplet.adapters import claude, codex, common, cursor, task_boundary
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 from tests.integration.adapters.native_events import event
 from tests.integration.adapters.task_boundary_support import allowed, task_store_snapshot
@@ -109,14 +110,16 @@ def test_completion_uses_recorded_admission_after_target_changes() -> None:
     try:
         case.create()
         case.ready()
-        observed = {
-            "hook_event_name": "PreToolUse",
-            "cwd": str(case.root),
-            "session_id": "coordinator",
-            "tool_use_id": "protected",
-            "tool_name": "Write",
-            "tool_input": {"file_path": "src/protected.md", "content": "content"},
-        }
+        observed = carrier.carry_repository(
+            {
+                "hook_event_name": "PreToolUse",
+                "cwd": str(case.root),
+                "session_id": "coordinator",
+                "tool_use_id": "protected",
+                "tool_name": "Write",
+                "tool_input": {"file_path": "src/protected.md", "content": "content"},
+            }
+        )
         assert codex.handle(observed) == {}
         # Completion targets are mutable; only the recorded native call is authority.
         completed = copy.deepcopy(observed)
@@ -181,7 +184,7 @@ def test_same_free_input_changes_identity_before_completion(host: str) -> None:
         before = copy.deepcopy(case.state())
         external.rmdir()
         link_directory(external, case.root)
-        roots = task_boundary.root_test(core.repository(case.root)[2])
+        roots = task_boundary.root_test(core.repository(case.root).trees)
         assert task_boundary.target_role(str(case.root), str(note), roots) == "protected"
         # The host returns exactly the original input; only the filesystem identity changed.
         completed = {
@@ -379,20 +382,22 @@ def test_completion_probe_rejects_transactional_or_corrupt_existing_state() -> N
     try:
         case.create()
         case.ready()
-        observed = {
-            "cwd": str(case.root),
-            "session_id": "coordinator",
-            "tool_name": "Write",
-            "tool_input": {},
-            "tool_use_id": "pending",
-        }
+        observed = carrier.carry_repository(
+            {
+                "cwd": str(case.root),
+                "session_id": "coordinator",
+                "tool_name": "Write",
+                "tool_input": {},
+                "tool_use_id": "pending",
+            }
+        )
         case.call("tool-start", tool_id="pending")
         control = case.root / ".task/.control/issues/TEST-1"
         transaction = control / "transaction.json"
         transaction.write_text("{}")
         # The probe refuses transaction uncertainty without rolling it forward.
         with pytest.raises(core.WorkspaceError) as captured:
-            common.existing_admission(common.carry_repository(observed), "codex")
+            common.existing_admission(observed, "codex")
         assert captured.value.code == "RECOVERY_REQUIRED"
         assert transaction.read_text() == "{}"
         transaction.unlink()

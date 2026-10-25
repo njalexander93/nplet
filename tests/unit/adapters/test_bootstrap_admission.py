@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from nplet.adapters import common
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -57,7 +58,7 @@ def test_canonical_bootstrap_allows_exact_diagnostic_and_rejects_extra_unready_f
         "absolute",
         lambda _path: pytest.fail("opened binding for diagnosis"),
     )
-    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
+    event = carrier.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     valid = common.bootstrap_command(base("diagnose"), "codex")
     assert common.canonical_bootstrap(event, valid, "codex", ready=False) is True
     # Extra fields and unknown operations cannot use the narrow unready exception.
@@ -163,7 +164,7 @@ def test_canonical_bootstrap_requires_issue_to_match_persisted_assignment(
         common.core, "repository", lambda _path: common.core.Repository(root, None, [root])
     )
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: Node())
-    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
+    event = carrier.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     matching = common.bootstrap_command(base("read", issue_id="TEST-30"), "codex")
     foreign = common.bootstrap_command(base("read", issue_id="TEST-31"), "codex")
     assert common.canonical_bootstrap(event, matching, "codex", ready=False) is True
@@ -227,7 +228,7 @@ def test_canonical_bootstrap_admits_exact_issue_level_diagnose(
         common.core, "repository", lambda _path: common.core.Repository(CHECKOUT, None, [CHECKOUT])
     )
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: AssignmentDirectory())
-    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
+    event = carrier.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     issue = {"repo_id": "repo", "issue_id": "TEST-30"}
 
     def admitted(request: dict[str, Any]) -> bool:
@@ -515,7 +516,7 @@ def admitted_unready(request: dict[str, Any]) -> bool:
     Returns:
         Whether the hook would admit the command before readiness.
     """
-    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
+    event = carrier.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     command = common.bootstrap_command(request, "codex")
     return common.canonical_bootstrap(event, command, "codex", ready=False)
 
@@ -626,7 +627,7 @@ def test_ready_scope_keeps_its_existing_admission(monkeypatch: pytest.MonkeyPatc
     # A ready coordinator may still scope another participant with owned paths.
     install_state(monkeypatch, coordinator_state())
     request = refresh(refreshed(), target_participant=READER_KEY, owned_paths=["context/n.md"])
-    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
+    event = carrier.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     command = common.bootstrap_command(request, "codex")
     assert common.canonical_bootstrap(event, command, "codex", ready=True) is True
 
@@ -763,7 +764,7 @@ def test_rebind_to_recorded_task_target_is_admitted_without_store_reads(
     """
     # The assignment names TEST-30 while the binding still names TEST-29.
     opened = install_targets(monkeypatch, set())
-    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
+    event = carrier.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
 
     def admitted(request: dict[str, Any]) -> bool:
         """Evaluate one rebind command through the canonical parser.
@@ -928,7 +929,7 @@ def test_bootstrap_worktree_must_match_the_session_repository(
         "repository",
         lambda _path: common.core.Repository(other, other / ".git", [other]),
     )
-    event = common.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
+    event = carrier.carry_repository({"cwd": str(CHECKOUT), "session_id": "session"})
     command = common.bootstrap_command(base("diagnose"), "codex")
     assert common.canonical_bootstrap(event, command, "codex", ready=False) is False
 

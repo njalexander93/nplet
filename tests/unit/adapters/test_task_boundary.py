@@ -4,6 +4,7 @@ import shlex
 
 import pytest
 
+from nplet.adapters import session_repository as carrier
 from nplet.adapters import task_boundary as boundary
 
 pytestmark = pytest.mark.unit
@@ -428,7 +429,7 @@ def admission_store(tmp_path, monkeypatch):
     monkeypatch.setattr(common.core, "fs_identity", lambda _path: [1, 2])
     monkeypatch.setattr(common.core.Directory, "absolute", lambda _path: ReadDirectory(tree))
     monkeypatch.setattr(common.core, "execute", lambda *_args: pytest.fail("lifecycle mutation"))
-    return tree, common.carry_repository(observed), key, state
+    return tree, carrier.carry_repository(observed), key, state
 
 
 @pytest.mark.parametrize("missing", ["bindings", "binding"])

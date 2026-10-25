@@ -7,6 +7,7 @@ import pytest
 
 from nplet.adapters import codex as hook
 from nplet.adapters import common
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as w
 from tests.support import Fixture
 from tests.types import JsonObject
@@ -60,12 +61,14 @@ class ReviewRegressions(Fixture):
             AssertionError: An asserted lifecycle or boundary invariant does not hold.
         """
         # Bind the session and build a valid explicit-shell diagnostic request.
-        event = {
-            "hook_event_name": "UserPromptSubmit",
-            "cwd": str(self.root),
-            "session_id": "coordinator",
-            "prompt": "Task: TEST-1",
-        }
+        event = carrier.carry_repository(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": str(self.root),
+                "session_id": "coordinator",
+                "prompt": "Task: TEST-1",
+            }
+        )
         hook.handle(event)
         request = self.req(
             "diagnose", repo_id=None, issue_id=None, issue_uuid=None, coordinator=None
@@ -226,7 +229,7 @@ class ReviewRegressions(Fixture):
         # Create and explicitly bind the coordinator before recovery admission.
         self.create()
         common.prompt(
-            common.carry_repository(
+            carrier.carry_repository(
                 {
                     "hook_event_name": "UserPromptSubmit",
                     "cwd": str(self.root),

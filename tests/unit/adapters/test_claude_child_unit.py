@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from nplet.adapters import common
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -31,7 +32,7 @@ def parent_event(root: Path, tool_id: str = "agent-call") -> dict[str, Any]:
         The parent envelope for one Agent call.
     """
     event = {"cwd": str(root), "session_id": PARENT, "tool_use_id": tool_id, "tool_name": "Agent"}
-    return common.carry_repository(event)
+    return carrier.carry_repository(event)
 
 
 def child_event(root: Path) -> dict[str, Any]:
@@ -43,7 +44,7 @@ def child_event(root: Path) -> dict[str, Any]:
     Returns:
         The child envelope carrying its parent session.
     """
-    return common.carry_repository(
+    return carrier.carry_repository(
         {
             "hook_event_name": "SubagentStart",
             "cwd": str(root),

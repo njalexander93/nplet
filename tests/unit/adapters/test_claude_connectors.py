@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from nplet.adapters import common
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 from tests.types import JsonObject
 
@@ -242,7 +243,7 @@ def test_preparation_tool_bounds_tool_search_and_paths(
             The native envelope.
         """
         observed = {"cwd": str(tmp_path), "tool_name": tool, "tool_input": args, "tool_use_id": "t"}
-        return common.carry_repository(observed)
+        return carrier.carry_repository(observed)
 
     # Positive selections and reads.
     selection = f"select:mcp__{CONNECTOR}__get_issue, mcp__linear__get_issue"

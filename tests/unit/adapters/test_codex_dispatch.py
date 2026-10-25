@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from nplet.adapters import codex, common
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -63,6 +64,7 @@ def test_pending_ticket_keeps_independent_task_free_work_outside_admission(
     monkeypatch.setattr(core, "execute", lambda *_args: pytest.fail("started lifecycle work"))
     observed = {
         "hook_event_name": "PreToolUse",
+        "cwd": str(Path.cwd()),
         "session_id": "session",
         "tool_use_id": "independent",
         "tool_name": tool,
@@ -515,7 +517,7 @@ def test_startup_lookup_reads_only_explicit_session_marker(
     monkeypatch.setattr(codex.core.Directory, "absolute", lambda _path: Node())
     assert (
         codex.startup_lookup_state(
-            common.carry_repository({"cwd": str(root), "session_id": "s"}),
+            carrier.carry_repository({"cwd": str(root), "session_id": "s"}),
             ".lookup-required.json",
         )
         is expected
@@ -555,6 +557,7 @@ def test_codex_pretool_preserves_failed_core_readiness_code(
             "tool_use_id": "unit-tool",
             "tool_input": {},
             "hook_event_name": "PreToolUse",
+            "cwd": str(Path.cwd()),
             "tool_name": "apply_patch",
         }
     )
@@ -593,6 +596,7 @@ def test_codex_pretool_rejects_poll_without_observed_process_handle(
         {
             "session_id": "unit-session",
             "hook_event_name": "PreToolUse",
+            "cwd": str(Path.cwd()),
             "tool_name": "write_stdin",
             "tool_input": {},
             "tool_use_id": "poll-1",
@@ -644,6 +648,7 @@ def test_codex_pretool_requires_recorded_ticket_lookup_before_other_tools(
             "tool_use_id": "unit-tool",
             "tool_input": {},
             "hook_event_name": "PreToolUse",
+            "cwd": str(Path.cwd()),
             "tool_name": "apply_patch",
         }
     ) == codex.denial("TICKET_READ_REQUIRED")
@@ -654,6 +659,7 @@ def test_codex_pretool_requires_recorded_ticket_lookup_before_other_tools(
                 "tool_use_id": "unit-tool",
                 "tool_input": {},
                 "hook_event_name": "PreToolUse",
+                "cwd": str(Path.cwd()),
                 "tool_name": "mcp__codex_apps__linear_get_issue",
             }
         )
@@ -706,6 +712,7 @@ def test_codex_pretool_admits_exact_provider_gate_without_tool_start(
                 "tool_use_id": "unit-tool",
                 "tool_input": {},
                 "hook_event_name": "PreToolUse",
+                "cwd": str(Path.cwd()),
                 "tool_name": "mcp__codex_apps__linear_get_document",
             }
         )
@@ -745,6 +752,7 @@ def test_pending_ticket_fences_special_mutation_routes_before_admission(
     monkeypatch.setattr(codex.codex_children, "admit_control", control)
     observed = {
         "hook_event_name": "PreToolUse",
+        "cwd": str(Path.cwd()),
         "session_id": "parent",
         "tool_use_id": "protected",
         "tool_name": tool,
@@ -795,6 +803,7 @@ def test_codex_pretool_records_ready_tool_or_exact_core_denial(
             "session_id": "unit-session",
             "tool_input": {},
             "hook_event_name": "PreToolUse",
+            "cwd": str(Path.cwd()),
             "tool_name": "apply_patch",
             "tool_use_id": "read-1",
         }
@@ -1029,6 +1038,7 @@ def test_codex_pretool_rechecks_ready_bootstrap_without_tool_start(
                 "tool_use_id": "unit-tool",
                 "tool_input": {},
                 "hook_event_name": "PreToolUse",
+                "cwd": str(Path.cwd()),
                 "tool_name": "exec_command",
             }
         )
@@ -1056,6 +1066,7 @@ def test_codex_pretool_records_correlated_poll_handle(monkeypatch: pytest.Monkey
     event = {
         "session_id": "unit-session",
         "hook_event_name": "PreToolUse",
+        "cwd": str(Path.cwd()),
         "tool_name": "write_stdin",
         "tool_use_id": "poll-1",
         "tool_input": {"session_id": 77},
@@ -1182,6 +1193,7 @@ def test_codex_provider_gate_failure_falls_through_to_readiness(
             "tool_use_id": "unit-tool",
             "tool_input": {},
             "hook_event_name": "PreToolUse",
+            "cwd": str(Path.cwd()),
             "tool_name": "mcp__codex_apps__linear_get_document",
         }
     ) == codex.denial("SOURCE_STALE")
@@ -1446,7 +1458,7 @@ def test_parent_collaboration_dispatch_uses_bounded_route_only(
     # One callback must reach exactly one bounded handler with unchanged call correlation.
     assert codex.handle(event) == {}
     selected = route if phase == "PreToolUse" else "parent_post"
-    handlers[selected].assert_called_once_with(event)
+    handlers[selected].assert_called_once_with(carrier.carry_repository(event))
     assert sum(handler.call_count for handler in handlers.values()) == 1
     execute.assert_not_called()
 
@@ -1565,7 +1577,8 @@ def test_ticket_completion_normalizes_only_observed_native_success(
     directory.child.return_value = directory
     directory.json.side_effect = records.__getitem__
     directory.exists.side_effect = records.__contains__
-    monkeypatch.setattr(codex.core, "repository", Mock(return_value=(Path.cwd(), None, None)))
+    checkout = core.Repository(Path.cwd(), None, [Path.cwd()])
+    monkeypatch.setattr(codex.core, "repository", Mock(return_value=checkout))
     monkeypatch.setattr(codex.core.Directory, "absolute", Mock(return_value=directory))
     startup = Mock(return_value={"participant_id": key, "coordinator": key})
     monkeypatch.setattr(codex.startup, "start", startup)
@@ -1579,15 +1592,17 @@ def test_ticket_completion_normalizes_only_observed_native_success(
     if explicit_error is not None:
         # An explicit provider failure must survive native normalization.
         response["isError"] = explicit_error
-    event = {
-        "hook_event_name": phase,
-        "tool_name": tool,
-        "cwd": str(Path.cwd()),
-        "session_id": "parent",
-        "tool_use_id": "lookup",
-        "tool_input": {"id": "TEST-30"},
-        "tool_response": response,
-    }
+    event = carrier.carry_repository(
+        {
+            "hook_event_name": phase,
+            "tool_name": tool,
+            "cwd": str(Path.cwd()),
+            "session_id": "parent",
+            "tool_use_id": "lookup",
+            "tool_input": {"id": "TEST-30"},
+            "tool_response": response,
+        }
+    )
     # Verify successful startup or exact rejection, including marker cleanup effects.
     if expected is None:
         result = codex.ticket_lookup(event, complete=True)
@@ -1619,5 +1634,5 @@ def test_startup_lookup_state_is_false_outside_every_repository(
         tmp_path: Disposable non-Git working directory.
     """
     monkeypatch.setattr(core, "project_repository", lambda _path: None)
-    observed = common.carry_repository({"cwd": str(tmp_path), "session_id": "s"})
+    observed = carrier.carry_repository({"cwd": str(tmp_path), "session_id": "s"})
     assert codex.startup_lookup_state(observed, ".lookup-required.json") is False

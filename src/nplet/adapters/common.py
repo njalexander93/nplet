@@ -14,6 +14,13 @@ from pathlib import Path
 
 from nplet.adapters import bootstrap as encoded_bootstrap
 from nplet.adapters import runner, task_boundary
+from nplet.adapters.session_repository import (
+    carry_repository,
+    project_root,
+    session_project_root,
+    session_repository,
+    session_root,
+)
 from nplet.lifecycle import task_workspace as core
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -1215,97 +1222,6 @@ def native_token(value: object) -> str:
     return core.token(value)
 
 
-def project_root(path: str) -> Path | None:
-    """Select the worktree root of the project repository containing a directory.
-
-    Args:
-        path: Native working directory.
-
-    Returns:
-        The worktree root, or None when the directory is outside every repository.
-
-    Raises:
-        core.WorkspaceError: If repository discovery fails rather than proving absence.
-        OSError: If Git cannot be launched.
-    """
-    return None if (repository := core.project_repository(path)) is None else repository.root
-
-
-def carry_repository(event: core.JSONObject) -> core.JSONObject:
-    """Record the session repository discovered from ``cwd`` in the event.
-
-    Overwriting the field also neutralizes any value the raw host payload supplied.
-
-    Args:
-        event: Native event whose ``cwd`` is a string.
-
-    Returns:
-        The same event with ``repository`` set to the encoded repository, or None
-        outside every repository.
-
-    Raises:
-        core.WorkspaceError: If repository discovery fails rather than proving absence.
-        OSError: If Git cannot be launched.
-    """
-    # Discover once and overwrite any payload-supplied value with the JSON-safe encoding.
-    repository = core.project_repository(event["cwd"])
-    event["repository"] = None if repository is None else repository.to_json()
-    return event
-
-
-def session_repository(event: core.JSONObject) -> core.Repository | None:
-    """Decode this session's repository recorded by ``carry_repository``.
-
-    Args:
-        event: Native event carrying ``repository``.
-
-    Returns:
-        The session repository, or None when the session lies outside every repository.
-
-    Raises:
-        core.WorkspaceError: ``INVALID_REQUEST`` if the event carries no repository or a
-            malformed one.
-    """
-    # Every adapter carries the repository before use; never rediscover it here.
-    core.require("repository" in event, "INVALID_REQUEST")
-    carried = event["repository"]
-    return None if carried is None else core.Repository.from_json(carried)
-
-
-def session_project_root(event: core.JSONObject) -> Path | None:
-    """Select the worktree root of this session's carried project repository.
-
-    Args:
-        event: Native event carrying ``repository``.
-
-    Returns:
-        The worktree root, or None when the session lies outside every repository.
-
-    Raises:
-        core.WorkspaceError: If the carried repository is missing or malformed.
-    """
-    return None if (repository := session_repository(event)) is None else repository.root
-
-
-def session_root(event: core.JSONObject) -> Path:
-    """Select the worktree root of this session's project repository.
-
-    Args:
-        event: Native event carrying ``repository``.
-
-    Returns:
-        The session's worktree root.
-
-    Raises:
-        core.WorkspaceError: ``REPOSITORY_ABSENT`` when the session lies outside every
-            repository, or a carrier failure from ``session_repository``.
-    """
-    # A session outside every repository has no root to open.
-    if (root := session_project_root(event)) is None:
-        raise core.WorkspaceError("REPOSITORY_ABSENT")
-    return root
-
-
 def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
     """Validate native session and worktree identity without manufacturing either.
 
@@ -1315,8 +1231,8 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
 
     Returns:
         A normalized envelope retaining native tool IDs and inputs, with ``repository``
-        holding the session's project repository as text (root, common Git directory
-        and worktree roots), or None outside every repository. A Claude subagent
+        holding the session's project repository as a JSON-safe dict (root, common
+        Git directory and worktree roots), or None outside every repository. A Claude subagent
         event is keyed by ``<session_id>/agent/<agent_id>``, marked ``child`` and keeps
         the raw parent session in ``parent_session_id``.
 
@@ -1352,7 +1268,7 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
         # Resolve the session repository once; the workspace root must share it, or both
         # must lie outside every repository.
         normalized["cwd"] = cwd
-        carry_repository(normalized)
+        normalized = carry_repository(normalized)
         core.require(
             project_root(roots[0]) == session_project_root(normalized), "REPOSITORY_MISMATCH"
         )
@@ -1376,7 +1292,7 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
             session = core.token(session + "/agent/" + agent)
         # Resolve the session repository once from the validated working directory.
         normalized["cwd"] = cwd
-        carry_repository(normalized)
+        normalized = carry_repository(normalized)
     # Key the envelope by the validated native session.
     normalized["session_id"] = session
     return normalized

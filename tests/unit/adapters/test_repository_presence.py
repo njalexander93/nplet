@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nplet.adapters import codex, common
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 from tests.unit.adapters.native_event_support import native_event
 
@@ -50,7 +51,7 @@ def test_native_tool_cursor_shell_rejects_foreign_directory(
     )
     checkout = Path(Path.cwd().anchor) / "checkout"
     other = Path(Path.cwd().anchor) / "other"
-    native = common.carry_repository(
+    native = carrier.carry_repository(
         {
             **native_event("Shell", {"command": "echo ok", "working_directory": str(other)}),
             "cwd": str(checkout),
@@ -74,7 +75,7 @@ def test_non_repository_session_has_no_lookup_or_admission(
         tmp_path: Disposable non-Git working directory.
     """
     monkeypatch.setattr(core, "project_repository", lambda _path: None)
-    observed = common.carry_repository(
+    observed = carrier.carry_repository(
         {**native_event("Write"), "cwd": str(tmp_path), "session_id": "fresh"}
     )
     assert common.lookup_required(observed, "claude-code") is False
@@ -93,7 +94,7 @@ def test_cursor_shell_metadata_outside_every_repository_stays_admissible(
     monkeypatch.setattr(common.core, "project_repository", lambda _path: None)
     plain = tmp_path / "plain"
     # A Shell override naming the same non-Git directory is still admissible.
-    native = common.carry_repository(
+    native = carrier.carry_repository(
         {
             **native_event("Shell", {"command": "pwd", "working_directory": str(plain)}),
             "cwd": str(plain),
@@ -120,7 +121,7 @@ def test_cursor_shell_metadata_outside_every_repository_stays_admissible(
 def test_native_identity_carries_the_session_repository(
     host: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Carry the discovered repository as JSON text, present or absent, for both hosts.
+    """Carry the discovered repository as a JSON-safe dict, present or absent, for both hosts.
 
     Args:
         host: Native adapter whose identity normalization is exercised.
@@ -134,7 +135,7 @@ def test_native_identity_carries_the_session_repository(
         if host == "claude-code"
         else {"conversation_id": "s", "workspace_roots": [str(tmp_path)], "repository": forged}
     )
-    # A present repository round-trips through text back to the same paths.
+    # A present repository round-trips through its JSON-safe encoding to the same paths.
     present = core.Repository(tmp_path, tmp_path / ".git", [tmp_path, tmp_path / "linked"])
     monkeypatch.setattr(common.core, "project_repository", lambda _path: present)
     normalized = common.native_identity(event, host)
@@ -145,9 +146,9 @@ def test_native_identity_carries_the_session_repository(
     }
     # Once carried, the repository is never discovered again.
     monkeypatch.setattr(common.core, "project_repository", lambda _path: pytest.fail("probed"))
-    assert common.session_repository(normalized) == present
-    assert common.session_project_root(normalized) == tmp_path
-    assert common.session_root(normalized) == tmp_path
+    assert carrier.session_repository(normalized) == present
+    assert carrier.session_project_root(normalized) == tmp_path
+    assert carrier.session_root(normalized) == tmp_path
     # Proven absence is carried as None.
     monkeypatch.setattr(common.core, "project_repository", lambda _path: None)
     assert common.native_identity(event, host)["repository"] is None
@@ -161,14 +162,14 @@ def test_session_repository_requires_the_carried_field(tmp_path: Path) -> None:
     """
     # A session carried outside every repository has no root to open.
     absent = {"cwd": str(tmp_path), "repository": None}
-    assert common.session_project_root(absent) is None
+    assert carrier.session_project_root(absent) is None
     with pytest.raises(core.WorkspaceError) as captured:
-        common.session_root(absent)
+        carrier.session_root(absent)
     assert captured.value.code == "REPOSITORY_ABSENT"
     # Without a carried value, or with a malformed one, nothing is rediscovered.
     for event in ({"cwd": str(tmp_path)}, {"cwd": str(tmp_path), "repository": {"root": "/"}}):
         with pytest.raises(core.WorkspaceError) as captured:
-            common.session_repository(event)
+            carrier.session_repository(event)
         assert captured.value.code == "INVALID_REQUEST"
 
 
@@ -193,6 +194,23 @@ def test_codex_payload_repository_field_is_overwritten(
         return None
 
     monkeypatch.setattr(core, "project_repository", discover)
+    classified: list[list[Path]] = []
+    classify = codex.task_boundary.edit_roles
+
+    def edit_roles(event: core.JSONObject, roots: list[Path]) -> list[str]:
+        """Record the worktree roots the classifier received, then classify normally.
+
+        Args:
+            event: Carried Codex event being classified.
+            roots: Worktree roots taken from the carried repository.
+
+        Returns:
+            The roles the real classifier assigns.
+        """
+        classified.append(roots)
+        return classify(event, roots)
+
+    monkeypatch.setattr(codex.task_boundary, "edit_roles", edit_roles)
     observed = {
         "hook_event_name": "PreToolUse",
         "cwd": str(tmp_path),
@@ -202,7 +220,7 @@ def test_codex_payload_repository_field_is_overwritten(
         "tool_input": {"file_path": str(tmp_path / "note.md"), "content": "prose"},
         "repository": {"root": "/forged", "common": "/forged/.git", "trees": ["/forged"]},
     }
-    # The forged field is replaced by one discovery before classification.
+    # One discovery replaces the forged field, so the classifier sees no forged root.
     assert codex.handle(observed) == {}
     assert probes == [str(tmp_path)]
-    assert observed["repository"] is None
+    assert classified == [[]]
