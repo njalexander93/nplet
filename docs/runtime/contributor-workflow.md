@@ -6,6 +6,42 @@ Use this procedure when asked to start or resume a repository issue, including a
 
 This is the canonical contributor procedure required by [root instructions](../../AGENTS.md). It defines agent behavior; prose alone does not enforce it. Preserve the [lifecycle contract](task-workspace.md), scoped ownership, recovery rules, supported platforms and [human-controlled publication](../framework/baseline.md#authoring-and-publication-rules).
 
+## Issue intake and Planned readiness
+
+Creating, updating and planning an issue is task-free project administration through the [task-free parent route](host-hooks.md#task-free-parent-operations). It needs no Task binding and grants no implementation authority. The packaged [sizing and classification policy](../../src/nplet/resources/organization/baseline.md#issue-sizing-and-classification) is authoritative for points, classifications and Planned readiness; apply it rather than restating it.
+
+1. **Capture.** After creating an issue, read it back and report its link and actual provider status, such as Proposed, Backlog or Triage. State plainly that it is a placeholder, not Planned. A rough description is enough at capture.
+2. **Scope.** Before moving an issue to Planned, complete the [scoping record](#scoping-record) in its description. Estimate additions plus deletions for every affected area: implementation, tests, fixtures, configuration, documentation and supporting changes. A replacement counts both the removed and the added lines. Derive points from the total, then assign Agent Class, Assurance Level, Type and Execution independently.
+3. **Decompose.** Above 5 points or 1,000 estimated lines, first seek smaller concrete deliverables, and scope and classify each increment the same way. An 8-point issue records why reasonable splitting fails and needs explicit human approval before Planned. Never admit a 13-point issue; decompose it instead. Link sibling increments as related and use blocking relationships only for genuine prerequisites. Keep each increment a separately reviewable PR.
+4. **Move to Planned** only when every required record field is complete and, for 8 points, the human approval is recorded. Otherwise leave the issue in its capture status and report the missing fields. Read back the Planned status.
+
+The scoping record and Planned status do not approve an implementation roadmap, admit a Wave or authorize execution. Starting the issue still follows bootstrap and the unchanged [proposal approval gate](#3-present-a-concrete-proposal-and-wait).
+
+**Waves.** Wave selection caps a Wave at 12 points and 3,000 estimated changed lines; both are caps, not targets ([Wave boundaries](../../src/nplet/resources/organization/baseline.md#planning-and-wave-boundaries)). This procedure starts one issue per master; it neither selects nor admits Waves.
+
+### Scoping record
+
+Keep the record compact. Open questions must not leave a required field unresolved.
+
+```text
+Deliverable:
+Completion criteria:
+Estimate basis (additions + deletions per area):
+  implementation / tests / fixtures / configuration / documentation / supporting:
+Estimated total: <low>–<high> lines; points:
+Agent Class:
+Assurance Level:
+Type:
+Execution:
+Decomposition: split into <increments> | not split because <reason>
+8-point rationale and human approval reference (8 points only):
+Related (sibling increments):
+Blocked by (genuine prerequisites only):
+Open questions:
+```
+
+**Exit:** the issue is either a reported placeholder in its capture status or Planned with a complete record. Neither state starts the issue.
+
 ## Before protected implementation: bootstrap readiness
 
 1. Submit exactly one `Task: <issue-id>` line. Read that exact Linear ticket as the first issue-provider operation in the startup sequence, using the selected runtime's supported issue-read tool. Independent task-free work remains available while the ticket read is pending. The issue-startup preparation route also admits named reads: loading the issue-read tool's schema and reading this procedure or the root `AGENTS.md`. The rule is runtime-neutral; Claude Code supports `ToolSearch` for the configured `get_issue` schema and exact governing file reads; Codex supports the two exact governing shell reads. See the host guide for each admitted spelling. This read precedes local workspace readiness. A session already bound to another issue may submit the Task line: the verified ticket read moves its binding through `rebind` and preserves the old issue; unresolved tool work, or participants still attached to an issue it coordinates, must be settled or detached first; a failed read keeps the old binding, and a Task line for that issue returns to it. The adapter validates the requested identifier and correlates the native completion; see [runtime-specific ticket-read protocols](host-hooks.md#ticket-read-protocols). A verified provider response that it could not find the requested issue stops with its identifier and creates no issue workspace. Authentication, network, permission and malformed-response failures retain their distinct diagnostics.
@@ -37,7 +73,7 @@ The contract is runtime-neutral. This checkout implements adapters for Codex, Cu
 
 ## 3. Present a concrete proposal and wait
 
-1. Populate the roadmap with the issue objective, criteria, governing references, exact candidate context, existing progress and proposed numbered steps. Each step names **scope, dependencies, outputs, verification and exit criteria**. Identify permitted inputs and ownership boundaries.
+1. Populate the roadmap with the issue objective, criteria, governing references, exact candidate context, existing progress and proposed numbered steps. Each step names **scope, dependencies, outputs, verification and exit criteria**. Identify permitted inputs and ownership boundaries. For an issue already in Planned, reassess its [scoping record](#scoping-record) against the sizing policy. If it no longer fits, for example because a re-estimate crosses a point range or exceeds 1,000 lines, say so in the proposal with the proposed re-scoping or decomposition. Reassess only the started issue; do not clean up the backlog.
 2. Present the populated proposal and its revision to the human. Mark it proposed and awaiting approval. A blank template, prior approval of the general workflow or a request to start the issue is not approval of this implementation roadmap.
 3. Stop before implementation until the human explicitly approves that proposal. Record the attributable approval and exact approved revision. Silence is not approval.
 
