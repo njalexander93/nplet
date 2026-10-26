@@ -4,7 +4,7 @@
 
 These scenarios check the [scope-discovery rules][discovery], the [stop route][stop] and its resume paragraph by walking each execution-time discovery to its outcome. Each row names the governing text that decides it. They are not tests of wording, issue records, provider states or runtime enforcement. No scenario creates, moves, approves, starts or launches a real issue or thread.
 
-**Rule keys.** **[D]** = [scope discovery during execution][discovery]; **[X]** = [stop route][stop], including its blocker record and **Resume** paragraph; **[M]** = [stage 4 material change][execute]; **[P]** = [stage 3 proposal gate][proposal]; **[E]** = [stage 8][deliver] step 4 and the [estimate outcome record][outcome]; **[I]** = [intake][intake]; **[B]** = [estimate outcomes and discovered scope][size]; **[A]** = [Work Item Plan amendment][plan]; **[T]** = [state transitions][states].
+**Rule keys.** **[D]** = [scope discovery during execution][discovery]; **[X]** = [stop route][stop], including its blocker record and **Resume** paragraph; **[P]** = [stage 3 proposal gate][proposal]; **[E]** = [stage 8][deliver] step 4 and the [estimate outcome record][outcome]; **[I]** = [intake][intake]; **[B]** = [estimate outcomes and discovered scope][size]; **[A]** = [Work Item Plan amendment][plan]; **[T]** = [state transitions][states].
 
 Every scenario starts from an issue with an approved roadmap, in **In Progress**, with lifecycle outcome `active`.
 
@@ -44,7 +44,7 @@ Input: the criteria need a lifecycle operation that does not exist. Adding it is
 | # | Input | Expected outcome | Decided by |
 | --- | --- | --- | --- |
 | 5 | An optional improvement was recorded as blocking | Reclassify: it is not needed for the criteria, so it is related, not blocking. Remove the blocker; work continues. | **[D]** "not needed to meet the acceptance criteria" and "never as blocking"; **[I]** step 3 "use blocking relationships only for genuine prerequisites". |
-| 6 | A 30-line necessary change outside the approved scope that cannot stand alone as a PR | Material change, not a separate issue. Record it, present a revised proposal and wait for explicit approval before the affected work. Unaffected approved work continues. | **[D]** "A small necessary out-of-scope change that cannot stand alone is a material change"; **[M]** "requires a revised proposal and explicit approval before affected implementation" and "Continue unaffected approved work where possible." |
+| 6 | About 50 lines of supporting code outside the approved scope are needed to make the scoped feature work | Make the change and continue; no new issue and no new approval. Note it in the PR and the estimate outcome record. Adding another feature to finish the scoped one is instead a necessary prerequisite (scenario 3). | **[D]** "is not a new deliverable: make it, note it in the PR and the" and "Adding another feature to the PR to finish the scoped one is never such a change." |
 | 7 | Prerequisite merged, but it changes the remaining scope materially | Present a revised proposal and wait. The earlier approval does not carry over; the merge itself is not approval. | **[X]** "If the remaining scope, criteria or authority changed materially, present a revised proposal and wait"; **[X]** "Child completion, the prerequisite's merge or the human's earlier approval of other work is never new approval."; **[P]** "Silence is not approval." |
 | 8 | Prerequisite PR approved but not merged, its merge not yet verified on `main`, or the issue still open | Do not resume. The original stays **Blocked** with outcome `blocked`. | **[X]** "only after the prerequisite's verified merge into `main`". |
 | 9 | Variance or refreshed `main` pushes the remaining work above 5 points or 1,000 lines | Apply intake step 3 through a revised proposal: seek smaller deliverables, or record the 8-point rationale and get human approval. Variance alone is still not a blocker. | **[D]** "When refreshed `main` or the variance breaks the decomposition rules for the remaining work, apply"; **[I]** step 3 "Above 5 points or 1,000 estimated lines, first seek smaller concrete deliverables". |
@@ -54,7 +54,6 @@ A discovery that changes the current plan rather than adding a separate delivera
 
 [discovery]: contributor-workflow.md#scope-discovery-during-execution
 [stop]: contributor-workflow.md#stop-route-for-a-necessary-prerequisite
-[execute]: contributor-workflow.md#4-execute-within-the-approval-boundary
 [proposal]: contributor-workflow.md#3-present-a-concrete-proposal-and-wait
 [deliver]: contributor-workflow.md#8-submit-and-verify-delivery
 [outcome]: contributor-workflow.md#estimate-outcome-record

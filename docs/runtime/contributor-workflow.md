@@ -95,7 +95,7 @@ Classify a discovery by its scope, not its size. No line count or percentage mak
 - **Optional improvement:** not needed to meet the acceptance criteria. Record it as a separate issue linked as related through task-free project administration, never as blocking, and continue.
 - **Necessary prerequisite:** needed to meet the criteria, outside the approved scope and a reviewable deliverable of its own. Follow the [stop route](#stop-route-for-a-necessary-prerequisite).
 
-A small necessary out-of-scope change that cannot stand alone is a material change: use the revised-proposal rule above.
+A small necessary change that only makes the approved deliverable work, such as about 50 lines of supporting code, is not a new deliverable: make it, note it in the PR and the [estimate outcome record](#estimate-outcome-record), and continue without new approval. Adding another feature to the PR to finish the scoped one is never such a change.
 
 #### Stop route for a necessary prerequisite
 
