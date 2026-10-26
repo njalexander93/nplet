@@ -69,21 +69,21 @@ Expected outcome: each increment is ≤5 points, separately scoped, classified a
 | Candidate set (priority order) | Expected outcome | Decided by |
 | --- | --- | --- |
 | Six 2-point issues (12 points); 2,800 lines | Fits: 12 ≤ 12 points and 2,800 ≤ 3,000 lines. | **[W]** "within both 12 points and 3,000 estimated changed lines". |
-| Four 3-point issues (12 points) recorded as 3,100 lines | Inputs are inconsistent: four 3-point issues total at most 4 × 750 = 3,000 lines. At least one issue is above 750 lines, so it is 5 points and needs re-estimation. The corrected set has 14 points and exceeds the point cap, so the re-pointed issue is not admitted. Whether selection then considers smaller lower-priority work is left to the selection algorithm. | **[S]** point table; **[W]** caps and "Exact selection algorithms … remain implementation details". |
+| Four 3-point issues (12 points) recorded as 3,100 lines | Inputs are inconsistent: four 3-point issues total at most 4 × 750 = 3,000 lines. At least one issue is above 750 lines, so it is 5 points and needs re-estimation. The inconsistent record fails readiness, so that issue is not eligible until re-estimated and re-checked. Re-estimated at 5 points, the set has 14 points and exceeds the point cap, so selection admits by priority within both caps. Whether selection then considers smaller lower-priority work is left to the selection algorithm. | **[S]** point table; **[W]** caps and "Exact selection algorithms … remain implementation details". |
 | Eligible work totals 10 points | The Wave holds 10 points. Spare capacity is not a reason to add work. | **[W]** "Both are caps, not targets to fill". |
 
 ## 10. Independent classifications
 
 | Input | Expected outcome | Decided by |
 | --- | --- | --- |
-| 120-line change to an authorization check | 1 point, with Assurance Level R3 and Agent Class A3. Size does not lower the other classifications. | **[S]** "a small change may still need advanced reasoning or high assurance". |
+| 120-line change to an authorization check | Classified R3 and A3 on its risk and reasoning; 1 point. Size does not lower the other classifications. | **[S]** "a small change may still need advanced reasoning or high assurance". |
 | 1,800-line mechanical rename (8-point exception approved) | Agent Class A1 and Assurance Level R1 are valid. The size does not raise them. | **[S]** "a large mechanical change may need neither". |
 
 ## 11. Resumed Planned issue
 
 | Input | Expected outcome | Decided by |
 | --- | --- | --- |
-| Planned issue recorded at 900 lines (5 points); on start, re-estimated at 1,150 lines | The roadmap proposal reports that the issue no longer fits (8 points, above 1,000 lines) and proposes re-scoping or decomposition. Reassess only this issue; do not clean up other Planned issues. Approval of the proposal is still required. | **[P]** step 1 "exceeds 1,000 lines … Reassess only the started issue; do not clean up the backlog"; **[S]** "no blanket backlog cleanup is required". |
+| Planned issue recorded at 900 lines (5 points); on start, re-estimated at 1,150 lines | The roadmap proposal updates the scoping record (8 points, above 1,000 lines) and proposes decomposition or the 8-point exception. Reassess only this issue; do not clean up other Planned issues. Approval of the proposal is still required. | **[P]** step 1 "above 5 points or 1,000 lines needs proposed decomposition or the 8-point exception … Reassess only the started issue; do not clean up the backlog"; **[S]** "no blanket backlog cleanup is required". |
 
 [size]: ../../src/nplet/resources/organization/baseline.md#issue-sizing-and-classification
 [wave]: ../../src/nplet/resources/organization/baseline.md#planning-and-wave-boundaries
