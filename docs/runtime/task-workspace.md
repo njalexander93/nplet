@@ -190,7 +190,7 @@ whatever its extension or purpose, plus package commands and other mutation-capa
 shell commands. The project code repositories are the session's Git repository and
 its linked worktrees. The gate covers only those. A separate clone or sibling
 repository of the same project is gated only by a session rooted inside it;
-multi-repository project identity is deferred to a follow-up. A note, draft or README inside them is protected
+multi-repository project identity is deferred to NPLET-90. A note, draft or README inside them is protected
 implementation. Unknown or mixed effects remain readiness-gated or unsupported. The [contributor procedure](contributor-workflow.md)
 separately requires explicit roadmap approval. Readiness verifies delivery facts;
 it does not authenticate human approval.
