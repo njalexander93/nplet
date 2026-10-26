@@ -20,5 +20,6 @@ Contributor framework notes, authoring references, examples, fixtures and runtim
 | Inspect or review a worked definition | [Example contract](examples/CONTEXT.md) | Exact candidate fields and corresponding criteria/rules. |
 | Read or review a packaged Role definition | [Role definitions](../src/nplet/resources/roles/README.md) | The selected draft definition, its source and gap tables, and the packaged [review criteria](../src/nplet/resources/templates/definition-format.md#review-and-maintenance). |
 | Walk through a governance or tooling scenario | [Fixture contract](fixtures/CONTEXT.md) | One fixture and its selected actors/rules. |
+| Check issue sizing, intake or Wave caps against worked cases | [Issue-scoping scenarios](runtime/issue-scoping-scenarios.md) | The scenario row and its governing rule. |
 
 The [worked AGO example](examples/agent-governance-officer.md) is documentation, not a runtime resource. Keep it out of a fresh-author test packet. The packaged [baseline](../src/nplet/resources/organization/baseline.md) holds the shared organizational rules; the contributor [baseline](framework/baseline.md#selected-paper-fixtures-and-exclusions) defines paper-scope limits; the [publication rules](framework/baseline.md#authoring-and-publication-rules) retain the existing human PR check.

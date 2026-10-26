@@ -111,7 +111,7 @@ Above 5 points or 1,000 estimated lines, first seek smaller concrete deliverable
 **Capture versus Planned readiness.** Proposed, Backlog and Triage may hold rough descriptions and placeholders; creating a Work Item does not complete its plan. Report its link and actual status after creation. Before Planned, a Work Item has:
 
 1. a deliverable and completion criteria covering its full supporting work and implications;
-2. a complete changed-line estimate and its points;
+2. a complete changed-line estimate and its points, 8 or fewer (a 13-point Work Item is decomposed and never moves to Planned);
 3. Agent Class, Assurance Level, Type and Execution assigned;
 4. decomposition evaluated, with every resulting increment scoped and classified the same way; and
 5. for 8 points, the recorded splitting rationale and human approval.
