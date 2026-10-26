@@ -75,7 +75,7 @@ Change Publisher is an untrusted execution-only, non-implementing Role. Trusted 
 
 Each Initiative belongs to one product Project; its Waves may include authorized supporting shared-repository work. Initiative Planner coordinates across Epics. Epic Planner decomposes Epics into Milestones; Issue Planner develops bounded Work Item plans. Plans remain proposals until applicable independent Plan Review and exact human authorization. There is no separate Wave Planner Role: deterministic Wave Controller selects and generates proposals from the approved Initiative roadmap.
 
-Humans assign issues to Human Leadership members between planning and Wave execution. AI may not choose, recommend or change assignees in Wave planning or execution. Wave selection considers eligible issues assigned to the initiating human, with required planning readiness and all prerequisites satisfied regardless of assignee, Wave or workspace. Preserve accepted rollover commitments; rank by recorded priority first, then maximize points within twelve without sacrificing higher-priority work merely for utilization. Exact selection algorithms and tie-breaking remain implementation details. Runtime capacity, budget, identity and protected-operation constraints still apply separately.
+Humans assign issues to Human Leadership members between planning and Wave execution. AI may not choose, recommend or change assignees in Wave planning or execution. Wave selection considers eligible issues assigned to the initiating human, with required planning readiness and all prerequisites satisfied regardless of assignee, Wave or workspace. Preserve accepted rollover commitments; rank by recorded priority first, then add lower-priority eligible work only while the Wave stays within both 12 points and 3,000 estimated changed lines ([sizing](#issue-sizing-and-classification)). Both are caps, not targets to fill; utilization never displaces higher-priority work. Exact selection algorithms and tie-breaking remain implementation details. Runtime capacity, budget, identity and protected-operation constraints still apply separately.
 
 The proposal shows product, Initiative, human assignee, issue links/titles/estimates, selection rationale and downstream impact, prerequisites/readiness, runtime with user-local model resolution, and capacity after local commitments. The human can Start, Request changes or Cancel. Recheck mutable assignment, prerequisite, claim and capacity facts before exact admission. Explain failures without silent issue substitution; budget fitting may reduce only the frozen candidate, preserving priority and deferred-point commitments, with no outside backfill. A changed candidate returns through applicable review and authorization.
 
@@ -84,6 +84,39 @@ Planning/review assignments and receipts link to the exact roadmap and its indep
 An unfinished prerequisite makes an issue ineligible, including prerequisites outside the candidate Wave. Otherwise use separate issue branches/PRs, resolve potential collisions and validate the combined result before human merge. Overlapping files alone do not forbid concurrent eligible work. Dependent successors wait for prerequisites.
 
 Use Linear Queued for Wave-proposal reservation with an activity stamp identifying Controller/proposal and time; first to queue reserves the issue. The human assignee remains unchanged. Verify the winning claim before execution; Queued supplies neither execution authorization nor budget admission. Move to In Progress when the Wave starts. This rule does not claim that complete reservation enforcement is implemented. Each successor Wave needs explicit human start after retrospective interaction; retrospective recommendations neither change policy nor start it automatically.
+
+## Issue sizing and classification
+
+Each Work Item carries five independent classifications. Do not combine them into one complexity score: a small change may still need advanced reasoning or high assurance, and a large mechanical change may need neither.
+
+- **Estimate** measures scope and expected reviewable change volume. It shapes decomposition, slices, context partitioning and budget inputs, not model capability or assurance.
+- **Agent Class** is the Work Item's normalized cognitive-capability value: A1 Mechanical, A2 Bounded, A3 Advanced or A4 Intensive. The primary delivery Role named by the workflow Profile anchors to it; other Roles derive assignments through user-local mappings ([model boundaries](#model-and-capacity-boundaries)). Derived Role assignments are not additional Agent Class values.
+- **Assurance Level** sets the depth and number of independent assurance lanes, not whether independent assurance applies. R1 Routine: focused independent review or applicable artifact validation plus required automated checks. R2 Elevated: independent review plus validation expanded for the change. R3 High: independent Test Developer and Code Reviewer, plus risk-specific lanes as required. R4 Critical: multiple independent assurance lanes, applicable Security review, stronger evidence and stricter human gates. [Assurance ownership](#assurance-ownership) still applies at every level.
+- **Type** is Bug, Feature, Improvement, Task, Spike or Vulnerability. It may inform the expected outcome but does not determine it by label alone; a Spike normally closes on its accepted Spike Report rather than a repository merge.
+- **Execution** is Agent-executable or Human-only; agents do not execute Human-only work.
+
+Estimate points from the estimated total additions plus deletions across implementation, tests, fixtures, configuration, documentation and supporting changes. Replacing 100 lines with 100 new lines counts as 200. File count and net growth are not sizing inputs. Each range includes both endpoints. A range estimate takes points from its upper bound: 900–1,100 is 8 points and needs decomposition or the 8-point exception.
+
+| Points | Estimated changed lines | Treatment |
+| --- | --- | --- |
+| 1 | 0–249 | Normal |
+| 2 | 250–500 | Normal |
+| 3 | 501–750 | Normal |
+| 5 | 751–1,000 | Normal upper limit |
+| 8 | 1,001–2,000 | Exception: recorded failed decomposition and human approval |
+| 13 | 2,001 or more | Classification only: never admitted to execution; decompose first |
+
+Above 5 points or 1,000 estimated lines, first seek smaller concrete deliverables. An 8-point Work Item records why reasonable splitting fails, and Human Leadership approves that exception before Planned. Thirteen points is a classification, not permission: decompose the Work Item into smaller Work Items before any execution. Sizing for work without a repository diff remains unresolved.
+
+**Capture versus Planned readiness.** Proposed, Backlog and Triage may hold rough descriptions and placeholders; creating a Work Item does not complete its plan. Report its link and actual status after creation. Before Planned, a Work Item has:
+
+1. a deliverable and completion criteria covering its full supporting work and implications;
+2. a complete changed-line estimate and its points, 8 or fewer (a 13-point Work Item is decomposed and never moves to Planned);
+3. Agent Class, Assurance Level, Type and Execution assigned;
+4. decomposition evaluated, with every resulting increment scoped and classified the same way; and
+5. for 8 points, the recorded splitting rationale and human approval.
+
+Link sibling increments as related; use blocking relationships only for genuine prerequisites. Preserve increments as separately reviewable PRs rather than combining them. Reassess an existing Planned Work Item against these rules when its work resumes; no blanket backlog cleanup is required. Planned readiness never bypasses Plan Review, roadmap approval, execution authorization or Wave admission. This section states policy; it does not claim runtime enforcement.
 
 ## Work Item Plan contract
 
@@ -98,7 +131,7 @@ The plan identifies at least:
 - base artifact or repository state and applicable ownership boundaries;
 - selected workflow Profile and ordered Role lanes, each with Role, Profile, bounded objective, context inputs, writable artifacts and prohibited actions;
 - lane prerequisites, handoffs, required evidence, independent assurance, human gates and terminal outcome;
-- Estimate, Agent Class, Assurance Level, complete-lifecycle budget reservation inputs, retry or correction bounds and escalation conditions;
+- Estimate, Agent Class, Assurance Level, Type and Execution ([classification](#issue-sizing-and-classification)), complete-lifecycle budget reservation inputs, retry or correction bounds and escalation conditions;
 - dependency, collision, security, destructive-action, external-account, publication, merge, deployment and rollback requirements when applicable;
 - known uncertainty, unresolved decisions that block execution, and conditions that require replanning rather than specialist improvisation.
 

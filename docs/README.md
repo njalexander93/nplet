@@ -7,6 +7,7 @@ Contributor framework notes, authoring references, examples, fixtures and runtim
 
 | Task | Start here | Scope to select |
 | --- | --- | --- |
+| Create or plan an issue | [Issue intake and Planned readiness](runtime/contributor-workflow.md#issue-intake-and-planned-readiness) | Capture read-back, scoping record, sizing, classification and decomposition before Planned. |
 | Start or resume an issue, or execute an assigned step | [Contributor procedure](runtime/contributor-workflow.md) | Master planning, approval, step threads, handoffs and delivery; assigned children use the bounded step-thread route. |
 | Create or update a pull request | [PR preparation and verification](runtime/contributor-workflow.md#pr-preparation-and-verification) | Title, exact repository template, evidence, current required checks and published read-back. |
 | Set up a contributor checkout or local commit checks | [Runtime contract](runtime/CONTEXT.md#setup) | Environment setup, editor and check commands. |
@@ -19,5 +20,6 @@ Contributor framework notes, authoring references, examples, fixtures and runtim
 | Inspect or review a worked definition | [Example contract](examples/CONTEXT.md) | Exact candidate fields and corresponding criteria/rules. |
 | Read or review a packaged Role definition | [Role definitions](../src/nplet/resources/roles/README.md) | The selected draft definition, its source and gap tables, and the packaged [review criteria](../src/nplet/resources/templates/definition-format.md#review-and-maintenance). |
 | Walk through a governance or tooling scenario | [Fixture contract](fixtures/CONTEXT.md) | One fixture and its selected actors/rules. |
+| Check issue sizing, intake or Wave caps against worked cases | [Issue-scoping scenarios](runtime/issue-scoping-scenarios.md) | The scenario row and its governing rule. |
 
 The [worked AGO example](examples/agent-governance-officer.md) is documentation, not a runtime resource. Keep it out of a fresh-author test packet. The packaged [baseline](../src/nplet/resources/organization/baseline.md) holds the shared organizational rules; the contributor [baseline](framework/baseline.md#selected-paper-fixtures-and-exclusions) defines paper-scope limits; the [publication rules](framework/baseline.md#authoring-and-publication-rules) retain the existing human PR check.
