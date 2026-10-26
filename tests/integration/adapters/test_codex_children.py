@@ -9,6 +9,7 @@ import pytest
 
 from nplet.adapters import codex, common
 from nplet.adapters import codex_children as children
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 from tests.support import Fixture
 
@@ -46,14 +47,16 @@ class ChildTests(Fixture):
         Returns:
             Child identity envelope with no lifecycle binding yet.
         """
-        return children.identity(
-            {
-                "session_id": "coordinator",
-                "cwd": str(self.root),
-                "agent_id": str(uuid.uuid4()),
-                "agent_type": "default",
-                "hook_event_name": "SubagentStart",
-            }
+        return carrier.carry_repository(
+            children.identity(
+                {
+                    "session_id": "coordinator",
+                    "cwd": str(self.root),
+                    "agent_id": str(uuid.uuid4()),
+                    "agent_type": "default",
+                    "hook_event_name": "SubagentStart",
+                }
+            )
         )
 
     def command(self, event: dict, request: dict) -> dict:
@@ -500,7 +503,7 @@ class ChildTests(Fixture):
         self.call("attach", worktree=str(self.other))
         launch = {**self.launch(1), "cwd": str(self.other)}
         children.admit_spawn(launch)
-        peer = {**self.child(), "cwd": str(self.other)}
+        peer = carrier.carry_repository({**self.child(), "cwd": str(self.other)})
         context = children.start(peer)
         commands = [line.split(". ", 1)[1] for line in context.splitlines()[1:]]
         path = self.root / ".task/TEST-1/roadmap.md"

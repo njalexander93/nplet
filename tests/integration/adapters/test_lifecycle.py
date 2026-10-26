@@ -14,6 +14,7 @@ import pytest
 
 from nplet.adapters import codex as hook
 from nplet.adapters import common
+from nplet.adapters import session_repository as carrier
 from tests.support import Fixture
 
 pytestmark = pytest.mark.integration
@@ -120,7 +121,7 @@ class LifecycleTests(Fixture):
             "session_id": "coordinator",
             "prompt": "Task: TEST-1",
         }
-        common.prompt(event, "codex")
+        common.prompt(carrier.carry_repository(event), "codex")
         # Stand in for the completed ticket read so the bootstrap route is reachable.
         key = common.core.participant_key({"host": "codex", "session_id": "coordinator"})
         with (
@@ -187,7 +188,9 @@ class LifecycleTests(Fixture):
             AssertionError: Preparation changes readiness or a broader shell command passes.
         """
         # Start a fresh ticket lookup with no ready participant.
-        event = {"cwd": str(self.root), "session_id": "coordinator", "prompt": "Task: TEST-1"}
+        event = carrier.carry_repository(
+            {"cwd": str(self.root), "session_id": "coordinator", "prompt": "Task: TEST-1"}
+        )
         common.prompt(event, "codex")
         event.update(hook_event_name="PreToolUse", tool_name="Bash", tool_use_id="prepare")
         # Both governing paths remain read-only preparation across pre/post callbacks.

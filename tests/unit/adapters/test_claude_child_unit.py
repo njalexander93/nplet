@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from nplet.adapters import common
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -30,7 +31,8 @@ def parent_event(root: Path, tool_id: str = "agent-call") -> dict[str, Any]:
     Returns:
         The parent envelope for one Agent call.
     """
-    return {"cwd": str(root), "session_id": PARENT, "tool_use_id": tool_id, "tool_name": "Agent"}
+    event = {"cwd": str(root), "session_id": PARENT, "tool_use_id": tool_id, "tool_name": "Agent"}
+    return carrier.carry_repository(event)
 
 
 def child_event(root: Path) -> dict[str, Any]:
@@ -42,13 +44,15 @@ def child_event(root: Path) -> dict[str, Any]:
     Returns:
         The child envelope carrying its parent session.
     """
-    return {
-        "hook_event_name": "SubagentStart",
-        "cwd": str(root),
-        "session_id": CHILD,
-        "parent_session_id": PARENT,
-        "child": True,
-    }
+    return carrier.carry_repository(
+        {
+            "hook_event_name": "SubagentStart",
+            "cwd": str(root),
+            "session_id": CHILD,
+            "parent_session_id": PARENT,
+            "child": True,
+        }
+    )
 
 
 def parent_request(operation: str = "ready") -> dict[str, Any]:
@@ -125,7 +129,9 @@ def test_record_agent_call_keeps_bounded_unique_recent_ids(
         monkeypatch: Replaces the repository boundary with the temporary checkout.
         tmp_path: Temporary checkout root.
     """
-    monkeypatch.setattr(common.core, "repository", lambda _path: (tmp_path, None, [tmp_path]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(tmp_path, None, [tmp_path])
+    )
     monkeypatch.setattr(common, "AGENT_CALL_LIMIT", 3)
     # The first call creates the task and binding directories with the marker.
     common.record_agent_call(parent_event(tmp_path, "call-1"), HOST)
@@ -175,6 +181,7 @@ def test_native_pre_records_agent_call_before_tool_start(monkeypatch: pytest.Mon
         "tool_use_id": "agent-call",
         "tool_name": "Agent",
         "tool_input": {"description": "d", "prompt": "p"},
+        "repository": None,
     }
     assert common.native_pre(event, HOST) is None
     assert order == ["ready", "record", "tool-start"]
@@ -612,7 +619,9 @@ def install_child_route(
         The list receiving the join and ready steps as they run.
     """
     steps: list[str] = []
-    monkeypatch.setattr(common.core, "repository", lambda _path: (root, None, [root]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(root, None, [root])
+    )
     monkeypatch.setattr(
         common,
         "request_for",
@@ -657,7 +666,9 @@ def test_child_start_joins_only_for_a_pending_admitted_agent_call(
         monkeypatch: Replaces repository, binding and lifecycle boundaries.
         tmp_path: Temporary checkout root.
     """
-    monkeypatch.setattr(common.core, "repository", lambda _path: (tmp_path, None, [tmp_path]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(tmp_path, None, [tmp_path])
+    )
     common.record_agent_call(parent_event(tmp_path), HOST)
     steps = install_child_route(monkeypatch, tmp_path, pending={"agent-call": {}})
     text = common.child_start(child_event(tmp_path), HOST)
@@ -685,7 +696,9 @@ def test_child_start_refuses_unready_parent_and_foreign_assignment(
         monkeypatch: Replaces repository, binding and lifecycle boundaries.
         tmp_path: Temporary checkout root.
     """
-    monkeypatch.setattr(common.core, "repository", lambda _path: (tmp_path, None, [tmp_path]))
+    monkeypatch.setattr(
+        common.core, "repository", lambda _path: common.core.Repository(tmp_path, None, [tmp_path])
+    )
     common.record_agent_call(parent_event(tmp_path), HOST)
     # The parent's own binding must be ready.
     steps = install_child_route(

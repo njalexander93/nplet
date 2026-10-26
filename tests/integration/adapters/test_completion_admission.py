@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import pytest
 
 from nplet.adapters import claude, codex, common, cursor
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 from tests.integration.adapters.native_events import event
 from tests.support import Fixture
@@ -164,7 +165,7 @@ def test_completion_lookup_does_not_recreate_missing_locks(lock: str) -> None:
         observed = event(case.root, "codex", "Write", {}, call="finished")
         observed["session_id"] = "coordinator"
         with pytest.raises(core.WorkspaceError) as failure:
-            common.existing_admission(observed, "codex")
+            common.existing_admission(carrier.carry_repository(observed), "codex")
         assert failure.value.code == "RECOVERY_REQUIRED"
         assert not path.exists()
         after = {

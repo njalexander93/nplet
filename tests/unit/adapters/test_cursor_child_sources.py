@@ -12,6 +12,7 @@ import pytest
 from nplet.adapters import cursor_child_session as child_session
 from nplet.adapters import cursor_children as children
 from nplet.adapters import cursor_sources as cursor_sources
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
@@ -216,7 +217,9 @@ def test_child_lifecycle_uses_own_binding_without_parent_assignment(
         "request_for",
         lambda *_args: {**bound, "participant_id": "private", "cursor_invocation": "invocation"},
     )
-    monkeypatch.setattr(children.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(
+        children.core, "repository", lambda path: children.core.Repository(Path(path), None, [])
+    )
     event = {
         "child": True,
         "session_id": bound["session_id"],
@@ -287,7 +290,9 @@ def test_child_lifecycle_rejects_foreign_or_general_shell(
             operation="update", path="roadmap.md", old_digest=None, content="wrong", provenance={}
         )
     monkeypatch.setattr(children.common, "request_for", lambda *_args: bound)
-    monkeypatch.setattr(children.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(
+        children.core, "repository", lambda path: children.core.Repository(Path(path), None, [])
+    )
     command = (
         "python -m pytest"
         if alteration == "arbitrary"
@@ -359,11 +364,12 @@ def test_source_transition_exhausts_contention_without_changing_request(
     monkeypatch.setattr(children.common, "request_for", lambda *_args: bound)
     execute = MagicMock(return_value={"ok": False, "code": "BUSY"})
     monkeypatch.setattr(children.core, "execute_internal", execute)
+    # Eight attempts sleep 0.56s between them; a loaded runner needs headroom beyond one second.
     with pytest.raises(core.WorkspaceError, match="BUSY"):
         cursor_sources.source_transition(
             {"child": True, "tool_use_id": "call"},
             "failure",
-            time.monotonic() + 1,
+            time.monotonic() + 5,
             source_path="/source",
         )
     assert execute.call_count == 8
@@ -400,7 +406,9 @@ def test_source_read_pre_admits_only_exact_available_packet_locator(
         }
     )
     monkeypatch.setattr(children.core, "execute", read)
-    monkeypatch.setattr(children.core, "repository", lambda _path: (tmp_path, None, []))
+    monkeypatch.setattr(
+        children.core, "repository", lambda _path: children.core.Repository(tmp_path, None, [])
+    )
     transition = MagicMock(return_value={"ok": True, "code": "OK"})
     monkeypatch.setattr(cursor_sources, "source_transition", transition)
     event = {
@@ -476,7 +484,9 @@ def test_source_read_pre_denies_without_starting_unassigned_read(
         }
     )
     monkeypatch.setattr(children.core, "execute", read)
-    monkeypatch.setattr(children.core, "repository", lambda _path: (tmp_path, None, []))
+    monkeypatch.setattr(
+        children.core, "repository", lambda _path: children.core.Repository(tmp_path, None, [])
+    )
     transition = MagicMock()
     monkeypatch.setattr(cursor_sources, "source_transition", transition)
     with pytest.raises(core.WorkspaceError, match=code):
@@ -510,17 +520,21 @@ def test_child_lifecycle_requires_matching_native_working_directory(
         "binding_generation": 1,
     }
     monkeypatch.setattr(children.common, "request_for", lambda *_args: bound)
-    monkeypatch.setattr(children.core, "repository", lambda path: (Path(path), None, []))
-    event = {
-        "child": True,
-        "session_id": bound["session_id"],
-        "cwd": "/checkout",
-        "tool_name": "Shell",
-        "tool_input": {
-            "command": children.common.bootstrap_command(bound, "cursor"),
-            "working_directory": working_directory,
-        },
-    }
+    monkeypatch.setattr(
+        children.core, "repository", lambda path: children.core.Repository(Path(path), None, [])
+    )
+    event = carrier.carry_repository(
+        {
+            "child": True,
+            "session_id": bound["session_id"],
+            "cwd": "/checkout",
+            "tool_name": "Shell",
+            "tool_input": {
+                "command": children.common.bootstrap_command(bound, "cursor"),
+                "working_directory": working_directory,
+            },
+        }
+    )
     if allowed:
         assert child_session.child_lifecycle(event) is True
     else:
