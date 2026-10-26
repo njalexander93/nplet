@@ -95,7 +95,7 @@ Each Work Item carries five independent classifications. Do not combine them int
 - **Type** is Bug, Feature, Improvement, Task, Spike or Vulnerability. It may inform the expected outcome but does not determine it by label alone; a Spike normally closes on its accepted Spike Report rather than a repository merge.
 - **Execution** is Agent-executable or Human-only. Human-only work remains visible in planning and is not executed by agents; an unfinished Human-only prerequisite still makes dependent work ineligible.
 
-Estimate points from the estimated total additions plus deletions across implementation, tests, fixtures, configuration, documentation and supporting changes. Replacing 100 lines with 100 new lines counts as 200. File count and net growth are not sizing inputs. Each range includes both endpoints.
+Estimate points from the estimated total additions plus deletions across implementation, tests, fixtures, configuration, documentation and supporting changes. Replacing 100 lines with 100 new lines counts as 200. File count and net growth are not sizing inputs. Each range includes both endpoints. A range estimate takes points from its upper bound: 900–1,100 is 8 points and needs decomposition or the 8-point exception.
 
 | Points | Estimated changed lines | Treatment |
 | --- | --- | --- |
