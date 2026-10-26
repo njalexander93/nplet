@@ -116,6 +116,8 @@ Above 5 points or 1,000 estimated lines, first seek smaller concrete deliverable
 4. decomposition evaluated, with every resulting increment scoped and classified the same way; and
 5. for 8 points, the recorded splitting rationale and human approval.
 
+**Estimate outcomes and discovered scope.** At completion, a Work Item records its original estimate (changed lines and points), actual additions plus deletions, reasons for any difference and any splits or prerequisites discovered; later estimates consult those recorded outcomes. Estimate variance inside the authorized scope does not change the plan. A necessary discovery outside that scope that forms its own deliverable becomes a separate blocking Work Item and pauses the affected work, rather than expanding the current Work Item; a discovery that changes the current plan follows the [amendment path](#work-item-plan-contract).
+
 Link sibling increments as related; use blocking relationships only for genuine prerequisites. Preserve increments as separately reviewable PRs rather than combining them. Reassess an existing Planned Work Item against these rules when its work resumes; no blanket backlog cleanup is required. Planned readiness never bypasses Plan Review, roadmap approval, execution authorization or Wave admission. This section states policy; it does not claim runtime enforcement.
 
 ## Work Item Plan contract
