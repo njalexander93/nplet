@@ -507,13 +507,13 @@ The first table compares Claude Code and Cursor; the second records Codex bounda
 | Boundary | Claude Code | Cursor Agent |
 | --- | --- | --- |
 | Identity | Exact native session ID. A hook carrying `agent_id` with a valid `session_id` is a subagent keyed `<session_id>/agent/<agent_id>`; `subagent_id`, `parent_conversation_id`, background markers and `agent_id` without `session_id` are rejected | Exact conversation ID; require any session ID to match; one workspace root |
-| Ordinary tools | Read, Write, Edit, Glob, Grep, NotebookEdit; foreground Bash under the setting above. `ToolSearch`, `Skill`, `SendMessage` and `AskUserQuestion` are task-free parent no-effect operations with no pending entry; a tool they surface is evaluated on its own call. Their availability does not authorize sending messages. A subagent's `SubagentHandback` is a readiness-checked no-effect operation admitted only under a child identity | Read, Write, Edit, Grep, Delete; Shell with supported foreground arguments |
+| Ordinary tools | Read, Write, Edit, Glob, Grep, NotebookEdit; foreground Bash under the setting above. `ToolSearch`, `Skill`, `SendMessage` and `AskUserQuestion` are task-free parent no-effect operations with no pending entry; a tool they surface is evaluated on its own call. Their availability does not authorize sending messages. A subagent's `SubagentHandback` is a readiness-checked no-effect operation admitted only under a child identity | Read, Write, Edit, Grep, Delete; Shell with supported foreground arguments; finite task-free parent reads also accept validated native metadata as described below |
 | Linear parent provider | The named inspection and administration operations below are task-free through the configured connector, with the same server/provenance checks as startup. Children retain only the original five read operations and require readiness | The same named parent operations are task-free. Generic `preToolUse` validates native identity and structured operation; `beforeMCPExecution` independently checks the exact operation, serialized object arguments, configured server name and URL. Both blocking hooks must pass; ordinary calls create no cross-callback ledger. Startup alone retains its paired lookup reservation |
 | Desktop PR monitor after readiness | The desktop app's built-in `ccd_pr` server only: `get_status` and `set_monitor`, for a parent session (a subagent child gets neither). The tool name must be exactly `mcp__ccd_pr__get_status` or `mcp__ccd_pr__set_monitor`; the hook's `mcp_server` object must be present with `name` `ccd_pr` and `source` `sdk`, the provenance the desktop app reports for its built-in server; a call without that object, or with any other name or source, is denied. `set_auto_merge`, `bind_pr`, `unbind_pr` and every other `ccd_pr` operation stay denied. Each call is pending work under its native `tool_use_id`, settled by `PostToolUse` or `PostToolUseFailure`. Live capture (2026-10-11, macOS Desktop, hooks enabled): a ready parent session called `get_status` and then `set_monitor` (`auto_fix` on the open PR); both were admitted, recorded as pending work and settled by their completion events, and the app returned the PR state and confirmed the monitor. The server identity was captured separately the same day with a throwaway project whose `PreToolUse` hook appended the raw event: `tool_name` `mcp__ccd_pr__get_status`, `mcp_server` `{"name": "ccd_pr", "source": "sdk"}`, `agent_id` null, alongside `session_id`, `tool_use_id`, `cwd`, `permission_mode` and `transcript_path`. The check is pinned to that name and source | No native provider admission |
 | Ticket-first startup | Exact configured Linear issue read before readiness; matching native completion runs shared startup | Exact Linear issue read with generic call-ID and MCP server checks before shared startup |
 | Admission | Validate native identity, provider provenance and child restrictions first. Named task-free parents need no readiness; other supported effects require readiness. Preserve native permissions | Validate the same boundary in Cursor's native shape; allow only that particular task-free, bootstrap or ready supported call |
 | File-tool completion | A supported success/failure event with required payload settles only existing admitted work. A task-free completion creates no state | Same; native failure type is checked for existing work |
-| Shell completion | Successful Bash result with string stdout/stderr, `interrupted: false`, and no async markers | Successful Shell result with integer `exitCode` and no async markers |
+| Shell completion | Successful Bash result with string stdout/stderr, `interrupted: false`, and no async markers | Every admitted parent Shell call remains pending until independently verified termination and explicit lifecycle recovery; native callbacks cannot settle it |
 | Ambiguous shell result/failure | Retain pending operation and report recovery | Same; booleans are not exit codes |
 | Child/provider/background tools | Deny unsupported tool names, unconfigured servers, other provider operations (including document/archive operations) and background identities. A ready parent's foreground `Agent` call (no `run_in_background: true`, no `isolation`) is pending work under its `tool_use_id`; `Task`, `TaskOutput`, `TaskStop`, `SpawnAgent` and `Agent` from a child are denied. `SubagentStart` joins the child (restricted, below); `SubagentStop` is an observation | Only the experimental [scoped foreground Task route](#cursor-scoped-foreground-tasks) below; unsupported child tools and remote sessions denied |
 | Session start | Advisory recovery/readiness context; no readiness grant | Advisory context only |
@@ -562,8 +562,28 @@ receive no task-free admission. On Codex, use native `Bash` with only `command`.
 Legacy `exec_command` remains readiness-gated because it can return an untracked
 process handle. Its existing `write_stdin` correlation checks remain in force.
 Claude requires foreground Bash and inherited background-disable configuration.
-Cursor requires its supported synchronous `Shell` shape. A `working_directory`
-override is admitted only when native validation confirms the same checkout.
+Cursor parent `Shell` accepts a string `command` plus native `cwd`,
+`working_directory` and integer `timeout` metadata from 1 through 2147483647.
+Supply at most one directory field. Empty `cwd` means no override; a nonempty
+directory must remain in the same repository. Other fields remain unsupported.
+Metadata validation grants no readiness or synchronous completion guarantee.
+Only the finite reads below are task-free and create no pending lifecycle work.
+Other commands require current readiness and are recorded as pending before
+execution. Timeout can background execution. Every admitted parent Shell call
+remains pending after native success or failure callbacks, including callbacks
+with integer `exitCode` and no async markers. Settlement requires independent
+verification of the original process termination followed by explicit lifecycle
+`tool-complete` recovery. Pending work does not serialize all tool calls.
+Task-free reads, exact lifecycle transactions and child restrictions retain
+their existing separate routes.
+
+Observed Cursor 3.25.9 on macOS reported `postToolUse` with `exitCode: 0`
+and no async markers for `sleep 2` with `timeout: 1000`, before the process
+terminated. It also reported a nonzero exit through `postToolUseFailure`
+without a typed exit code. Neither callback supplies reliable termination
+evidence. No timeout or duration heuristic grants settlement. Inspect the
+original native terminal result and use verified explicit recovery as
+described below.
 
 | Command | Admitted arguments |
 | --- | --- |
@@ -685,9 +705,13 @@ denied with `SOURCE_STALE` recovers through issue-level `diagnose` and the self-
 then `read`, `acknowledge` and `ready`; a reader asks the coordinator to re-scope it.
 
 Unsupported MCP/provider routes must use a separately verified provider workflow. No native
-archive-provider coverage is claimed here. Interrupted or ambiguous shell work remains pending:
-inspect the actual process outcome before an explicit lifecycle recovery/settlement. A stop event,
-empty result, or timeout is not that evidence. Shell commands remain cooperative tool calls; these
+archive-provider coverage is claimed here. Interrupted or ambiguous shell work remains pending.
+Do not rerun an admitted command to replace missing completion evidence. Inspect
+the original native terminal result. Only after independently verifying termination,
+use explicit lifecycle `tool-complete` for the exact stored pending `tool_id`
+with `completed: true` under the original participant's host, session and binding.
+Otherwise retain pending work. A stop event, empty result or timeout is not
+termination evidence. Shell commands remain cooperative tool calls; these
 hooks do not prove that arbitrary commands did not launch their own independent child processes.
 
 ## Cursor scoped foreground Tasks
@@ -711,7 +735,9 @@ integer `timeout` metadata. Empty `cwd` means no override; nonempty overrides mu
 remain in the same repository. The timeout can background execution. These commands
 rely on their checked core transactions, not Shell return, to establish effects.
 After an uncertain return, inspect the original request and committed state before
-retrying. This metadata does not authorize ordinary Shell work.
+retrying. Metadata alone does not authorize a command; the separate
+[task-free parent read route](#finite-shell-reads) applies its finite grammar and
+grants no protected Shell or child authority.
 
 The adapter does not register `subagentStart` or `subagentStop` hooks. Their opaque
 observations supply no authority or completion evidence. Actual Task admission,

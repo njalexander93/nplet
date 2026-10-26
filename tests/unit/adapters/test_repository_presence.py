@@ -38,14 +38,17 @@ def test_native_identity_requires_single_cursor_root(
         assert captured.value.code == "HOST_UNSUPPORTED_WORKSPACE"
 
 
+@pytest.mark.parametrize("child", [False, True])
 def test_native_tool_cursor_shell_rejects_foreign_directory(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, child: bool
 ) -> None:
-    """Cursor shell work cannot redirect to an unbound repository.
+    """Parent and child Cursor shells cannot redirect to an unbound repository.
 
     Args:
         monkeypatch: Replaces repository or lifecycle boundaries for the case.
+        child: Whether the native event uses the narrower child Shell contract.
     """
+    # Model distinct checkout roots and carry the session's repository.
     monkeypatch.setattr(
         common.core, "repository", lambda path: common.core.Repository(Path(path), None, [])
     )
@@ -55,13 +58,17 @@ def test_native_tool_cursor_shell_rejects_foreign_directory(
         {
             **native_event("Shell", {"command": "echo ok", "working_directory": str(other)}),
             "cwd": str(checkout),
+            "child": child,
         }
     )
     # Tool-supplied working directory cannot redirect to another checkout.
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_tool(native, "cursor")
     assert captured.value.code == "REPOSITORY_MISMATCH"
+    # An explicit bound root and an omitted override both retain Shell admission.
     native["tool_input"] = {"command": "echo ok", "working_directory": str(checkout)}
+    assert common.native_tool(native, "cursor") == "Shell"
+    native["tool_input"] = {"command": "echo ok"}
     assert common.native_tool(native, "cursor") == "Shell"
 
 

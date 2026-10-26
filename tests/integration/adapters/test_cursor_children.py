@@ -457,9 +457,9 @@ def test_real_cursor_store_lifecycle_owns_sources_note_and_exact_retirement(
     assert denied["permission"] == "deny"
     assert "STALE_BINDING" in json.dumps(denied)
     assert case.state() == state
-    # Ordinary parent foreground Shell and file-tool paths still admit and settle their own work.
+    # Task-free parent Shell and synchronous file tools remain usable after child retirement.
     for tool, tool_input, output in (
-        ("Shell", {"command": "python -m pytest -q"}, json.dumps({"exitCode": 0})),
+        ("Shell", {"command": "pwd"}, json.dumps({"exitCode": 0})),
         ("Read", {"file_path": path}, "{}"),
         ("Edit", {"file_path": path}, "{}"),
         ("Grep", {"pattern": "anything"}, "{}"),
