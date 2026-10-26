@@ -6,6 +6,7 @@ import pytest
 
 from nplet.adapters import session_repository as carrier
 from nplet.adapters import task_boundary as boundary
+from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
 
@@ -245,11 +246,12 @@ def test_edit_roles_free_sessions_outside_repositories_and_keep_batch_roles(tmp_
             )
         },
     }
-    assert boundary.edit_roles(observed, [root]) == ["external", "protected"]
+    repository = core.Repository(root, root / ".git", [root])
+    assert boundary.edit_roles(observed, repository) == ["external", "protected"]
     assert not boundary.task_free(observed, "codex", roles=["external", "protected"])
-    assert boundary.edit_roles({"tool_name": "unknown", "tool_input": {}}, [root]) == []
-    # Without project roots every target, even one beside the session, is external.
-    assert boundary.edit_roles(observed, []) == ["external", "external"]
+    assert boundary.edit_roles({"tool_name": "unknown", "tool_input": {}}, repository) == []
+    # Without a project repository every target, even one beside the session, is external.
+    assert boundary.edit_roles(observed, None) == ["external", "external"]
     assert boundary.task_free(observed, "codex", roles=["external", "external"])
     # Uncomputed roles keep the edit gated.
     assert not boundary.task_free(observed, "codex")

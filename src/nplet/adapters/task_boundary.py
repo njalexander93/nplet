@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 from nplet.lifecycle import task_workspace as core
@@ -133,20 +133,6 @@ def root_test(roots: list[Path]) -> Callable[[Path], bool]:
     return is_root
 
 
-def matching_roots(spelling: Path, is_root: Callable[[Path], bool]) -> Iterator[Path]:
-    """Yield every ancestor of one target spelling that is a worktree root.
-
-    Args:
-        spelling: Absolute target path, checked first and then through each parent.
-        is_root: Worktree root predicate from ``root_test``.
-
-    Returns:
-        Each ancestor that is a root, nearest first.
-    """
-    # Every ancestor that is a root counts, not only the nearest.
-    return filter(is_root, (spelling, *spelling.parents))
-
-
 def target_role(cwd: str, value: object, is_root: Callable[[Path], bool]) -> str:
     """Classify one edit target by whether it lies inside a project code repository.
 
@@ -168,13 +154,15 @@ def target_role(cwd: str, value: object, is_root: Callable[[Path], bool]) -> str
         spellings = (Path(os.path.normpath(absolute)), absolute.resolve(strict=False))
         inside = False
         for spelling in spellings:
-            # Control ownership accumulates across every ancestor that anchors a root.
-            for anchor in matching_roots(spelling, is_root):
-                inside = True
-                # A control-store name below any matching root denies in either spelling.
-                below = spelling.relative_to(anchor).parts
-                if CONTROL_PARTS.intersection(part.lower() for part in below):
-                    return "control"
+            # The outermost matching root sees every part below any inner root.
+            anchor = next(filter(is_root, reversed((spelling, *spelling.parents))), None)
+            if anchor is None:
+                continue
+            inside = True
+            # A control-store name below the root denies in either spelling.
+            below = spelling.relative_to(anchor).parts
+            if CONTROL_PARTS.intersection(part.lower() for part in below):
+                return "control"
     # An unresolvable target cannot be proven external.
     except (OSError, ValueError, RuntimeError):
         return "protected"
@@ -466,7 +454,7 @@ def task_free(
     return bool(selected) and all(role == "external" for role in selected)
 
 
-def edit_roles(event: core.JSONObject, roots: list[Path]) -> list[str]:
+def edit_roles(event: core.JSONObject, repository: core.Repository | None) -> list[str]:
     """Classify every deterministic native edit target against the project repositories.
 
     The gate covers the session's Git repository and its linked worktrees only. A
@@ -475,9 +463,8 @@ def edit_roles(event: core.JSONObject, roots: list[Path]) -> list[str]:
 
     Args:
         event: Validated native tool and argument envelope.
-        roots: Worktree roots of the session repository the caller selected; empty
-            when the session lies outside every repository, so every well-formed
-            target is external.
+        repository: The session's carried project repository; None when the session
+            lies outside every repository, so every well-formed target is external.
 
     Returns:
         Every target role, or an empty list for an unknown edit shape.
@@ -487,5 +474,5 @@ def edit_roles(event: core.JSONObject, roots: list[Path]) -> list[str]:
     if not targets:
         return []
     # One worktree list covers the whole patch or single-file mutation.
-    is_root = root_test(roots)
+    is_root = root_test([] if repository is None else repository.trees)
     return [target_role(event["cwd"], target, is_root) for target in targets]

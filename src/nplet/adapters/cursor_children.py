@@ -14,7 +14,6 @@ from pathlib import Path
 
 from nplet.adapters import common, cursor_results, runner
 from nplet.adapters import cursor_routing as routing
-from nplet.adapters.session_repository import session_repository
 from nplet.lifecycle import task_workspace as core
 
 ENTRY = Path(__file__).resolve()
@@ -245,9 +244,7 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
         configured = registration(observed["cwd"])
     except core.WorkspaceError as error:
         # An unregistered parent, or one outside every repository, has no store to route.
-        if parent_call is None and (
-            error.code == "REGISTRATION_REQUIRED" or session_repository(observed) is None
-        ):
+        if parent_call is None and error.code in {"REGISTRATION_REQUIRED", "REPOSITORY_ABSENT"}:
             return observed
         raise
     with core.Store(configured, create=False, bindings=False) as store:

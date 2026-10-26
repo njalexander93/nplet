@@ -1551,8 +1551,7 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         if host == "cursor" and tool.startswith("MCP:")
         else _linear_provider_tool(event, host)
     )
-    repository = session_repository(event)
-    roles = task_boundary.edit_roles(event, [] if repository is None else repository.trees)
+    roles = task_boundary.edit_roles(event, session_repository(event))
     # Validated parent reads, planning and external edits need no task lifecycle admission.
     if (
         host == "claude-code"

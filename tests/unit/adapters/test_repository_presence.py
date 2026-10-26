@@ -194,21 +194,21 @@ def test_codex_payload_repository_field_is_overwritten(
         return None
 
     monkeypatch.setattr(core, "project_repository", discover)
-    classified: list[list[Path]] = []
+    classified: list[core.Repository | None] = []
     classify = codex.task_boundary.edit_roles
 
-    def edit_roles(event: core.JSONObject, roots: list[Path]) -> list[str]:
-        """Record the worktree roots the classifier received, then classify normally.
+    def edit_roles(event: core.JSONObject, repository: core.Repository | None) -> list[str]:
+        """Record the repository the classifier received, then classify normally.
 
         Args:
             event: Carried Codex event being classified.
-            roots: Worktree roots taken from the carried repository.
+            repository: The carried session repository.
 
         Returns:
             The roles the real classifier assigns.
         """
-        classified.append(roots)
-        return classify(event, roots)
+        classified.append(repository)
+        return classify(event, repository)
 
     monkeypatch.setattr(codex.task_boundary, "edit_roles", edit_roles)
     observed = {
@@ -223,4 +223,4 @@ def test_codex_payload_repository_field_is_overwritten(
     # One discovery replaces the forged field, so the classifier sees no forged root.
     assert codex.handle(observed) == {}
     assert probes == [str(tmp_path)]
-    assert classified == [[]]
+    assert classified == [None]

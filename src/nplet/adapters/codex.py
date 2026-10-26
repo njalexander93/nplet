@@ -532,8 +532,7 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         common.native_token(event.get("session_id"))
         common.native_token(event.get("tool_use_id"))
         core.require(isinstance(event.get("tool_input"), dict), "INVALID_REQUEST")
-        repository = session_repository(event)
-        roles = task_boundary.edit_roles(event, [] if repository is None else repository.trees)
+        roles = task_boundary.edit_roles(event, session_repository(event))
         if task_boundary.task_free(common.native_effect(event, "codex"), "codex", roles=roles):
             return {}
         core.require("control" not in roles, "NOT_OWNER")
