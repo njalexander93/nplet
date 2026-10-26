@@ -13,16 +13,29 @@ permissions:
   issues: read
   pull-requests: write
 jobs:
-  review:
+  resolve-reviewer:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (!github.event.pull_request.draft &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    # Keep the workflow and trusted implementation on the same reviewed commit.
-    uses: njalexander93/ai-reviewer/.github/workflows/review.yml@437977eaefe315de98f1a24766814fa9ad7c2f7d
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve reviewer main to a commit
+        id: resolve
+        shell: bash
+        run: |
+          ref=$(git ls-remote --exit-code https://github.com/njalexander93/ai-reviewer.git refs/heads/main)
+          sha=${ref%%$'\t'*}
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+  review:
+    needs: resolve-reviewer
+    uses: njalexander93/ai-reviewer/.github/workflows/review.yml@main
     with:
       pr-number: ${{ github.event.pull_request.number || inputs.pr-number }}
-      implementation-ref: 437977eaefe315de98f1a24766814fa9ad7c2f7d
+      implementation-ref: ${{ needs.resolve-reviewer.outputs.sha }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
