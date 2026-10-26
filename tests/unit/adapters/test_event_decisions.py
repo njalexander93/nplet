@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from nplet.adapters import claude, codex, common, cursor
@@ -90,6 +92,7 @@ def test_codex_pretool_records_exact_poll_handle_only_after_ready(
     event = {
         "session_id": "unit-session",
         "hook_event_name": "PreToolUse",
+        "cwd": str(Path.cwd()),
         "tool_name": "write_stdin",
         "tool_use_id": "tool-1",
         "tool_input": {"session_id": 41},
@@ -130,6 +133,7 @@ def test_codex_pretool_invalid_poll_handle_has_no_tool_start(
     event = {
         "session_id": "unit-session",
         "hook_event_name": "PreToolUse",
+        "cwd": str(Path.cwd()),
         "tool_name": "write_stdin",
         "tool_use_id": "tool-1",
         "tool_input": {"session_id": True},

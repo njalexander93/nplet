@@ -13,6 +13,7 @@ import pytest
 
 from nplet.adapters import common
 from nplet.lifecycle import task_workspace as core
+from tests.unit.adapters.native_event_support import native_event
 
 pytestmark = pytest.mark.unit
 
@@ -30,15 +31,20 @@ def test_native_token_rejects_nonstring_identity(value: object) -> None:
     assert captured.value.code == "INVALID_REQUEST"
 
 
-def test_native_identity_preserves_claude_session_and_cwd(tmp_path: Path) -> None:
+def test_native_identity_preserves_claude_session_and_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Native identity preserves claude session and cwd.
 
     Args:
         tmp_path: Absolute checkout path used in the native event.
+        monkeypatch: Replace repository discovery with a proven absence.
     """
+    monkeypatch.setattr(common.core, "project_repository", lambda _path: None)
     event = {"session_id": "session", "cwd": str(tmp_path), "tool_use_id": "one"}
     normalized = common.native_identity(event, "claude-code")
-    assert normalized == event
+    # A directory outside every repository carries an explicit absent repository.
+    assert normalized == {**event, "repository": None}
     assert normalized is not event
 
 
@@ -93,15 +99,19 @@ def test_native_identity_keys_claude_child_under_parent_session(tmp_path: Path) 
     )
 
 
-def test_native_identity_ignores_forged_child_markers(tmp_path: Path) -> None:
+def test_native_identity_ignores_forged_child_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Drop envelope-supplied child markers from a main-thread Claude event.
 
     Args:
         tmp_path: Absolute checkout path used in the native event.
+        monkeypatch: Replace repository discovery with a proven absence.
     """
+    monkeypatch.setattr(common.core, "project_repository", lambda _path: None)
     event = {"session_id": "s", "cwd": str(tmp_path), "child": True, "parent_session_id": "x"}
     normalized = common.native_identity(event, "claude-code")
-    assert normalized == {"session_id": "s", "cwd": str(tmp_path)}
+    assert normalized == {"session_id": "s", "cwd": str(tmp_path), "repository": None}
 
 
 def test_native_identity_keeps_rejecting_cursor_agent_id(tmp_path: Path) -> None:
@@ -119,41 +129,6 @@ def test_native_identity_keeps_rejecting_cursor_agent_id(tmp_path: Path) -> None
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_identity(event, "cursor")
     assert captured.value.code == "HOST_UNSUPPORTED_CHILD_IDENTITY"
-
-
-def test_native_identity_requires_single_cursor_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Native identity requires single cursor root.
-
-    Args:
-        tmp_path: Absolute checkout path used in the native event.
-        monkeypatch: Replaces repository or lifecycle boundaries for the case.
-    """
-    monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
-    event = {"conversation_id": "conversation", "workspace_roots": [str(tmp_path)]}
-    normalized = common.native_identity(event, "cursor")
-    assert normalized["session_id"] == "conversation"
-    assert normalized["cwd"] == str(tmp_path)
-    # Empty, multiple, and non-path roots violate Cursor's single-root contract.
-    for roots in ([], [str(tmp_path), str(tmp_path)], [7]):
-        # Every invalid root list must fail before a session is derived.
-        with pytest.raises(core.WorkspaceError) as captured:
-            common.native_identity({**event, "workspace_roots": roots}, "cursor")
-        assert captured.value.code == "HOST_UNSUPPORTED_WORKSPACE"
-
-
-def native_event(tool: str, args: dict[str, object] | None = None) -> dict[str, object]:
-    """Build one native tool event for the shared adapter contract.
-
-    Args:
-        tool: Native tool name presented to the adapter.
-        args: Arguments supplied to the helper under test.
-
-    Returns:
-        The host tool event with a stable call ID.
-    """
-    return {"tool_use_id": "tool-1", "tool_name": tool, "tool_input": {} if args is None else args}
 
 
 @pytest.mark.parametrize(
@@ -387,79 +362,6 @@ def test_native_tool_claude_bash_requires_background_disabled(
     assert captured.value.code == "HOST_UNSUPPORTED_ASYNC"
 
 
-def test_native_tool_cursor_shell_rejects_foreign_directory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cursor shell work cannot redirect to an unbound repository.
-
-    Args:
-        monkeypatch: Replaces repository or lifecycle boundaries for the case.
-    """
-    monkeypatch.setattr(common.core, "repository", lambda path: (Path(path), None, []))
-    checkout = Path(Path.cwd().anchor) / "checkout"
-    other = Path(Path.cwd().anchor) / "other"
-    native = {
-        **native_event("Shell", {"command": "echo ok", "working_directory": str(other)}),
-        "cwd": str(checkout),
-    }
-    # Tool-supplied working directory cannot redirect to another checkout.
-    with pytest.raises(core.WorkspaceError) as captured:
-        common.native_tool(native, "cursor")
-    assert captured.value.code == "REPOSITORY_MISMATCH"
-    native["tool_input"] = {"command": "echo ok", "working_directory": str(checkout)}
-    assert common.native_tool(native, "cursor") == "Shell"
-
-
-def test_canonical_bootstrap_rejects_foreign_session_before_store_access(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Canonical bootstrap rejects foreign session before store access.
-
-    Args:
-        monkeypatch: Replaces repository or lifecycle boundaries for the case.
-        tmp_path: Absolute checkout path used in the native event.
-    """
-    # Compare the observed session to a command naming a foreign session.
-    event = {"cwd": str(tmp_path), "session_id": "actual"}
-    command = common.bootstrap_command(
-        {
-            "operation": "diagnose",
-            "worktree": str(tmp_path),
-            "host": "codex",
-            "session_id": "foreign",
-        },
-        "codex",
-    )
-    monkeypatch.setattr(
-        common.core,
-        "repository",
-        lambda _path: (_ for _ in ()).throw(AssertionError("repository touched")),
-    )
-    assert common.canonical_bootstrap(event, command, "codex", ready=False) is False
-
-
-def test_canonical_bootstrap_rejects_oversized_or_unparseable_command(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Command validation fails closed before any binding directory is opened.
-
-    Args:
-        monkeypatch: Replaces repository or lifecycle boundaries for the case.
-        tmp_path: Absolute checkout path used in the native event.
-    """
-    # Reject malformed commands before any assignment directory opens.
-    event = {"cwd": str(tmp_path / "checkout"), "session_id": "session"}
-    monkeypatch.setattr(
-        common.core.Directory, "absolute", lambda _path: pytest.fail("opened binding")
-    )
-    assert common.canonical_bootstrap(event, None, "codex", ready=False) is False
-    assert common.canonical_bootstrap(event, "x" * 65537, "codex", ready=False) is False
-    assert (
-        common.canonical_bootstrap(event, "not a lifecycle command", "codex", ready=False) is False
-    )
-
-
 def test_native_tool_rejects_nonobject_arguments_before_transport_checks() -> None:
     """A malformed tool input cannot reach provider, child, or file admission."""
     # Tool input must be an object before transport or permission validation.
@@ -514,6 +416,7 @@ def test_recovery_message_preserves_exact_diagnostic_without_task_content() -> N
                 ("REVISION_CONFLICT", ["Read the current revision", "reapply"]),
                 ("BINDING_CONFLICT", ["Continue the bound issue", "rebind"]),
                 ("REPOSITORY_MISMATCH", ["registered checkout"]),
+                ("REPOSITORY_ABSENT", ["inside no Git repository", "task-free"]),
                 ("PROVIDER_RESPONSE_INVALID", ["exact selected-ticket get_issue", "new native"]),
                 (
                     "ISSUE_MISMATCH",

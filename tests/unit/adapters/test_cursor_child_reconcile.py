@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nplet.adapters import cursor_children as children
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 from tests.unit.adapters.cursor_children_support import cursor_mock_store, cursor_record
 
@@ -84,7 +85,10 @@ def test_reconcile_command_preserves_unrelated_shell_and_rejects_cwd_redirect(
         "cwd": "/checkout",
     }
     assert children.recognize_reconcile(event) is None
-    monkeypatch.setattr(children.core, "repository", lambda path: (Path(path), None, []))
+    monkeypatch.setattr(
+        children.core, "repository", lambda path: children.core.Repository(Path(path), None, [])
+    )
+    event = carrier.carry_repository(event)
     event["tool_input"] = {
         "command": children.reconcile_command("TEST-1", children.call_token("call")),
         "working_directory": "/foreign",
@@ -185,9 +189,10 @@ def test_internal_transition_stops_on_invalid_identity_or_retry_limit(
     control.json.return_value = {"revision": 10}
     execute = MagicMock(return_value={"ok": False, "code": code})
     monkeypatch.setattr(children.core, "execute_internal", execute)
+    # Eight attempts sleep 0.56s between them; a loaded runner needs headroom beyond one second.
     with pytest.raises(core.WorkspaceError) as error:
         children.execute_current(
-            {"issue_id": "TEST-1", "operation": "cursor-retire"}, time.monotonic() + 1
+            {"issue_id": "TEST-1", "operation": "cursor-retire"}, time.monotonic() + 5
         )
     assert error.value.code == code
     assert execute.call_count == attempts

@@ -243,7 +243,8 @@ def normalize(event: core.JSONObject, deadline: float) -> core.JSONObject:
     try:
         configured = registration(observed["cwd"])
     except core.WorkspaceError as error:
-        if error.code == "REGISTRATION_REQUIRED" and parent_call is None:
+        # An unregistered parent, or one outside every repository, has no store to route.
+        if parent_call is None and error.code in {"REGISTRATION_REQUIRED", "REPOSITORY_ABSENT"}:
             return observed
         raise
     with core.Store(configured, create=False, bindings=False) as store:

@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 
 from nplet.adapters import codex_children, common, runner, startup, task_boundary
+from nplet.adapters.session_repository import (
+    carry_repository,
+    session_project_root,
+    session_repository,
+    session_root,
+)
 from nplet.lifecycle import task_workspace as core
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -257,9 +263,14 @@ def startup_lookup_state(event: core.JSONObject, suffix: str) -> bool:
 
     Returns:
         Whether this session has the requested marker.
+
+    Raises:
+        core.WorkspaceError: If the event carries no repository or a malformed one.
     """
-    # Resolve the exact repository and participant before inspecting marker files.
-    root, _, _ = core.repository(event["cwd"])
+    # A session outside every repository has no store and so no lookup marker.
+    root = session_project_root(event)
+    if root is None:
+        return False
     key = core.participant_key({"host": "codex", "session_id": event["session_id"]})
     # Inspect marker files through validated no-follow directory handles.
     with core.Directory.absolute(root) as directory:
@@ -296,7 +307,7 @@ def ticket_lookup(event: core.JSONObject, complete: bool = False) -> core.JSONOb
     if event.get("tool_name") not in TICKET_TOOLS:
         # Other tools do not participate in the assigned-ticket handshake.
         return None
-    root, _, _ = core.repository(event["cwd"])
+    root = session_root(event)
     key = core.participant_key({"host": "codex", "session_id": event["session_id"]})
     # Lock this participant's binding while validating the assigned issue and call.
     with (
@@ -440,6 +451,10 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         core.WorkspaceError: If required binding or store validation fails.
         OSError: If the registered store cannot be accessed.
     """
+    # Carry the repository discovered from a textual working directory, overwriting any
+    # payload field; other cwd values keep failing their existing validation.
+    if isinstance(event.get("cwd"), str):
+        event = carry_repository(event)
     # Select the event-specific host response and lifecycle action.
     name = event.get("hook_event_name")
     # Route native child UUIDs exclusively through their own participant and bounded tools.
@@ -517,7 +532,7 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         common.native_token(event.get("session_id"))
         common.native_token(event.get("tool_use_id"))
         core.require(isinstance(event.get("tool_input"), dict), "INVALID_REQUEST")
-        roles = task_boundary.edit_roles(event)
+        roles = task_boundary.edit_roles(event, session_repository(event))
         if task_boundary.task_free(common.native_effect(event, "codex"), "codex", roles=roles):
             return {}
         core.require("control" not in roles, "NOT_OWNER")

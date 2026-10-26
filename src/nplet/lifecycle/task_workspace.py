@@ -13,6 +13,7 @@ import argparse
 import base64
 import copy
 import json
+import os
 import re
 import subprocess
 import sys
@@ -22,7 +23,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any, NamedTuple, NotRequired, TypedDict
 
 from nplet.lifecycle import _invocation_policy as invocation_policy
 from nplet.lifecycle import _invocation_records as invocation_records
@@ -373,31 +374,89 @@ def git(path: str | Path, *args: str) -> str:
         Stripped UTF-8 command output.
 
     Raises:
-        WorkspaceError: If Git returns a nonzero status.
+        WorkspaceError: ``REPOSITORY_ABSENT`` when Git reports that ``path`` is not in a
+            repository, or ``REPOSITORY_MISMATCH`` for any other nonzero status.
         subprocess.SubprocessError: If Git exceeds the timeout.
         OSError: If Git cannot be launched.
     """
-    # Query Git with separate arguments and a bounded runtime.
+    # Query Git with separate arguments, English diagnostics and a bounded runtime.
     result = subprocess.run(
         ["git", "-C", str(path), *args],
+        env={**os.environ, "LC_ALL": "C"},
         capture_output=True,
         text=True,
         encoding="utf-8",
         timeout=2,
         check=False,
     )
-    require(result.returncode == 0, "REPOSITORY_MISMATCH")
+    # Only Git's own not-a-repository diagnosis proves absence; other failures mismatch.
+    if result.returncode != 0:
+        if "not a git repository" in result.stderr:
+            raise WorkspaceError("REPOSITORY_ABSENT")
+        raise WorkspaceError("REPOSITORY_MISMATCH")
     return result.stdout.strip()
 
 
-def repository(path: str | Path) -> tuple[Path, Path, list[Path]]:
+class Repository(NamedTuple):
+    """A non-bare Git repository as seen from one of its worktrees.
+
+    Attributes:
+        root: Worktree root containing the observed directory.
+        common: Common Git directory shared by every worktree.
+        trees: Every worktree root the repository lists.
+    """
+
+    root: Path
+    common: Path
+    trees: list[Path]
+
+    def to_json(self) -> dict[str, Any]:
+        """Encode the repository as JSON-safe text.
+
+        Returns:
+            The ``root``, ``common`` and ``trees`` paths as strings.
+        """
+        return {
+            "root": str(self.root),
+            "common": str(self.common),
+            "trees": [str(tree) for tree in self.trees],
+        }
+
+    @classmethod
+    def from_json(cls, data: object) -> Repository:
+        """Decode a repository previously encoded by ``to_json``.
+
+        Args:
+            data: Untrusted decoded JSON value.
+
+        Returns:
+            The repository with its paths restored.
+
+        Raises:
+            WorkspaceError: ``INVALID_REQUEST`` if the value is not exactly the encoded shape.
+        """
+        # Accept only the exact keys with text paths; anything else is a malformed carrier.
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"root", "common", "trees"}
+            or not isinstance(data["root"], str)
+            or not isinstance(data["common"], str)
+            or not isinstance(data["trees"], list)
+            or not all(isinstance(tree, str) for tree in data["trees"])
+        ):
+            raise WorkspaceError("INVALID_REQUEST")
+        # Restore every text path.
+        return cls(Path(data["root"]), Path(data["common"]), [Path(t) for t in data["trees"]])
+
+
+def repository(path: str | Path) -> Repository:
     """Resolve a non-bare worktree to its common Git directory and member roots.
 
     Args:
         path: Directory inside the requested Git worktree.
 
     Returns:
-        A tuple of worktree root, common Git directory and worktree paths.
+        The worktree root, common Git directory and worktree paths.
 
     Raises:
         WorkspaceError: If the repository is unsupported or membership is inconsistent.
@@ -413,7 +472,45 @@ def repository(path: str | Path) -> tuple[Path, Path, list[Path]]:
         if line.startswith("worktree ")
     ]
     require(root in trees, "REPOSITORY_MISMATCH")
-    return root, common, trees
+    return Repository(root, common, trees)
+
+
+def project_repository(path: str | Path) -> Repository | None:
+    """Select the Git repository whose worktrees hold the project code, if one exists.
+
+    Args:
+        path: Native session working directory.
+
+    Returns:
+        Present: the ``repository`` worktree root, common Git directory and worktree roots.
+        Absent: None, only when Git reports ``REPOSITORY_ABSENT`` and no ancestor of
+        ``path``, in its lexical or link-resolved spelling, has a ``.git`` entry.
+
+    Raises:
+        WorkspaceError: ``REPOSITORY_MISMATCH`` for failed discovery: ``path`` is missing,
+            its repository is bare, its worktree list is inconsistent, an unusable ``.git``
+            entry sits on its ancestor chain, or Git fails for any reason other than proven
+            absence, such as unreadable configuration or metadata. ``REPOSITORY_ABSENT``
+            is never raised here; it is returned as None.
+        subprocess.SubprocessError: If Git metadata cannot be queried in time.
+        OSError: If Git cannot be launched.
+    """
+    # The ordinary repository lookup succeeds for every directory inside a work tree.
+    try:
+        return repository(path)
+    except WorkspaceError as error:
+        if error.code != "REPOSITORY_ABSENT":
+            raise
+        # Any .git entry, even a dangling link, on the lexical or resolved ancestor chain
+        # is Git metadata Git cannot use: failed discovery, never absence.
+        starts = (Path(path).absolute(), Path(path).resolve())
+        if any(
+            os.path.lexists(ancestor / ".git")
+            for start in starts
+            for ancestor in (start, *start.parents)
+        ):
+            raise WorkspaceError("REPOSITORY_MISMATCH") from error
+        return None
 
 
 def fs_identity(path: str | Path) -> list[int]:

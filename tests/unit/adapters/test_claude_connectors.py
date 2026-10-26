@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from nplet.adapters import common
+from nplet.adapters import session_repository as carrier
 from nplet.lifecycle import task_workspace as core
 from tests.types import JsonObject
 
@@ -197,7 +198,12 @@ def test_no_effect_tools_are_task_free_and_record_no_pending_work(
     monkeypatch.setattr(
         common.core, "execute", lambda request: calls.append(request) or {"ok": True, "code": "OK"}
     )
-    event: JsonObject = {"tool_name": tool, "tool_input": {}, "tool_use_id": "tool-1"}
+    event: JsonObject = {
+        "tool_name": tool,
+        "tool_input": {},
+        "tool_use_id": "tool-1",
+        "repository": None,
+    }
     # The pre-hook checks readiness only and the post-hook settles nothing.
     common.native_pre(event, "claude-code")
     assert calls == []
@@ -219,7 +225,11 @@ def test_preparation_tool_bounds_tool_search_and_paths(
     """
     # Resolve every event to the disposable checkout.
     monkeypatch.setenv("NPLET_CLAUDE_LINEAR_CONNECTOR_ID", CONNECTOR)
-    monkeypatch.setattr(common.core, "repository", lambda _path: (tmp_path, tmp_path, [tmp_path]))
+    monkeypatch.setattr(
+        common.core,
+        "repository",
+        lambda _path: common.core.Repository(tmp_path, tmp_path, [tmp_path]),
+    )
     agents = str(tmp_path / "AGENTS.md")
 
     def event(tool: str, args: object) -> JsonObject:
@@ -232,7 +242,8 @@ def test_preparation_tool_bounds_tool_search_and_paths(
         Returns:
             The native envelope.
         """
-        return {"cwd": str(tmp_path), "tool_name": tool, "tool_input": args, "tool_use_id": "t"}
+        observed = {"cwd": str(tmp_path), "tool_name": tool, "tool_input": args, "tool_use_id": "t"}
+        return carrier.carry_repository(observed)
 
     # Positive selections and reads.
     selection = f"select:mcp__{CONNECTOR}__get_issue, mcp__linear__get_issue"
