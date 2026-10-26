@@ -89,9 +89,9 @@ Before writing Python, read [source documentation and logic comments](developmen
 
 ### Scope discovery during execution
 
-Classify a discovery by its scope, not its size:
+Classify a discovery by its scope, not its size. No line count or percentage makes work a blocker; a decision that changes scope does:
 
-- **Estimate variance:** the work stays inside the approved deliverables but is larger, such as 1,250 actual against 1,000 estimated lines. Continue and record the difference in the [estimate outcome record](#estimate-outcome-record). It is not a blocker and needs no new approval. When refreshed `main` or the variance breaks the decomposition rules for the remaining work, apply [intake step 3](#issue-intake-and-planned-readiness) through the revised-proposal rule above.
+- **Estimate variance:** the work stays inside the approved deliverables but is larger; for example, 1,250 actual against 1,000 estimated lines. Continue and record the difference in the [estimate outcome record](#estimate-outcome-record). It is not a blocker and needs no new approval. When refreshed `main` or the variance breaks the decomposition rules for the remaining work, apply [intake step 3](#issue-intake-and-planned-readiness) through the revised-proposal rule above.
 - **Optional improvement:** not needed to meet the acceptance criteria. Record it as a separate issue linked as related through task-free project administration, never as blocking, and continue.
 - **Necessary prerequisite:** needed to meet the criteria, outside the approved scope and a reviewable deliverable of its own. Follow the [stop route](#stop-route-for-a-necessary-prerequisite).
 

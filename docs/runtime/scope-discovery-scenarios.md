@@ -12,7 +12,7 @@ Every scenario starts from an issue with an approved roadmap, in **In Progress**
 
 | Input | Expected outcome | Decided by |
 | --- | --- | --- |
-| Estimated 1,000 lines; actual 1,250 lines; same deliverables and criteria | Estimate variance. Continue; no blocker, no new issue and no new approval. Record 1,000 against 1,250 and the reasons in the estimate outcome record at completion. No work is lost and nothing is launched. | **[D]** "It is not a blocker and needs no new approval."; **[B]** "Estimate variance inside the authorized scope does not change the plan." |
+| The work runs somewhat over its estimate (illustratively, 1,250 actual against 1,000 estimated lines); deliverables, criteria and authority are unchanged | Estimate variance. Continue; no blocker, no new issue and no new approval. The figures are an example, not a threshold: no line count or percentage makes work a blocker; a scope-changing decision does. Record the difference and the reasons in the estimate outcome record at completion. No work is lost and nothing is launched. | **[D]** "Classify a discovery by its scope, not its size" and "It is not a blocker and needs no new approval."; **[B]** "Estimate variance inside the authorized scope does not change the plan." |
 
 ## 2. Optional improvement
 
