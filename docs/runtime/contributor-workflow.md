@@ -11,7 +11,7 @@ This is the canonical contributor procedure required by [root instructions](../.
 Creating, updating and planning an issue is task-free project administration through the [task-free parent route](host-hooks.md#task-free-parent-operations). It needs no Task binding and grants no implementation authority. The packaged [sizing and classification policy](../../src/nplet/resources/organization/baseline.md#issue-sizing-and-classification) is authoritative for points, classifications and Planned readiness; apply it rather than restating it.
 
 1. **Capture.** After creating an issue, read it back and report its link and actual provider status, such as Proposed, Backlog or Triage. State plainly that it is a placeholder, not Planned. A rough description is enough at capture.
-2. **Scope.** Before moving an issue to Planned, complete the [scoping record](#scoping-record) in its description. Estimate additions plus deletions for every affected area: implementation, tests, fixtures, configuration, documentation and supporting changes. A replacement counts both the removed and the added lines. Derive points from the total, then assign Agent Class, Assurance Level, Type and Execution independently.
+2. **Scope.** Before moving an issue to Planned, complete the [scoping record](#scoping-record) in its description. Estimate additions plus deletions for every affected area: implementation, tests, fixtures, configuration, documentation and supporting changes. A replacement counts both the removed and the added lines. Derive points from the total, then assign Agent Class, Assurance Level, Type and Execution independently. Consult the recorded [estimate outcomes](#estimate-outcome-record) of comparable completed issues when estimating.
 3. **Decompose.** Above 5 points or 1,000 estimated lines, first seek smaller concrete deliverables, and scope and classify each increment the same way. An 8-point issue records why reasonable splitting fails and needs explicit human approval before Planned. Never admit a 13-point issue; decompose it instead. Link sibling increments as related and use blocking relationships only for genuine prerequisites. Keep each increment a separately reviewable PR.
 4. **Move to Planned** only when every required record field is complete and, for 8 points, the human approval is recorded. Otherwise leave the issue in its capture status and report the missing fields. Read back the Planned status.
 
@@ -57,7 +57,7 @@ The contract is runtime-neutral. This checkout implements adapters for Codex, Cu
 1. Use the verified Linear issue read from bootstrap. Read its full criteria and applicable governing inputs through the [task catalog](../README.md). Refresh provider state when needed. Named Linear inspection and administration calls use the [task-free parent route](host-hooks.md#task-free-parent-operations), including create and update. Claude Code and Cursor retain their configured provider checks. Other Codex parent `mcp__` calls retain generic readiness admission and pending tracking; existing child/delegation tool-name denials still apply. Its archive gate is not exclusive: when it returns false, the call can still pass the generic readiness route. An earlier archive-specific error can prevent that fallthrough; for example, a legacy document save without an export fails before generic readiness. Cursor admits the named task-free Linear route only. Inspect existing authorized work, branches, PRs and recorded progress before starting duplicate work.
 2. Resolve the **initiating human** from explicit session evidence and a verified provider identity. Connector “me”, issue creator and service-account identity are not sufficient. If identity is ambiguous, ask for the human and resolve the provider user before assigning.
 3. If unassigned or assigned to someone else, assign the issue to that initiating human. Read the issue back and verify the exact assignee ID. This is the contributor exception in [authoring and publication rules](../framework/baseline.md#authoring-and-publication-rules).
-4. At assignment start, **including planning**, set the issue to **In Progress** and read back its state. If already In Progress, verify it. On resume, preserve a verified later delivery state and continue from the recorded gate; do not reset completed work or silently reopen a terminal issue.
+4. At assignment start, **including planning**, set the issue to **In Progress** and read back its state. If already In Progress, verify it. On resume, preserve a verified later delivery state and continue from the recorded gate; do not reset completed work or silently reopen a terminal issue. Keep an issue that is **Blocked** by a prerequisite in Blocked until the [stop route](#stop-route-for-a-necessary-prerequisite) resume conditions hold; that resume step, not startup, moves it to In Progress.
 5. Name the master `AGENT-X · Master — <short issue title>` using the actual identifier. Record its actual thread identity, issue identity, observed assignment and status in the workspace once available.
 
 **Exit:** the issue, initiating human, master identity and applicable status are verified. Record unavailable integrations or failed writes/read-backs as explicit blockers; never claim the transition succeeded without evidence.
@@ -87,6 +87,40 @@ A material change to scope, acceptance criteria, authority or delivery obligatio
 
 Before writing Python, read [source documentation and logic comments](development.md#source-documentation-and-logic-comments). Apply those rules to production code, scripts and tests throughout implementation. Before handing off, inspect every changed Python file for meaningful contract docstrings and comments before each logical phase; a lint pass alone does not satisfy this review.
 
+### Scope discovery during execution
+
+Classify a discovery by its scope, not its size. No line count or percentage makes work a blocker; a decision that changes scope does:
+
+- **Estimate variance:** the work stays inside the approved deliverables but is larger; for example, 1,250 actual against 1,000 estimated lines. Continue and record the difference in the [estimate outcome record](#estimate-outcome-record). It is not a blocker and needs no new approval. When refreshed `main` or the variance breaks the decomposition rules for the remaining work, apply [intake step 3](#issue-intake-and-planned-readiness) through the revised-proposal rule above.
+- **Optional improvement:** not needed to meet the acceptance criteria. Record it as a separate issue linked as related through task-free project administration, never as blocking, and continue.
+- **Necessary prerequisite:** needed to meet the criteria, outside the approved scope and a reviewable deliverable of its own. Follow the [stop route](#stop-route-for-a-necessary-prerequisite).
+
+A small necessary change that only makes the approved deliverable work, such as about 50 lines of supporting code, is not a new deliverable: make it, note it in the PR and the [estimate outcome record](#estimate-outcome-record), and continue without new approval. Adding another feature to the PR to finish the scoped one is never such a change.
+
+#### Stop route for a necessary prerequisite
+
+1. Pause the whole issue at a consistent point. Verify in-flight step handoffs or record them as unfinished. Do not start the prerequisite.
+2. Preserve unfinished work: commit it to the issue branch and push that branch. Do not open a PR; [stage 8](#8-submit-and-verify-delivery) forbids early draft PRs. Record a lifecycle `checkpoint` and an `outcome` with disposition `blocked`, citing the pushed commit, through the existing [state transitions](task-workspace.md#state-transitions); add no lifecycle state or storage.
+3. Create the prerequisite issue with a complete [scoping record](#scoping-record) through [issue intake](#issue-intake-and-planned-readiness). It stays in its capture status or Planned; creation is not approval.
+4. Link it as blocking the original issue, move the original issue to **Blocked** and read both back. Report an unavailable status or link as a blocker.
+5. Report to the human with the blocker record below and stop. The master never executes the prerequisite or launches its thread; the prerequisite gets normal planning, approval and its own master thread.
+
+```text
+Discovery:
+Cause:
+Evidence:
+Classification: necessary prerequisite (outside approved scope, own deliverable)
+Scope impact:
+Completed work:
+Preserved at: <branch>@<commit>; lifecycle checkpoint revision <n>
+Prerequisite: <issue link>, blocks this issue, status <observed>
+Original issue status: Blocked (read back)
+Resume conditions:
+Not done: prerequisite neither executed nor launched
+```
+
+**Resume** only after the prerequisite's verified merge into `main`. Merge `main` into the issue branch, reassess the remaining original scope against the approved roadmap and re-estimate when needed. If the remaining scope, criteria or authority changed materially, present a revised proposal and wait under the [proposal gate](#3-present-a-concrete-proposal-and-wait). Otherwise record the reassessment, set the lifecycle `outcome` back to `active`, move the issue to **In Progress** with read-back and continue under the existing approval. Child completion, the prerequisite's merge or the human's earlier approval of other work is never new approval.
+
 **Exit:** each dispatched assignment maps to a current approved numbered step.
 
 ## 5. Dispatch fresh step threads
@@ -107,7 +141,7 @@ Before writing Python, read [source documentation and logic comments](developmen
 
 ## 7. Continue the approved roadmap
 
-After each verified handoff, update progress and dispatch the next eligible step. **Child completion does not end the task.** Continue until all approved steps meet their exit criteria or a blocker requires human input. Record each blocker, its affected work and the next action. Keep other authorized independent work moving.
+After each verified handoff, update progress and dispatch the next eligible step. **Child completion does not end the task.** Continue until all approved steps meet their exit criteria or a blocker requires human input. Record each blocker, its affected work and the next action. A necessary prerequisite blocker follows the [stop route](#stop-route-for-a-necessary-prerequisite). Keep other authorized independent work moving.
 
 **Exit:** every approved step is verified complete, or remaining work has an explicit blocker and owner.
 
@@ -128,10 +162,21 @@ checks, or authorize merge.
 1. Prepare, submit and read back a **PR for human review into `main`** using [PR preparation and verification](#pr-preparation-and-verification) and the [publication rules](../framework/baseline.md#authoring-and-publication-rules). Retain the exact candidate revision, diff, relevant check results and acceptance evidence in the delivery record. Validate affected links and templates. Verify changed Python files against the [source documentation rules](development.md#source-documentation-and-logic-comments). Report unproven runtime or platform claims.
 2. At review-ready PR submission, move Linear to **In Review** if automation has not already done so, and verify by read-back. Record the PR and lifecycle `in_review` checkpoint; retain context while review and corrections continue.
 3. Read the live rules applicable to the target branch to identify required checks. Preserve current-candidate evidence for failures of currently required checks and the applicable **CI failed** label. Reconcile that label against current requirements and results; record a removed requirement as removed, not passed. An absent check that is no longer required is not a merge blocker. Keep repository-local validation and issue-specific acceptance obligations separate from GitHub merge requirements. Follow those obligations without inventing infrastructure work.
-4. Keep merge human-controlled. Verify the actual PR merge into `main`, then move to **Merged** and read back the state. After acceptance and every issue obligation are verified, move to **Done** and verify the completed state. An open PR, passing checks or child completion is insufficient.
+4. Keep merge human-controlled. Verify the actual PR merge into `main`, then move to **Merged** and read back the state. After acceptance and every issue obligation are verified, record the [estimate outcome](#estimate-outcome-record), then move to **Done** and verify the completed state. An open PR, passing checks or child completion is insufficient.
 5. Record supported [completion evidence](task-workspace-usage.md#recovery-and-completion-semantics) before terminal lifecycle disposition. Preserve unresolved obligations and recovery state. Report unavailable transitions/integrations as blockers rather than fabricating closure.
 
 **Exit:** actual merge, human acceptance, required checks, obligations and provider completion are evidenced. Workspace archival/cleanup retains its separate lifecycle prerequisites.
+
+### Estimate outcome record
+
+Before moving to **Done**, record the outcome in the roadmap's delivery section and as a comment on the issue:
+
+```text
+Original estimate: <low>–<high> lines; <points> points
+Actual: <additions + deletions> lines (the merged PR's diff; excludes merged prerequisites)
+Difference and reasons:
+Discovered splits and prerequisites:
+```
 
 ### PR preparation and verification
 

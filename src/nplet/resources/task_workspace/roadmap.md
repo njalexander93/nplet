@@ -15,7 +15,7 @@
 - **Constraints:** <Permitted scope, exclusions and delivery obligations>
 - **Sources:** <Governing references and exact candidate/source identities>
 - **Existing progress:** <Verified prior outputs, approvals and unresolved work>
-- **Blockers:** <Affected work, responsible owner and next action>
+- **Blockers:** <Affected work, prerequisite link, responsible owner, next action and resume condition>
 
 Follow the canonical contributor procedure at `docs/runtime/contributor-workflow.md`
 in the selected checkout for proposal approval, dispatch, verification and delivery.
@@ -53,6 +53,7 @@ one fresh thread with verified actual identity and its own bounded packet.
 **Checks and limits:** <Commands/results, tested platforms, remaining evidence>
 **PR and review:** <PR into main, verified In Review state and lifecycle checkpoint>
 **Merge and acceptance:** <Actual merge, human acceptance and verified Merged state>
+**Estimate outcome:** <Original estimate, actual additions + deletions, difference and reasons, discovered splits/prerequisites>
 **Obligations and completion:** <Evidence for all obligations and verified Done state>
 **Retention/disposition:** <Durable evidence, scratch cleanup or unresolved retention>
 **Next action:** <Continue the approved roadmap until verified delivery or an owned blocker>
