@@ -201,11 +201,14 @@ number and the PR's current full head SHA:
 gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
 ```
 
-A new push needs a new manual start.
+A new push needs a new manual start. Dispatch from the default branch (the
+`gh workflow run` default): the run executes that ref's workflow and gate.
 
 A new run for the same PR, from any push or manual start, cancels older queued
 or running review runs. Published reviews, comments and threads are untouched.
 Any new run for the PR, including a stale manual start, cancels a running review.
+If that cancels a run before it posted a status, the head has no `PR Size Check`;
+re-run the push's AI review run or dispatch with the current head SHA.
 
 The reviewer receives the admitted head and base SHAs. It stops before any model
 call if the PR has moved; its own publish-time recheck remains.
