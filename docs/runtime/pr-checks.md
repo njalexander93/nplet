@@ -3,7 +3,8 @@
 **All five checks must pass.** Open a failed check for its failing step, command
 log and evidence artifact. The [PR Pre-Merge Check workflow](../../.github/workflows/pr-checks.yml)
 runs on pull requests targeting `main`, including documentation-only changes.
-Bugbot is an independent check, outside these five jobs.
+Bugbot is an independent check, outside these five jobs. So is the `PR Size Check`
+status from the AI review workflow; see [AI review size gate](#ai-review-size-gate).
 
 The workflow uses the interpreter in [`.python-version`](../../.python-version),
 Poetry 2.4.2 and locked dependencies. A newer run for the same pull request cancels
@@ -171,6 +172,36 @@ an upstream `sysmon` repair will not fail the check.
   artifacts from a different candidate or substitute local success for the
   current pull-request result.
 
+## AI review size gate
+
+The [AI review workflow](../../.github/workflows/ai-review.yml) runs the
+[size gate](../../scripts/pr_size_gate.py) before any review. It counts GitHub's
+whole-PR additions plus deletions against the base and reports the result in the
+`PR Size Check` commit status and the run's job summary.
+
+| Changed lines | Result |
+| --- | --- |
+| ≤ 1,000 | Review runs automatically. |
+| 1,001–2,000 | Status passes; review needs a manual start for that commit. |
+| > 2,000 | Review is skipped and the status fails. Split the PR. |
+| Unknown or invalid totals | Status fails with "Could not determine PR size". |
+| `head-sha` is not the PR's current head | Run fails without posting a status. |
+
+Only PRs into the default branch post the status, because a status is shared by
+every PR on that commit. Changing a PR's base recounts it.
+
+To start a 1,001–2,000 line review, run the "AI review" workflow from the default
+branch with the PR number and the PR's current full head SHA. A new push needs a
+new manual start.
+
+```sh
+gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
+```
+
+A newer run for the same PR cancels older ones. If the head then has no
+`PR Size Check`, re-run that push's AI review run or dispatch with the current
+head SHA.
+
 ## Tests for the checking tools
 
 These tests protect the validation machinery itself:
@@ -193,6 +224,10 @@ These tests protect the validation machinery itself:
 - [test_test_quality.py](../../tests/unit/tooling/test_test_quality.py) checks
   exact function gaps, stale exception reviews and changed tooling receipts.
   Its integration counterpart checks that independent failures remain visible.
+- [test_pr_size_gate.py](../../tests/unit/tooling/test_pr_size_gate.py) and
+  [test_ai_review_workflow.py](../../tests/integration/tooling/test_ai_review_workflow.py)
+  check the size tiers, status and summary text, SHA binding and the workflow
+  wiring. They do not execute GitHub's scheduler.
 
 ## Merge enforcement and human review
 
@@ -203,6 +238,9 @@ found only Cursor Bugbot required; do not claim the old name is currently
 required. At rollout, read the live rule again, add the new exact check source
 and name, remove an old requirement only if one actually exists, and preserve
 other requirements. Do not report enforcement until a read-back confirms it.
+
+`PR Size Check` is required only once a human adds it to the `main` rules; the AI
+review itself is not a required check.
 
 At delivery, inspect the current rules for `main` and the current candidate's
 results. Record pending enforcement separately from test results. Preserve other
