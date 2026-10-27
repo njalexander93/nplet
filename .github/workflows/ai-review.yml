@@ -1,7 +1,7 @@
 name: AI review
 on:
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize]
+    types: [opened, reopened, ready_for_review, synchronize, edited]
   workflow_dispatch:
     inputs:
       pr-number:
@@ -13,8 +13,12 @@ on:
         required: true
         type: string
 # Cancellation stops only older runs; it never touches published reviews or threads.
+# Title or description edits get their own group so they never cancel a review.
 concurrency:
-  group: ai-review-${{ github.event.pull_request.number || inputs.pr-number }}
+  group: >-
+    ai-review-${{ github.event.pull_request.number || inputs.pr-number }}${{
+    github.event.action == 'edited' && !github.event.changes.base &&
+    format('-edit-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 permissions:
   contents: read
@@ -23,6 +27,8 @@ permissions:
 jobs:
   size:
     name: PR size gate
+    # Edits recount only when the base changed.
+    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-latest
     permissions:
       contents: read

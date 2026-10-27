@@ -46,14 +46,19 @@ def test_triggers_inputs_and_concurrency() -> None:
         "reopened",
         "ready_for_review",
         "synchronize",
+        "edited",
     ]
     # Require both dispatch inputs.
     inputs = trigger["workflow_dispatch"]["inputs"]
     assert set(inputs) == {"pr-number", "head-sha"}
     assert inputs["head-sha"]["required"] is True
     assert inputs["head-sha"]["type"] == "string"
-    # Require one cancelling group per PR.
-    assert workflow["concurrency"] == {"group": f"ai-review-{NUMBER}", "cancel-in-progress": True}
+    # Require one cancelling group per PR; edits that keep the base get a unique group.
+    assert workflow["concurrency"] == {
+        "group": f"ai-review-{NUMBER}${{{{ github.event.action == 'edited' && "
+        "!github.event.changes.base && format('-edit-{0}', github.run_id) || '' }}",
+        "cancel-in-progress": True,
+    }
 
 
 def test_size_job_runs_trusted_gate_without_secrets() -> None:
@@ -70,7 +75,8 @@ def test_size_job_runs_trusted_gate_without_secrets() -> None:
         "statuses": "write",
     }
     assert "secrets." not in yaml.safe_dump(size)
-    assert "if" not in size
+    # Edits recount only when the base changed.
+    assert size["if"] == "github.event.action != 'edited' || github.event.changes.base"
     # Require the trusted base checkout and the gate step wiring.
     checkout, gate = size["steps"]
     assert checkout["uses"].startswith("actions/checkout@11d5960a326750d5838078e36cf38b85af677262")

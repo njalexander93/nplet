@@ -194,10 +194,9 @@ Re-evaluate the scope and split this into smaller PRs."
 Results appear in the `PR Size Check` commit status, whose short description
 links to the run, and in that run's job summary. No PR comment is posted.
 
-The count is taken only on push or manual start. Changing a PR's base does not
-recount it, so the old status stays. Base each PR on `main`; for dependent work,
-merge the earlier PR first. After retargeting a PR to `main`, push a commit or
-dispatch with its current head SHA to recount.
+Changing a PR's base recounts it against the new base, and an eligible PR gets
+a new automatic review. Title or description edits do not recount or cancel a
+running review.
 
 To start a 1,001–2,000 line review, run the "AI review" workflow with the PR
 number and the PR's current full head SHA:
