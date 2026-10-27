@@ -202,44 +202,50 @@ def test_descriptions_fit_the_github_limit_at_large_totals() -> None:
         assert len(gate.status_for(tier, 9_999_999)[1]) <= 140
 
 
+UNKNOWN_STATUS = {
+    "state": "failure",
+    "context": "PR Size Check",
+    "description": "Could not determine PR size. AI review was not run.",
+    "target_url": "https://run",
+}
+
+
 @pytest.mark.parametrize(
-    "fake",
+    ("fake", "posted"),
     [
-        Fake(OSError("network")),
-        Fake(pull(1, 1), pull_code=502),
-        Fake(pull(None, 1)),
-        Fake({"deletions": 1, "head": {"sha": HEAD}}),
-        Fake(pull(-1, 1)),
-        Fake(pull(1.0, 1)),
-        Fake(pull("1", 1)),
-        Fake(pull(True, 1)),
-        Fake(pull(1, False)),
-        Fake(["not", "a", "pull"]),
-        Fake({"additions": 1, "deletions": 1, "head": "x"}),
+        (Fake(OSError("network")), False),
+        (Fake(pull(1, 1), pull_code=502), False),
+        (Fake(pull(None, 1)), True),
+        (Fake({"deletions": 1, "head": {"sha": HEAD}}), False),
+        (Fake(pull(-1, 1)), True),
+        (Fake(pull(1.0, 1)), True),
+        (Fake(pull("1", 1)), True),
+        (Fake(pull(True, 1)), True),
+        (Fake(pull(1, False)), True),
+        (Fake(["not", "a", "pull"]), False),
+        (Fake({"additions": 1, "deletions": 1, "head": "x"}), False),
+        (Fake(pull(None, 1, target="release")), False),
+        (Fake({**pull(1, 1, target="release"), "head": {}}), False),
     ],
 )
-def test_unreadable_size_posts_unknown_failure(tmp_path: Path, fake: Fake) -> None:
-    """API failures and invalid totals post the unknown failure instead of a zero total.
+def test_unreadable_size_fails_and_posts_only_for_the_default_branch(
+    tmp_path: Path, fake: Fake, posted: bool
+) -> None:
+    """Unreadable sizes fail without a zero total; only a known default-branch PR posts.
 
     Args:
         tmp_path: Disposable directory supplied by pytest.
         fake: Scripted failing or invalid response.
+        posted: Whether the response identifies the default branch as the base.
     """
     # Run the gate against the unreadable response.
     code, summary, outputs = run(tmp_path, fake)
-    # Check that the admitted head still gets an unknown failure status.
+    # Check the failure, outputs and that branch identity alone decides posting.
     assert code == 1
-    assert fake.calls[-1][1] == STATUS_URL
-    assert fake.statuses == [
-        {
-            "state": "failure",
-            "context": "PR Size Check",
-            "description": "Could not determine PR size. AI review was not run.",
-            "target_url": "https://run",
-        }
-    ]
+    assert fake.statuses == ([UNKNOWN_STATUS] if posted else [])
     assert outputs == {"tier": "unknown", "total": "", "head": HEAD, "base": ""}
     assert summary.startswith("Could not determine PR size: ")
+    assert ("not posted" in summary) is not posted
 
 
 def test_stale_head_posts_no_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -388,40 +394,49 @@ def test_entry_point_exits_with_main_result(
     assert capsys.readouterr().out.startswith("::error::Invalid input:")
 
 
+BRANCHES = {"ref": "main", "repo": {"default_branch": "main"}}
+OTHER = {"ref": "release", "repo": {"default_branch": "main"}}
+
+
 @pytest.mark.parametrize(
-    ("body", "reason"),
+    ("body", "reason", "posted"),
     [
-        ({**pull(1, 1), "base": {}}, "no base SHA"),
-        ({**pull(1, 1), "base": {"sha": "B" * 40}}, "no base SHA"),
-        ({**pull(1, 1), "base": {"sha": "b" * 39}}, "no base SHA"),
-        ({**pull(1, 1), "base": None}, "no base SHA"),
-        (pull(1, 1, head="A" * 40), "no head SHA"),
-        (pull(1, 1, head="a" * 41), "no head SHA"),
-        (pull(1, 1, target=""), "no base or default branch"),
-        ({**pull(1, 1), "base": {"sha": BASE, "ref": "main"}}, "no base or default branch"),
+        ({**pull(1, 1), "base": BRANCHES}, "no base SHA", True),
+        ({**pull(1, 1), "base": {**BRANCHES, "sha": "B" * 40}}, "no base SHA", True),
+        ({**pull(1, 1), "base": {**BRANCHES, "sha": "b" * 39}}, "no base SHA", True),
+        ({**pull(1, 1), "base": OTHER}, "no base SHA", False),
+        ({**pull(1, 1), "base": None}, "no base SHA", False),
+        (pull(1, 1, head="A" * 40), "no head SHA", True),
+        (pull(1, 1, head="a" * 41), "no head SHA", True),
+        (pull(1, 1, target=""), "no base or default branch", False),
+        ({**pull(1, 1), "base": {"sha": BASE, "ref": "main"}}, "no base or default branch", False),
         (
             {**pull(1, 1), "base": {"sha": BASE, "ref": "main", "repo": None}},
             "no base or default branch",
+            False,
         ),
     ],
 )
 def test_malformed_refs_make_size_unknown(
-    tmp_path: Path, body: dict[str, Any], reason: str
+    tmp_path: Path, body: dict[str, Any], reason: str, posted: bool
 ) -> None:
-    """Valid totals with a missing or malformed head or base SHA are never admitted.
+    """Valid totals with a missing or malformed ref are never admitted.
+
+    A known non-default base keeps its branch identity, so it posts no shared status.
 
     Args:
         tmp_path: Disposable directory supplied by pytest.
         body: Pull response with a bad ref.
         reason: Expected reason fragment in the summary.
+        posted: Whether the response identifies the default branch as the base.
     """
     # Run the gate against the malformed ref.
     fake = Fake(body)
     code, summary, outputs = run(tmp_path, fake)
-    # Check the unknown failure status, reason and empty outputs.
+    # Check the failure, reason, outputs and posting by branch identity alone.
     assert code == 1
-    assert [s["state"] for s in fake.statuses if s] == ["failure"]
-    assert summary == (
+    assert fake.statuses == ([UNKNOWN_STATUS] if posted else [])
+    assert summary.startswith(
         f"Could not determine PR size: pull request response had {reason}. AI review was not run.\n"
     )
     assert outputs == {"tier": "unknown", "total": "", "head": HEAD, "base": ""}

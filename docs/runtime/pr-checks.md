@@ -194,8 +194,9 @@ Re-evaluate the scope and split this into smaller PRs."
 Results appear in the `PR Size Check` commit status, whose short description
 links to the run, and in that run's job summary. No PR comment is posted.
 A commit status is shared by every PR on that commit, so only PRs into the
-default branch post it. A PR into another branch still gets its own count, run
-result and review tier, but posts no status.
+default branch post it. A PR into another branch, or one whose branches GitHub
+did not report, still gets its own count, run result and review tier, but posts
+no status. A missing required status still blocks the merge.
 
 Changing a PR's base recounts it against the new base, and an eligible PR gets
 a new automatic review. Title or description edits do not recount or cancel a
