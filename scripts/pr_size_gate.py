@@ -262,9 +262,9 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
         pull, reason = None, "pull request response had no base SHA"
     if pull is not None and (target is None or default is None):
         pull, reason = None, "pull request response had no base or default branch"
-    # Commit statuses are shared by every PR on a head, so only known default-branch PRs set one.
-    # An unposted required status still blocks the merge.
-    enforced = target is not None and target == default
+    # Commit statuses are shared by every PR on a head, so a known non-default PR never sets one.
+    # Unknown branches still post, so a failed recount cannot leave an earlier success in place.
+    enforced = target is None or default is None or target == default
 
     # Classify the totals without ever substituting zero.
     total = read_totals(pull)
@@ -294,10 +294,8 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
 
     # Report the outcome and choose the exit code.
     message = summary_for(tier, total, number, head, reason)
-    if not enforced and target and default:
+    if not enforced:
         message += f"\n{CONTEXT} not posted: base {target} is not the default branch {default}."
-    elif not enforced:
-        message += f"\n{CONTEXT} not posted: the base or default branch is unknown."
     if not posted:
         message += f"\nCould not post the {CONTEXT} status for {head}."
     failed = tier in {"over", "unknown"} or not posted

@@ -213,30 +213,30 @@ UNKNOWN_STATUS = {
 @pytest.mark.parametrize(
     ("fake", "posted"),
     [
-        (Fake(OSError("network")), False),
-        (Fake(pull(1, 1), pull_code=502), False),
+        (Fake(OSError("network")), True),
+        (Fake(pull(1, 1), pull_code=502), True),
         (Fake(pull(None, 1)), True),
-        (Fake({"deletions": 1, "head": {"sha": HEAD}}), False),
+        (Fake({"deletions": 1, "head": {"sha": HEAD}}), True),
         (Fake(pull(-1, 1)), True),
         (Fake(pull(1.0, 1)), True),
         (Fake(pull("1", 1)), True),
         (Fake(pull(True, 1)), True),
         (Fake(pull(1, False)), True),
-        (Fake(["not", "a", "pull"]), False),
-        (Fake({"additions": 1, "deletions": 1, "head": "x"}), False),
+        (Fake(["not", "a", "pull"]), True),
+        (Fake({"additions": 1, "deletions": 1, "head": "x"}), True),
         (Fake(pull(None, 1, target="release")), False),
         (Fake({**pull(1, 1, target="release"), "head": {}}), False),
     ],
 )
-def test_unreadable_size_fails_and_posts_only_for_the_default_branch(
+def test_unreadable_size_fails_and_posts_unless_the_base_is_known_non_default(
     tmp_path: Path, fake: Fake, posted: bool
 ) -> None:
-    """Unreadable sizes fail without a zero total; only a known default-branch PR posts.
+    """Unreadable sizes fail without a zero total; only a known non-default base skips posting.
 
     Args:
         tmp_path: Disposable directory supplied by pytest.
         fake: Scripted failing or invalid response.
-        posted: Whether the response identifies the default branch as the base.
+        posted: False only when the response names a non-default base.
     """
     # Run the gate against the unreadable response.
     code, summary, outputs = run(tmp_path, fake)
@@ -405,15 +405,15 @@ OTHER = {"ref": "release", "repo": {"default_branch": "main"}}
         ({**pull(1, 1), "base": {**BRANCHES, "sha": "B" * 40}}, "no base SHA", True),
         ({**pull(1, 1), "base": {**BRANCHES, "sha": "b" * 39}}, "no base SHA", True),
         ({**pull(1, 1), "base": OTHER}, "no base SHA", False),
-        ({**pull(1, 1), "base": None}, "no base SHA", False),
+        ({**pull(1, 1), "base": None}, "no base SHA", True),
         (pull(1, 1, head="A" * 40), "no head SHA", True),
         (pull(1, 1, head="a" * 41), "no head SHA", True),
-        (pull(1, 1, target=""), "no base or default branch", False),
-        ({**pull(1, 1), "base": {"sha": BASE, "ref": "main"}}, "no base or default branch", False),
+        (pull(1, 1, target=""), "no base or default branch", True),
+        ({**pull(1, 1), "base": {"sha": BASE, "ref": "main"}}, "no base or default branch", True),
         (
             {**pull(1, 1), "base": {"sha": BASE, "ref": "main", "repo": None}},
             "no base or default branch",
-            False,
+            True,
         ),
     ],
 )
@@ -422,13 +422,14 @@ def test_malformed_refs_make_size_unknown(
 ) -> None:
     """Valid totals with a missing or malformed ref are never admitted.
 
-    A known non-default base keeps its branch identity, so it posts no shared status.
+    A known non-default base keeps its branch identity, so it posts no shared status;
+    an unknown base still posts the failure.
 
     Args:
         tmp_path: Disposable directory supplied by pytest.
         body: Pull response with a bad ref.
         reason: Expected reason fragment in the summary.
-        posted: Whether the response identifies the default branch as the base.
+        posted: False only when the response names a non-default base.
     """
     # Run the gate against the malformed ref.
     fake = Fake(body)
@@ -464,3 +465,18 @@ def test_non_default_base_posts_no_status(
     assert summary.endswith(
         "PR Size Check not posted: base release is not the default branch main.\n"
     )
+
+
+def test_unreadable_recount_replaces_an_earlier_success(tmp_path: Path) -> None:
+    """A recount that cannot read the PR overwrites the head's earlier pass with a failure.
+
+    Args:
+        tmp_path: Disposable directory supplied by pytest.
+    """
+    # Pass once, then recount the same head against an unreadable response.
+    first, second = Fake(pull(5, 0)), Fake(OSError("network"))
+    assert run(tmp_path, first)[0] == 0
+    assert run(tmp_path, second)[0] == 1
+    # Check that both runs posted to the same head, the second as a failure.
+    assert [c[1] for c in first.calls + second.calls if c[0] == "POST"] == [STATUS_URL] * 2
+    assert [s["state"] for s in first.statuses + second.statuses if s] == ["success", "failure"]
