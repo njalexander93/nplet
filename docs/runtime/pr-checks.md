@@ -3,7 +3,8 @@
 **All five checks must pass.** Open a failed check for its failing step, command
 log and evidence artifact. The [PR Pre-Merge Check workflow](../../.github/workflows/pr-checks.yml)
 runs on pull requests targeting `main`, including documentation-only changes.
-Bugbot is an independent check, outside these five jobs.
+Bugbot is an independent check, outside these five jobs. So is the `PR Size Check`
+status from the AI review workflow; see [AI review size gate](#ai-review-size-gate).
 
 The workflow uses the interpreter in [`.python-version`](../../.python-version),
 Poetry 2.4.2 and locked dependencies. A newer run for the same pull request cancels
@@ -171,6 +172,50 @@ an upstream `sysmon` repair will not fail the check.
   artifacts from a different candidate or substitute local success for the
   current pull-request result.
 
+## AI review size gate
+
+The [AI review workflow](../../.github/workflows/ai-review.yml) runs the
+[size gate](../../scripts/pr_size_gate.py) before any review. It counts GitHub's
+whole-PR additions plus deletions against the base. Binary files add whatever
+GitHub reports for them. A missing count is never treated as zero.
+
+| Changed lines | Result |
+| --- | --- |
+| ≤ 1,000 | Review runs automatically. |
+| 1,001–2,000 | Status passes; review needs a manual start for that commit. |
+| > 2,000 | Review is skipped and the status fails. |
+| Unknown or invalid totals, or missing head/base SHA | Status fails with "Could not determine PR size". |
+| `head-sha` is not the PR's current head | Run fails without posting a status. |
+
+The over-limit summary reads: "PR size check failed: this PR changes N lines
+(additions + deletions), over the 2,000-line limit. AI review was skipped.
+Re-evaluate the scope and split this into smaller PRs."
+
+Results appear in the `PR Size Check` commit status, whose short description
+links to the run, and in that run's job summary. No PR comment is posted.
+
+To start a 1,001–2,000 line review, run the "AI review" workflow with the PR
+number and the PR's current full head SHA:
+
+```sh
+gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
+```
+
+A new push needs a new manual start.
+
+A new run for the same PR, from any push or manual start, cancels older queued
+or running review runs. Published reviews, comments and threads are untouched.
+Any new run for the PR, including a stale manual start, cancels a running review.
+
+The reviewer receives the admitted head and base SHAs. It stops before any model
+call if the PR has moved; its own publish-time recheck remains.
+
+The size job runs from the trusted base checkout with only the workflow token;
+the PR head is never checked out. Reviewer secrets reach only the review job.
+
+Automatic review still skips draft and fork PRs, but the size status is still
+posted. A manual start keeps the fork route.
+
 ## Tests for the checking tools
 
 These tests protect the validation machinery itself:
@@ -193,6 +238,10 @@ These tests protect the validation machinery itself:
 - [test_test_quality.py](../../tests/unit/tooling/test_test_quality.py) checks
   exact function gaps, stale exception reviews and changed tooling receipts.
   Its integration counterpart checks that independent failures remain visible.
+- [test_pr_size_gate.py](../../tests/unit/tooling/test_pr_size_gate.py) and
+  [test_ai_review_workflow.py](../../tests/integration/tooling/test_ai_review_workflow.py)
+  check the size tiers, status and summary text, SHA binding and the workflow
+  wiring. They do not execute GitHub's scheduler.
 
 ## Merge enforcement and human review
 
@@ -203,6 +252,11 @@ found only Cursor Bugbot required; do not claim the old name is currently
 required. At rollout, read the live rule again, add the new exact check source
 and name, remove an old requirement only if one actually exists, and preserve
 other requirements. Do not report enforcement until a read-back confirms it.
+
+`PR Size Check` is the only new required check from the AI review workflow. It is
+not required until a human adds it to the `main` branch rules; do not claim
+enforcement before a read-back confirms it. Completing an AI review is not a
+required check.
 
 At delivery, inspect the current rules for `main` and the current candidate's
 results. Record pending enforcement separately from test results. Preserve other
