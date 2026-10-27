@@ -176,57 +176,31 @@ an upstream `sysmon` repair will not fail the check.
 
 The [AI review workflow](../../.github/workflows/ai-review.yml) runs the
 [size gate](../../scripts/pr_size_gate.py) before any review. It counts GitHub's
-whole-PR additions plus deletions against the base. Binary files add whatever
-GitHub reports for them. A missing count is never treated as zero.
+whole-PR additions plus deletions against the base and reports the result in the
+`PR Size Check` commit status and the run's job summary.
 
 | Changed lines | Result |
 | --- | --- |
 | ≤ 1,000 | Review runs automatically. |
 | 1,001–2,000 | Status passes; review needs a manual start for that commit. |
-| > 2,000 | Review is skipped and the status fails. |
-| Unknown or invalid totals, or missing head/base SHA | Status fails with "Could not determine PR size". |
+| > 2,000 | Review is skipped and the status fails. Split the PR. |
+| Unknown or invalid totals | Status fails with "Could not determine PR size". |
 | `head-sha` is not the PR's current head | Run fails without posting a status. |
 
-The over-limit summary reads: "PR size check failed: this PR changes N lines
-(additions + deletions), over the 2,000-line limit. AI review was skipped.
-Re-evaluate the scope and split this into smaller PRs."
+Only PRs into the default branch post the status, because a status is shared by
+every PR on that commit. Changing a PR's base recounts it.
 
-Results appear in the `PR Size Check` commit status, whose short description
-links to the run, and in that run's job summary. No PR comment is posted.
-A commit status is shared by every PR on that commit, so only PRs into the
-default branch post it. A PR into another branch still gets its own count, run
-result and review tier, but posts no status. If GitHub does not report the
-branches, the gate posts a failure so an earlier pass cannot stand; re-run any
-other PR on that head it blocks.
-
-Changing a PR's base recounts it against the new base, and an eligible PR gets
-a new automatic review. Title or description edits do not recount or cancel a
-running review.
-
-To start a 1,001–2,000 line review, run the "AI review" workflow with the PR
-number and the PR's current full head SHA:
+To start a 1,001–2,000 line review, run the "AI review" workflow from the default
+branch with the PR number and the PR's current full head SHA. A new push needs a
+new manual start.
 
 ```sh
 gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
 ```
 
-A new push needs a new manual start. Dispatch from the default branch (the
-`gh workflow run` default): the run executes that ref's workflow and gate.
-
-A new run for the same PR, from any push or manual start, cancels older queued
-or running review runs. Published reviews, comments and threads are untouched.
-Any new run for the PR, including a stale manual start, cancels a running review.
-If that cancels a run before it posted a status, the head has no `PR Size Check`;
-re-run the push's AI review run or dispatch with the current head SHA.
-
-The reviewer receives the admitted head and base SHAs. It stops before any model
-call if the PR has moved; its own publish-time recheck remains.
-
-The size job runs from the trusted base checkout with only the workflow token;
-the PR head is never checked out. Reviewer secrets reach only the review job.
-
-Automatic review still skips draft and fork PRs, but the size status is still
-posted. A manual start keeps the fork route.
+A newer run for the same PR cancels older ones. If the head then has no
+`PR Size Check`, re-run that push's AI review run or dispatch with the current
+head SHA.
 
 ## Tests for the checking tools
 
@@ -265,10 +239,8 @@ required. At rollout, read the live rule again, add the new exact check source
 and name, remove an old requirement only if one actually exists, and preserve
 other requirements. Do not report enforcement until a read-back confirms it.
 
-`PR Size Check` is the only new required check from the AI review workflow. It is
-not required until a human adds it to the `main` branch rules; do not claim
-enforcement before a read-back confirms it. Completing an AI review is not a
-required check.
+`PR Size Check` is required only once a human adds it to the `main` rules; the AI
+review itself is not a required check.
 
 At delivery, inspect the current rules for `main` and the current candidate's
 results. Record pending enforcement separately from test results. Preserve other
