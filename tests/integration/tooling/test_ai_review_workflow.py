@@ -147,7 +147,8 @@ def test_workflow_env_names_match_gate_contract(tmp_path: Path) -> None:
         """
         # Record the call, then answer it by method.
         calls.append((method, url, token, body))
-        pull = {"head": {"sha": head}, "base": {"sha": base}, "additions": 3, "deletions": 2}
+        base_ref = {"sha": base, "ref": "main", "repo": {"default_branch": "main"}}
+        pull = {"head": {"sha": head}, "base": base_ref, "additions": 3, "deletions": 2}
         return (200, pull) if method == "GET" else (201, None)
 
     # Run the gate and check each env value reached its use.

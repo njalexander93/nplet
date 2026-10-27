@@ -162,6 +162,26 @@ def ref_sha(pull: object, key: str) -> str | None:
     return sha if isinstance(sha, str) and SHA.match(sha) else None
 
 
+def branch_names(pull: object) -> tuple[str | None, str | None]:
+    """Return the PR's base branch and its repository's default branch.
+
+    Args:
+        pull: Decoded pull request response.
+
+    Returns:
+        Base branch and default branch names, each ``None`` when absent or empty.
+    """
+    # Walk the response defensively; GitHub data is untrusted here.
+    ref = pull.get("base") if isinstance(pull, dict) else None
+    repo = ref.get("repo") if isinstance(ref, dict) else None
+    names = [
+        ref.get("ref") if isinstance(ref, dict) else None,
+        repo.get("default_branch") if isinstance(repo, dict) else None,
+    ]
+    target, default = (n if isinstance(n, str) and n else None for n in names)
+    return target, default
+
+
 def append(path: str | None, text: str) -> None:
     """Append text to a GitHub Actions file when the runner provides one.
 
@@ -238,6 +258,11 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
     # Bind admission to the base commit as well; without it the size is unknown.
     if pull is not None and base is None:
         pull, reason = None, "pull request response had no base SHA"
+    # Commit statuses are shared by every PR on a head, so only default-branch PRs may set one.
+    target, default = branch_names(pull)
+    if pull is not None and (target is None or default is None):
+        pull, reason = None, "pull request response had no base or default branch"
+    enforced = pull is None or target == default
 
     # Classify the totals without ever substituting zero.
     total = read_totals(pull)
@@ -257,14 +282,18 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
         "description": description,
         "target_url": env.get("RUN_URL", ""),
     }
-    try:
-        code, _ = http("POST", f"{api}/statuses/{head}", token, payload)
-        posted = 200 <= code < 300
-    except Exception:  # Any failure to post fails the gate
-        posted = False
+    posted = True
+    if enforced:
+        try:
+            code, _ = http("POST", f"{api}/statuses/{head}", token, payload)
+            posted = 200 <= code < 300
+        except Exception:  # Any failure to post fails the gate
+            posted = False
 
     # Report the outcome and choose the exit code.
     message = summary_for(tier, total, number, head, reason)
+    if not enforced:
+        message += f"\n{CONTEXT} not posted: base {target} is not the default branch {default}."
     if not posted:
         message += f"\nCould not post the {CONTEXT} status for {head}."
     failed = tier in {"over", "unknown"} or not posted

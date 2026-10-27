@@ -66,13 +66,16 @@ class Fake:
         return [c[3] for c in self.calls if c[0] == "POST"]
 
 
-def pull(additions: object = 0, deletions: object = 0, head: str = HEAD) -> dict[str, Any]:
+def pull(
+    additions: object = 0, deletions: object = 0, head: str = HEAD, target: str = "main"
+) -> dict[str, Any]:
     """Build a pull request response.
 
     Args:
         additions: Reported additions.
         deletions: Reported deletions.
         head: Live head SHA.
+        target: Base branch; the repository default branch is ``main``.
 
     Returns:
         Minimal pull response body.
@@ -81,7 +84,7 @@ def pull(additions: object = 0, deletions: object = 0, head: str = HEAD) -> dict
         "additions": additions,
         "deletions": deletions,
         "head": {"sha": head},
-        "base": {"sha": BASE},
+        "base": {"sha": BASE, "ref": target, "repo": {"default_branch": "main"}},
     }
 
 
@@ -394,6 +397,12 @@ def test_entry_point_exits_with_main_result(
         ({**pull(1, 1), "base": None}, "no base SHA"),
         (pull(1, 1, head="A" * 40), "no head SHA"),
         (pull(1, 1, head="a" * 41), "no head SHA"),
+        (pull(1, 1, target=""), "no base or default branch"),
+        ({**pull(1, 1), "base": {"sha": BASE, "ref": "main"}}, "no base or default branch"),
+        (
+            {**pull(1, 1), "base": {"sha": BASE, "ref": "main", "repo": None}},
+            "no base or default branch",
+        ),
     ],
 )
 def test_malformed_refs_make_size_unknown(
@@ -416,3 +425,27 @@ def test_malformed_refs_make_size_unknown(
         f"Could not determine PR size: pull request response had {reason}. AI review was not run.\n"
     )
     assert outputs == {"tier": "unknown", "total": "", "head": HEAD, "base": ""}
+
+
+@pytest.mark.parametrize(("additions", "tier", "code"), [(5, "auto", 0), (2001, "over", 1)])
+def test_non_default_base_posts_no_status(
+    tmp_path: Path, additions: int, tier: str, code: int
+) -> None:
+    """A PR into another branch keeps its own tier and exit code but never sets the shared status.
+
+    Args:
+        tmp_path: Disposable directory supplied by pytest.
+        additions: Reported additions.
+        tier: Expected tier.
+        code: Expected exit code.
+    """
+    # Run the gate for a PR whose base is not the default branch.
+    fake = Fake(pull(additions, 0, target="release"))
+    result, summary, outputs = run(tmp_path, fake)
+    # Check that only the pull was read and the PR's own result is intact.
+    assert [c[0] for c in fake.calls] == ["GET"]
+    assert result == code
+    assert outputs == {"tier": tier, "total": str(additions), "head": HEAD, "base": BASE}
+    assert summary.endswith(
+        "PR Size Check not posted: base release is not the default branch main.\n"
+    )
