@@ -147,7 +147,7 @@ def summary_for(tier: str, total: int | None, number: str, head: str, reason: st
 
 
 def ref_sha(pull: object, key: str) -> str | None:
-    """Return ``pull[key]["sha"]`` when the response carries it as a string.
+    """Return ``pull[key]["sha"]`` when it is a full lowercase commit SHA.
 
     Args:
         pull: Decoded pull request response.
@@ -159,7 +159,7 @@ def ref_sha(pull: object, key: str) -> str | None:
     # Walk the response defensively; GitHub data is untrusted here.
     ref = pull.get(key) if isinstance(pull, dict) else None
     sha = ref.get("sha") if isinstance(ref, dict) else None
-    return sha if isinstance(sha, str) else None
+    return sha if isinstance(sha, str) and SHA.match(sha) else None
 
 
 def append(path: str | None, text: str) -> None:
@@ -225,7 +225,7 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
         pull, reason = None, f"GitHub API request failed ({type(error).__name__})"
 
     # Refuse to judge a head this run was not admitted for.
-    live = ref_sha(pull, "head")
+    live, base = ref_sha(pull, "head"), ref_sha(pull, "base")
     if pull is not None and live is None:
         pull, reason = None, "pull request response had no head SHA"
     if live is not None and live != head:
@@ -235,15 +235,18 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
         finish(env, message, error=True, outputs={**outputs, "tier": "stale"})
         return 1
 
+    # Bind admission to the base commit as well; without it the size is unknown.
+    if pull is not None and base is None:
+        pull, reason = None, "pull request response had no base SHA"
+
     # Classify the totals without ever substituting zero.
     total = read_totals(pull)
     tier = "unknown" if total is None else classify(total)
-    base = (ref_sha(pull, "base") or "") if total is not None else ""
     outputs = {
         "tier": tier,
         "total": "" if total is None else str(total),
         "head": head,
-        "base": base,
+        "base": (base or "") if total is not None else "",
     }
 
     # Post the commit status for the admitted head.

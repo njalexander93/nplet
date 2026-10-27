@@ -383,3 +383,36 @@ def test_entry_point_exits_with_main_result(
     # Check the failing exit and annotation.
     assert result.value.code == 1
     assert capsys.readouterr().out.startswith("::error::Invalid input:")
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ({**pull(1, 1), "base": {}}, "no base SHA"),
+        ({**pull(1, 1), "base": {"sha": "B" * 40}}, "no base SHA"),
+        ({**pull(1, 1), "base": {"sha": "b" * 39}}, "no base SHA"),
+        ({**pull(1, 1), "base": None}, "no base SHA"),
+        (pull(1, 1, head="A" * 40), "no head SHA"),
+        (pull(1, 1, head="a" * 41), "no head SHA"),
+    ],
+)
+def test_malformed_refs_make_size_unknown(
+    tmp_path: Path, body: dict[str, Any], reason: str
+) -> None:
+    """Valid totals with a missing or malformed head or base SHA are never admitted.
+
+    Args:
+        tmp_path: Disposable directory supplied by pytest.
+        body: Pull response with a bad ref.
+        reason: Expected reason fragment in the summary.
+    """
+    # Run the gate against the malformed ref.
+    fake = Fake(body)
+    code, summary, outputs = run(tmp_path, fake)
+    # Check the unknown failure status, reason and empty outputs.
+    assert code == 1
+    assert [s["state"] for s in fake.statuses if s] == ["failure"]
+    assert summary == (
+        f"Could not determine PR size: pull request response had {reason}. AI review was not run.\n"
+    )
+    assert outputs == {"tier": "unknown", "total": "", "head": HEAD, "base": ""}
