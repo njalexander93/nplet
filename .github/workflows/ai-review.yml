@@ -8,16 +8,51 @@ on:
         description: PR number to review (including an authorized fork PR)
         required: true
         type: number
+      head-sha:
+        description: Full head commit SHA to review; must be the PR's current head
+        required: true
+        type: string
+# Cancellation stops only older runs; it never touches published reviews or threads.
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || inputs.pr-number }}
+  cancel-in-progress: true
 permissions:
   contents: read
   issues: read
   pull-requests: write
 jobs:
+  size:
+    name: PR size gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      tier: ${{ steps.gate.outputs.tier }}
+      head: ${{ steps.gate.outputs.head }}
+      base: ${{ steps.gate.outputs.base }}
+    steps:
+      # Trusted base checkout only; the PR head is never checked out.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Classify PR size and post status
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr-number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head-sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/pr_size_gate.py
   resolve-reviewer:
+    needs: size
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (!github.event.pull_request.draft &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+      (needs.size.outputs.tier == 'auto' &&
+       !github.event.pull_request.draft &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' &&
+       (needs.size.outputs.tier == 'auto' || needs.size.outputs.tier == 'manual'))
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -31,11 +66,13 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
   review:
-    needs: resolve-reviewer
+    needs: [size, resolve-reviewer]
     uses: njalexander93/ai-reviewer/.github/workflows/review.yml@main
     with:
       pr-number: ${{ github.event.pull_request.number || inputs.pr-number }}
       implementation-ref: ${{ needs.resolve-reviewer.outputs.sha }}
+      expected-head-sha: ${{ needs.size.outputs.head }}
+      expected-base-sha: ${{ needs.size.outputs.base }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
