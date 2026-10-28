@@ -54,11 +54,10 @@ jobs:
   resolve-reviewer:
     needs: size
     if: >-
-      (needs.size.outputs.tier == 'auto' &&
-       !github.event.pull_request.draft &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'workflow_dispatch' &&
-       (needs.size.outputs.tier == 'auto' || needs.size.outputs.tier == 'manual'))
+      needs.size.outputs.tier == 'auto' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (!github.event.pull_request.draft &&
+        github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -75,7 +74,8 @@ jobs:
     needs: [size, resolve-reviewer]
     uses: njalexander93/ai-reviewer/.github/workflows/review.yml@main
     with:
-      pr-number: ${{ github.event.pull_request.number || inputs.pr-number }}
+      # Convert the dispatch input explicitly for the reviewer's typed number input.
+      pr-number: ${{ github.event.pull_request.number || fromJSON(inputs.pr-number) }}
       implementation-ref: ${{ needs.resolve-reviewer.outputs.sha }}
       expected-head-sha: ${{ needs.size.outputs.head }}
       expected-base-sha: ${{ needs.size.outputs.base }}

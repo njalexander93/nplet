@@ -13,8 +13,7 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from typing import Any
 
-AUTO_LIMIT = 1000
-MANUAL_LIMIT = 2000
+LIMIT = 2000
 CONTEXT = "PR Size Check"
 DESCRIPTION_LIMIT = 140
 NUMBER = re.compile(r"^[1-9][0-9]*$")
@@ -60,14 +59,10 @@ def classify(total: int) -> str:
         total: Sum of additions and deletions.
 
     Returns:
-        ``auto``, ``manual`` or ``over``.
+        ``auto`` or ``over``.
     """
-    # Choose the tier from the fixed line limits.
-    if total <= AUTO_LIMIT:
-        return "auto"
-    if total <= MANUAL_LIMIT:
-        return "manual"
-    return "over"
+    # Choose the tier from the fixed line limit.
+    return "auto" if total <= LIMIT else "over"
 
 
 def read_totals(pull: object) -> int | None:
@@ -93,14 +88,14 @@ def status_for(tier: str, total: int | None) -> tuple[str, str]:
     """Build the commit status state and description for a tier.
 
     Args:
-        tier: ``auto``, ``manual``, ``over`` or ``unknown``.
+        tier: ``auto``, ``over`` or ``unknown``.
         total: Changed-line total, or ``None`` when unknown.
 
     Returns:
         GitHub status state and a description of at most 140 characters.
     """
     # Select the state and wording for the tier.
-    if tier in {"auto", "manual"}:
+    if tier == "auto":
         state, description = "success", f"{total:,} changed lines (limit 2,000)"
     elif tier == "over":
         state = "failure"
@@ -115,14 +110,12 @@ def status_for(tier: str, total: int | None) -> tuple[str, str]:
     return state, description
 
 
-def summary_for(tier: str, total: int | None, number: str, head: str, reason: str) -> str:
+def summary_for(tier: str, total: int | None, reason: str) -> str:
     """Build the job summary text shown for a tier.
 
     Args:
-        tier: ``auto``, ``manual``, ``over`` or ``unknown``.
+        tier: ``auto``, ``over`` or ``unknown``.
         total: Changed-line total, or ``None`` when unknown.
-        number: Pull request number.
-        head: Head commit SHA the run was admitted for.
         reason: Short failure reason used by the ``unknown`` tier.
 
     Returns:
@@ -134,12 +127,6 @@ def summary_for(tier: str, total: int | None, number: str, head: str, reason: st
             f"PR size check failed: this PR changes {total:,} lines (additions + deletions), "
             "over the 2,000-line limit.\n"
             "AI review was skipped. Re-evaluate the scope and split this into smaller PRs."
-        )
-    if tier == "manual":
-        return (
-            f"This PR changes {total:,} lines (1,001–2,000): AI review needs a manual start "
-            f"for this commit. Run the AI review workflow with pr-number {number} "
-            f"and head-sha {head}."
         )
     if tier == "auto":
         return f"This PR changes {total:,} lines; AI review runs automatically."
@@ -219,7 +206,7 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
         http: Request function, injectable so tests need no network.
 
     Returns:
-        0 for the ``auto`` and ``manual`` tiers, otherwise 1.
+        0 for the ``auto`` tier, otherwise 1.
     """
     # Validate untrusted inputs before any request is sent.
     number, head = env.get("PR_NUMBER", ""), env.get("HEAD_SHA", "")
@@ -293,7 +280,7 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
             posted = False
 
     # Report the outcome and choose the exit code.
-    message = summary_for(tier, total, number, head, reason)
+    message = summary_for(tier, total, reason)
     if not enforced:
         message += f"\n{CONTEXT} not posted: base {target} is not the default branch {default}."
     if not posted:

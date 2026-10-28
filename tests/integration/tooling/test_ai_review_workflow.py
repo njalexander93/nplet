@@ -102,11 +102,14 @@ def test_reviewer_jobs_depend_on_size_tier_and_forward_shas() -> None:
     # Require the exact eligibility expression.
     condition = " ".join(resolve["if"].split())
     assert condition == (
-        "(needs.size.outputs.tier == 'auto' && "
-        "!github.event.pull_request.draft && "
-        "github.event.pull_request.head.repo.full_name == github.repository) || "
-        "(github.event_name == 'workflow_dispatch' && "
-        "(needs.size.outputs.tier == 'auto' || needs.size.outputs.tier == 'manual'))"
+        "needs.size.outputs.tier == 'auto' && "
+        "(github.event_name == 'workflow_dispatch' || "
+        "(!github.event.pull_request.draft && "
+        "github.event.pull_request.head.repo.full_name == github.repository))"
+    )
+    # Require the manual number converted for the reviewer's typed number input.
+    assert review["with"]["pr-number"] == (
+        "${{ github.event.pull_request.number || fromJSON(inputs.pr-number) }}"
     )
     # Require the reviewer to receive the admitted head and base.
     assert review["with"]["expected-head-sha"] == "${{ needs.size.outputs.head }}"
