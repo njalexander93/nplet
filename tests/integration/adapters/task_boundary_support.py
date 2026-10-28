@@ -84,3 +84,35 @@ def task_store_snapshot(root: Path) -> dict[str, bytes]:
     return {
         str(p.relative_to(root)): p.read_bytes() for p in (root / ".task").rglob("*") if p.is_file()
     }
+
+
+def init_repo(path: Path) -> Path:
+    """Initialize one disposable Git repository, creating missing parents.
+
+    Args:
+        path: New repository root.
+
+    Returns:
+        Canonical repository root.
+    """
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    return path.resolve()
+
+
+def cross_linked_repos(base: Path) -> tuple[Path, Path]:
+    """Create repositories C and V whose directories link into each other.
+
+    ``repo-C/link`` points at ``repo-V/notes`` and, in reverse, ``repo-V/back`` points
+    at ``repo-C/notes``. Directory symbolic links need POSIX or Windows privileges.
+
+    Args:
+        base: Canonical disposable parent.
+
+    Returns:
+        The canonical C and V repository roots.
+    """
+    c, v = init_repo(base / "repo-C"), init_repo(base / "repo-V")
+    for source, name, target in ((c, "link", v), (v, "back", c)):
+        (target / "notes").mkdir()
+        (source / name).symlink_to(target / "notes", target_is_directory=True)
+    return c, v
