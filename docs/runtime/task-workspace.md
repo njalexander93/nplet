@@ -239,7 +239,9 @@ directory outside Git is absent rather than inheriting the link holder's
 repository. Only a component that does not exist is skipped on the way; any other
 probe failure, such as an overlong or unencodable name, is `UNREADABLE`. A `..`
 anywhere below a link whose destination is missing fails the `resolved` point
-with `DANGLING_LINK`, because the filesystem stops at that link. At most 64 link
+with `DANGLING_LINK`, because the filesystem stops at that link; a `..` after a
+component the filesystem cannot pass for another reason, such as an overlong name,
+fails it with `UNREADABLE`. At most 64 link
 points are recorded per target, more than Linux (40) or macOS (32) follows in one
 lookup; a longer chain stops there and fails the `resolved` point with
 `UNREADABLE`.

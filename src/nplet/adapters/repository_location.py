@@ -146,10 +146,12 @@ def links(path: Path) -> tuple[list[Path], str | None]:
             continue
         # ``..`` leaves the real directory, as the filesystem does, so a link before it is
         # still visited instead of being collapsed away; the filesystem fails at a dangling
-        # link on the way before ``..`` can collapse it.
+        # link or an unreadable component on the way before ``..`` can collapse it.
         if part == "..":
             held = [link for link in (current, *current.parents) if link in found]
-            failure = failure or next(filter(None, map(unfollowable, held)), None)
+            failure = (
+                failure or next(filter(None, map(unfollowable, held)), None) or impassable(current)
+            )
             stack[-1] = (Path(os.path.realpath(current)).parent, parts)
             continue
         current /= part
@@ -168,6 +170,23 @@ def links(path: Path) -> tuple[list[Path], str | None]:
             continue
         stack.append((Path(destination.anchor), iter(destination.parts[1:])))
     return found, failure
+
+
+def impassable(path: Path) -> str | None:
+    """Report a failure other than absence when the filesystem passes one component.
+
+    Args:
+        path: Component spelling about to be left by ``..``.
+
+    Returns:
+        ``UNREADABLE`` for a probe error other than a missing component, else None.
+    """
+    # A missing component stays a lexical step, as everywhere else on the walk.
+    try:
+        os.stat(path)
+    except OSError as error:
+        return None if error.errno in MISSING else "UNREADABLE"
+    return None
 
 
 def unfollowable(link: Path) -> str | None:

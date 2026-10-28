@@ -476,6 +476,28 @@ def test_link_before_parent_step_must_be_followable(
     ]
 
 
+@pytest.mark.parametrize(
+    ("code", "error", "state"),
+    [(errno.ENAMETOOLONG, "UNREADABLE", "unresolved"), (errno.ENOENT, None, "absent")],
+)
+def test_component_before_parent_step_keeps_probe_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int, error: str | None, state: str
+) -> None:
+    """``..`` cannot erase a component the filesystem fails to pass, only a missing one.
+
+    Args:
+        tmp_path: Readable non-Git directory holding the component.
+        monkeypatch: Replaces Git discovery and the component's probe.
+        code: Errno of passing the component.
+        error: Expected resolved-point code.
+        state: Expected target state.
+    """
+    fake_discovery(monkeypatch, {})
+    fail_probe(monkeypatch, "stat", tmp_path / ("x" * 300), code)
+    result = location.resolve(str(tmp_path), "x" * 300 + "/../f.md", None, never_root, {})
+    assert (result.points[-1].error, result.state) == (error, state)
+
+
 @pytest.mark.parametrize("target", ["\ud800.md", "\ud800/../a.md"])
 def test_unencodable_target_is_evidence_not_an_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
