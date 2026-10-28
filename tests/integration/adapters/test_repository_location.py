@@ -426,6 +426,16 @@ def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
         ],
         "unresolved",
     )
+    # The filesystem fails at the dangling link before ``..`` can collapse it.
+    layouts["dangling_link_then_parent"] = (
+        c / "dead/../f.md",
+        [
+            want("lexical", c / "f.md", c),
+            want("link", c / "dead", c),
+            want("resolved", c / "dead/../f.md", error="DANGLING_LINK"),
+        ],
+        "unresolved",
+    )
     layouts["symlinked_ancestor"] = (
         base / "alias/sub/f.md",
         [
@@ -443,6 +453,7 @@ def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
     [
         pytest.param("symlinked_ancestor", marks=posix_links),
         pytest.param("dangling_link", marks=posix_links),
+        pytest.param("dangling_link_then_parent", marks=posix_links),
         "malformed_gitfile",
         "bare",
         "stale_worktree",

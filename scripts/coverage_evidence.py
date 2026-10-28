@@ -202,6 +202,7 @@ APPROVED_NATIVE_SKIPS: dict[str, tuple[set[str], str]] = {
             "test_c3_c4_links_keep_link_and_destination_repositories",
             "test_c5_failures_are_unresolved_and_linked_ancestors_resolve[symlinked_ancestor]",
             "test_c5_failures_are_unresolved_and_linked_ancestors_resolve[dangling_link]",
+            "test_c5_failures_are_unresolved_and_linked_ancestors_resolve[dangling_link_then_parent]",
             "test_c6_repointed_link_is_followed_on_next_call",
         )
     },

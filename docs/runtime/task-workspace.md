@@ -236,7 +236,9 @@ directory from `os.stat`), proven absence or a bounded error code. A missing pat
 is queried at its nearest existing ancestor, by its real path, so a link into a
 directory outside Git is absent rather than inheriting the link holder's
 repository. Only a component that does not exist is skipped on the way; any other
-probe failure, such as an overlong name, is `UNREADABLE`.
+probe failure, such as an overlong or unencodable name, is `UNREADABLE`. A `..`
+after a link whose destination is missing fails the `resolved` point with
+`DANGLING_LINK`, because the filesystem stops at that link.
 
 | Point | Path | Repository |
 | --- | --- | --- |

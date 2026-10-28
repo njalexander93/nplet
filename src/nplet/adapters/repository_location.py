@@ -121,16 +121,18 @@ def discover(directory: Path, memo: Memo) -> tuple[Identity | None, str | None]:
     return memo[key]
 
 
-def links(path: Path) -> list[Path]:
+def links(path: Path) -> tuple[list[Path], str | None]:
     """List every link entry on a path and, transitively, on each link's destination path.
 
     Args:
         path: Absolute spelling, possibly with ``..`` components.
 
     Returns:
-        Symbolic links and Windows junctions in discovery order, each once.
+        Symbolic links and Windows junctions in discovery order, each once, and the
+        bounded code of the first link that ``..`` cannot leave, if any.
     """
     found: list[Path] = []
+    failure = None
     pending = [path]
     # The list grows while iterating; each new link adds its destination to scan.
     for spelling in pending:
@@ -139,6 +141,9 @@ def links(path: Path) -> list[Path]:
             # ``..`` leaves the real directory, as the filesystem does, so a link before
             # it is still visited instead of being collapsed away.
             if part == "..":
+                # The filesystem fails at a dangling link before ``..`` can collapse it.
+                if failure is None and current in found:
+                    failure = unfollowable(current)
                 current = Path(os.path.realpath(current)).parent
                 continue
             current /= part
@@ -148,7 +153,24 @@ def links(path: Path) -> list[Path]:
                 # spelling that reached it. An unreadable link cannot be followed further.
                 with contextlib.suppress(OSError):
                     pending.append(Path(os.path.realpath(current.parent)) / os.readlink(current))
-    return found
+    return found, failure
+
+
+def unfollowable(link: Path) -> str | None:
+    """Report why the filesystem cannot pass through one link entry.
+
+    Args:
+        link: Existing link entry.
+
+    Returns:
+        ``DANGLING_LINK`` for a missing or looping destination, ``UNREADABLE`` for any
+        other failure, or None when the destination exists.
+    """
+    try:
+        os.stat(link)
+    except OSError as error:
+        return "DANGLING_LINK" if error.errno in (*MISSING, errno.ELOOP) else "UNREADABLE"
+    return None
 
 
 def point(kind: str, path: Path, start: Path, memo: Memo) -> Point:
@@ -170,6 +192,9 @@ def point(kind: str, path: Path, start: Path, memo: Memo) -> Point:
         try:
             if stat.S_ISDIR(os.stat(directory).st_mode):
                 break
+        # An unencodable spelling cannot be probed.
+        except ValueError:
+            return Point(kind, path, None, "UNREADABLE")
         except OSError as target:
             if target.errno not in (*MISSING, errno.ELOOP):
                 return Point(kind, path, None, "UNREADABLE")
@@ -187,6 +212,23 @@ def point(kind: str, path: Path, start: Path, memo: Memo) -> Point:
     # Query the directory and attach its result to this spelling.
     repository, error = discover(directory, memo)
     return Point(kind, path, repository, error)
+
+
+def held(is_root: Callable[[Path], bool], path: Path) -> bool:
+    """Apply the root predicate, treating an unencodable path as no root.
+
+    Args:
+        is_root: Worktree root predicate.
+        path: Candidate path.
+
+    Returns:
+        The predicate's answer; False when the path cannot be encoded for a probe.
+    """
+    # Root paths are matched before any probe, so only an alias spelling is lost here.
+    try:
+        return is_root(path)
+    except ValueError:
+        return False
 
 
 def resolve(
@@ -218,23 +260,31 @@ def resolve(
     lexical = Path(os.path.normpath(absolute))
     points = [point("lexical", lexical, lexical, memo)]
     # Links come from the unnormalized spelling: ``..`` after a link leaves its destination.
-    holders = links(absolute)
+    try:
+        holders, failure = links(absolute)
+    except ValueError:
+        holders, failure = [], "UNREADABLE"
     # A holder reached through an earlier link also counts in its real directory.
     spellings = [lexical, *holders]
     spellings += [Path(os.path.realpath(link.parent)) / link.name for link in holders]
     points += [point("link", link, link.parent, memo) for link in holders]
     # Resolve links; an unresolvable spelling is a failed point, not absence.
-    try:
-        resolved = absolute.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        points.append(Point("resolved", absolute, None, "UNREADABLE"))
-    else:
+    if failure is None:
+        try:
+            resolved = absolute.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            failure = "UNREADABLE"
+    if failure is None:
         points.append(point("resolved", resolved, resolved, memo))
         spellings.append(resolved)
+    else:
+        points.append(Point("resolved", absolute, None, failure))
     # Membership holds by a root on any spelling, link holders included, or by any point
     # in the session family, so a failed query never hides a known root.
     workspace = any(
-        is_root(ancestor) for spelling in spellings for ancestor in (spelling, *spelling.parents)
+        held(is_root, ancestor)
+        for spelling in spellings
+        for ancestor in (spelling, *spelling.parents)
     ) or (
         session is not None
         and any(

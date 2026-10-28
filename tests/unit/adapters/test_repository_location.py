@@ -398,6 +398,50 @@ def test_missing_filesystem_root_is_unreadable(
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("code", "error"),
+    [(errno.ENOENT, "DANGLING_LINK"), (errno.EACCES, "UNREADABLE"), (None, None)],
+)
+def test_link_before_parent_step_must_be_followable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int | None, error: str | None
+) -> None:
+    """``..`` after a link fails the resolved point unless the link's destination exists.
+
+    Args:
+        tmp_path: Directory holding the modeled link.
+        monkeypatch: Replaces Git discovery, link detection and the link's probe.
+        code: Errno of following the link; None when it is followable.
+        error: Expected resolved-point code.
+    """
+    link = tmp_path / "link"
+    link.mkdir()
+    fake_discovery(monkeypatch, {})
+    monkeypatch.setattr(location.os.path, "islink", lambda path: Path(path) == link)
+    monkeypatch.setattr(location.os, "readlink", lambda _path: str(tmp_path / "elsewhere"))
+    fail_probe(monkeypatch, "stat", link, code)
+    result = location.resolve(str(tmp_path), "link/../a.md", None, never_root, {})
+    assert [(p.kind, p.error) for p in result.points] == [
+        ("lexical", None),
+        ("link", None),
+        ("resolved", error),
+    ]
+
+
+@pytest.mark.parametrize("target", ["\ud800.md", "\ud800/../a.md"])
+def test_unencodable_target_is_evidence_not_an_exception(tmp_path: Path, target: str) -> None:
+    """A target the filesystem cannot encode yields bounded evidence through the boundary.
+
+    Args:
+        tmp_path: Session working directory outside every repository.
+        target: Unencodable spelling, alone or walked through ``..``.
+    """
+    session = core.Repository(tmp_path, tmp_path / ".git", [tmp_path])
+    [result] = boundary.edit_locations(edit(tmp_path, target), session)
+    # Windows paths are UTF-16, so only POSIX fails to encode the lone surrogate.
+    assert result.state == ("absent" if os.name == "nt" else "unresolved")
+    assert result.workspace is True
+
+
 def test_unresolvable_spelling_is_an_unreadable_point(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
