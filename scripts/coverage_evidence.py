@@ -199,8 +199,7 @@ APPROVED_NATIVE_SKIPS: dict[str, tuple[set[str], str]] = {
             "POSIX symbolic link points",
         )
         for name in (
-            "test_c3_symlink_points_carry_their_own_repository",
-            "test_c4_links_keep_link_and_destination_repositories",
+            "test_c3_c4_links_keep_link_and_destination_repositories",
             "test_c5_failures_are_unresolved_and_linked_ancestors_resolve[symlinked_ancestor]",
             "test_c5_failures_are_unresolved_and_linked_ancestors_resolve[dangling_link]",
             "test_c6_repointed_link_is_followed_on_next_call",

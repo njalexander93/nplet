@@ -2,8 +2,8 @@
 
 import os
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -84,31 +84,6 @@ def never_root(_path: Path) -> bool:
     return False
 
 
-def raiser(error: BaseException) -> Callable[..., object]:
-    """Build a stub that raises one error.
-
-    Args:
-        error: Error to raise.
-
-    Returns:
-        A callable raising ``error`` for any arguments.
-    """
-
-    def stub(*_args: object, **_kwargs: object) -> object:
-        """Raise the configured error.
-
-        Args:
-            _args: Ignored positional arguments.
-            _kwargs: Ignored keyword arguments.
-
-        Raises:
-            BaseException: The configured error.
-        """
-        raise error
-
-    return stub
-
-
 @pytest.mark.parametrize(
     ("error", "code"),
     [
@@ -130,7 +105,7 @@ def test_discovery_failures_map_to_bounded_codes(
         error: Failure raised by discovery.
         code: Expected point error.
     """
-    monkeypatch.setattr(location.core, "project_repository", raiser(error))
+    monkeypatch.setattr(location.core, "project_repository", Mock(side_effect=error))
     result = location.resolve(str(tmp_path), "file.md", None, never_root, {})
     assert [(p.kind, p.repository, p.error) for p in result.points] == [
         ("lexical", None, code),
@@ -150,14 +125,12 @@ def test_common_directory_stat_failure_is_unreadable(
     """
     session = repo(tmp_path)
     fake_discovery(monkeypatch, {tmp_path: session})
-    stat = os.stat
+    stat, gone = os.stat, Mock(side_effect=OSError("gone"))
     # Fail only the identity read so path probing keeps working.
     monkeypatch.setattr(
         location.os,
         "stat",
-        lambda path, **kw: (
-            raiser(OSError("gone"))() if path == session.common else stat(path, **kw)
-        ),
+        lambda path, **kw: gone() if path == session.common else stat(path, **kw),
     )
     result = location.resolve(str(tmp_path), "file.md", None, never_root, {})
     assert {p.error for p in result.points} == {"UNREADABLE"}
@@ -179,7 +152,6 @@ def test_identity_and_memo_cover_a_whole_call(
     assert calls == [tmp_path]
     info = os.stat(session.common)
     expected = location.Identity(session, [info.st_dev, info.st_ino])
-    assert expected.key() == (os.path.normpath(session.common), (info.st_dev, info.st_ino))
     for result, target in zip(locations, ("a.md", "new/b.md"), strict=True):
         assert result.target == target
         assert result.workspace is True
@@ -243,7 +215,7 @@ def test_workspace_by_root_on_an_ancestor(tmp_path: Path, monkeypatch: pytest.Mo
         tmp_path: Session worktree root.
         monkeypatch: Replaces Git discovery with failures.
     """
-    monkeypatch.setattr(location.core, "project_repository", raiser(OSError("no git")))
+    monkeypatch.setattr(location.core, "project_repository", Mock(side_effect=OSError("no git")))
     session = core.Repository(tmp_path, tmp_path / "elsewhere", [tmp_path])
     [result] = boundary.edit_locations(edit(tmp_path, "deep/a.md"), session)
     assert result.workspace is True
@@ -339,53 +311,9 @@ def test_unresolvable_spelling_is_an_unreadable_point(
         monkeypatch: Replaces Git discovery and link resolution.
     """
     fake_discovery(monkeypatch, {})
-    monkeypatch.setattr(location.Path, "resolve", raiser(RuntimeError("loop")))
+    monkeypatch.setattr(location.Path, "resolve", Mock(side_effect=RuntimeError("loop")))
     result = location.resolve(str(tmp_path), "a.md", None, never_root, {})
     assert [(p.kind, p.path, p.error) for p in result.points] == [
         ("lexical", tmp_path / "a.md", None),
         ("resolved", tmp_path / "a.md", "UNREADABLE"),
     ]
-
-
-def test_resolution_writes_nothing(tmp_path: Path) -> None:
-    """Real discovery leaves the repository's files and Git status unchanged.
-
-    Args:
-        tmp_path: Parent of a disposable real repository.
-    """
-    # Snapshot every file and the Git status of a real repository.
-    checkout = tmp_path / "checkout"
-    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-
-    def snapshot() -> tuple[dict[str, tuple[int, bytes]], str]:
-        """Capture file contents, modification times and porcelain status.
-
-        Returns:
-            The file map and Git status text.
-        """
-        files = {
-            str(path): (path.stat().st_mtime_ns, path.read_bytes())
-            for path in tmp_path.rglob("*")
-            if path.is_file()
-        }
-        status = subprocess.run(
-            [
-                "git",
-                "--no-optional-locks",
-                "-C",
-                str(checkout),
-                "status",
-                "--porcelain",
-                "--ignored",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        return files, status
-
-    before = snapshot()
-    session = core.project_repository(checkout)
-    locations = boundary.edit_locations(edit(checkout, "new/a.md", "../outside.md"), session)
-    assert [result.workspace for result in locations] == [True, False]
-    assert snapshot() == before

@@ -6,7 +6,6 @@ Expected roots and identities come only from Git and ``os.stat``, never from the
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -264,33 +263,10 @@ def test_c3_apply_patch_move_locates_both_sides(world: Path) -> None:
 
 
 @posix_links
-def test_c3_symlink_points_carry_their_own_repository(world: Path) -> None:
-    """Report the link entry's repository beside both spellings of inward and outward links.
-
-    Args:
-        world: Fixture parent.
-    """
-    a, v = world / "A", world / "V"
-    (v / "notes").mkdir()
-    (a / "in").symlink_to(a / "docs", target_is_directory=True)
-    (a / "out").symlink_to(v / "notes", target_is_directory=True)
-    inward, outward = locate(a, "in/x.md", "out/x.md")
-    assert seen(inward) == [
-        want("lexical", a / "in/x.md", a),
-        want("link", a / "in", a),
-        want("resolved", a / "docs/x.md", a),
-    ]
-    assert seen(outward) == [
-        want("lexical", a / "out/x.md", v),
-        want("link", a / "out", a),
-        want("resolved", v / "notes/x.md", v),
-    ]
-    assert inward.workspace and outward.workspace
-
-
-@posix_links
-def test_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> None:
+def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> None:
     """Keep every hop's repository, and membership through any hop, for each session.
+
+    Covers inward, outward, reverse and chained links.
 
     Args:
         tmp_path: Disposable parent.
@@ -301,7 +277,13 @@ def test_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> None
     (d / "dir").mkdir()
     (c / "l1").symlink_to(d / "dir", target_is_directory=True)
     (d / "dir/l2").symlink_to(v / "notes", target_is_directory=True)
+    (c / "in").symlink_to(c / "notes", target_is_directory=True)
     expected = {
+        c / "in/file.md": [
+            want("lexical", c / "in/file.md", c),
+            want("link", c / "in", c),
+            want("resolved", c / "notes/file.md", c),
+        ],
         c / "link/file.md": [
             want("lexical", c / "link/file.md", v),
             want("link", c / "link", c),
@@ -319,119 +301,91 @@ def test_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> None
             want("resolved", c / "notes/file.md", c),
         ],
     }
-    # Membership per target: simple link, chain, reverse link.
+    # Membership per target: inward link, outward link, chain, reverse link.
     for session, workspace in [
-        (a, [False, False, False]),
-        (c, [True, True, True]),
-        (d, [False, True, False]),
-        (v, [True, True, True]),
+        (a, [False, False, False, False]),
+        (c, [True, True, True, True]),
+        (d, [False, False, True, False]),
+        (v, [False, True, True, True]),
     ]:
         locations = locate(session, *map(str, expected))
         assert [seen(loc) for loc in locations] == list(expected.values())
         assert [loc.workspace for loc in locations] == workspace, session
 
 
-def bare_layout(base: Path) -> tuple[Path, list[Seen]]:
-    """Target a path inside a bare repository.
+def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
+    """Build every failure layout, plus a symlinked ancestor that must still resolve.
 
     Args:
         base: Canonical parent.
 
     Returns:
-        The target and expected points.
+        Target, expected points and derived state per layout id; link layouts only
+        off Windows.
     """
+    # A path in a bare Git directory fails --show-toplevel: REPOSITORY_MISMATCH.
     subprocess.run(["git", "init", "-q", "--bare", str(base / "bare.git")], check=True)
-    # core.project_repository reports a path in a bare Git directory as REPOSITORY_MISMATCH.
-    return base / "bare.git/f.md", points(base / "bare.git/f.md", error="REPOSITORY_MISMATCH")
-
-
-def malformed_layout(base: Path) -> tuple[Path, list[Seen]]:
-    """Target a directory whose ``.git`` file holds garbage.
-
-    Args:
-        base: Canonical parent.
-
-    Returns:
-        The target and expected points.
-    """
     (base / "bad").mkdir()
     (base / "bad/.git").write_text("garbage\n")
-    return base / "bad/f.md", points(base / "bad/f.md", error="REPOSITORY_MISMATCH")
-
-
-def stale_layout(base: Path) -> tuple[Path, list[Seen]]:
-    """Target a linked worktree whose administrative directory was pruned.
-
-    Args:
-        base: Canonical parent.
-
-    Returns:
-        The target and expected points.
-    """
-    main = init_repo(base / "main")
-    linked = commit_and_link_worktree(main)
-    shutil.rmtree(main / ".git/worktrees/linked")
-    return linked / "f.md", points(linked / "f.md", error="REPOSITORY_MISMATCH")
-
-
-def dangling_layout(base: Path) -> tuple[Path, list[Seen]]:
-    """Target a file below a link to a missing directory.
-
-    Args:
-        base: Canonical parent.
-
-    Returns:
-        The target and expected points.
-    """
-    c = init_repo(base / "C")
+    linked = commit_and_link_worktree(init_repo(base / "main"))
+    shutil.rmtree(base / "main/.git/worktrees/linked")
+    mismatch = "REPOSITORY_MISMATCH"
+    layouts = {
+        name: (path, points(path, error=mismatch), "unresolved")
+        for name, path in [
+            ("bare", base / "bare.git/f.md"),
+            ("malformed_gitfile", base / "bad/f.md"),
+            ("stale_worktree", linked / "f.md"),
+        ]
+    }
+    if os.name == "nt":
+        return layouts
+    # Links: a dangling one under repository C, and an alias of repository V.
+    c, v = init_repo(base / "C"), init_repo(base / "V")
     (c / "dead").symlink_to(base / "missing", target_is_directory=True)
-    return c / "dead/f.md", [
-        want("lexical", c / "dead/f.md", error="DANGLING_LINK"),
-        want("link", c / "dead", c),
-        want("resolved", base / "missing/f.md"),
-    ]
-
-
-def ancestor_layout(base: Path) -> tuple[Path, list[Seen]]:
-    """Target a repository reached through a symbolic-link ancestor outside it.
-
-    Args:
-        base: Canonical parent.
-
-    Returns:
-        The target and expected points.
-    """
-    v = init_repo(base / "V")
     (base / "alias").symlink_to(v, target_is_directory=True)
-    return base / "alias/sub/f.md", [
-        want("lexical", base / "alias/sub/f.md", v),
-        want("link", base / "alias"),
-        want("resolved", v / "sub/f.md", v),
-    ]
+    layouts["dangling_link"] = (
+        c / "dead/f.md",
+        [
+            want("lexical", c / "dead/f.md", error="DANGLING_LINK"),
+            want("link", c / "dead", c),
+            want("resolved", base / "missing/f.md"),
+        ],
+        "unresolved",
+    )
+    layouts["symlinked_ancestor"] = (
+        base / "alias/sub/f.md",
+        [
+            want("lexical", base / "alias/sub/f.md", v),
+            want("link", base / "alias"),
+            want("resolved", v / "sub/f.md", v),
+        ],
+        "resolved",
+    )
+    return layouts
 
 
 @pytest.mark.parametrize(
-    ("layout", "state"),
+    "layout",
     [
-        pytest.param(ancestor_layout, "resolved", id="symlinked_ancestor", marks=posix_links),
-        pytest.param(dangling_layout, "unresolved", id="dangling_link", marks=posix_links),
-        pytest.param(malformed_layout, "unresolved", id="malformed_gitfile"),
-        pytest.param(bare_layout, "unresolved", id="bare"),
-        pytest.param(stale_layout, "unresolved", id="stale_worktree"),
+        pytest.param("symlinked_ancestor", marks=posix_links),
+        pytest.param("dangling_link", marks=posix_links),
+        "malformed_gitfile",
+        "bare",
+        "stale_worktree",
     ],
 )
 def test_c5_failures_are_unresolved_and_linked_ancestors_resolve(
-    tmp_path: Path, layout: Callable[[Path], tuple[Path, list[Seen]]], state: str
+    tmp_path: Path, layout: str
 ) -> None:
     """Report bounded codes for failed discovery instead of absence.
 
     Args:
         tmp_path: Disposable parent.
-        layout: Builder returning the target and its expected points.
-        state: Expected derived state.
+        layout: Layout id from ``failure_layouts``.
     """
     base = tmp_path.resolve()
-    target, expected = layout(base)
+    target, expected, state = failure_layouts(base)[layout]
     [location] = locate(base, str(target))
     assert (seen(location), location.state) == (expected, state)
 
