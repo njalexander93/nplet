@@ -128,8 +128,8 @@ def run(tmp_path: Path, fake: Fake, **overrides: str) -> tuple[int, str, dict[st
         (0, 0, "auto", "success", 0),
         (100, 100, "auto", "success", 0),
         (1000, 0, "auto", "success", 0),
-        (1000, 1, "manual", "success", 0),
-        (0, 2000, "manual", "success", 0),
+        (1000, 1, "auto", "success", 0),
+        (0, 2000, "auto", "success", 0),
         (2000, 1, "over", "failure", 1),
     ],
 )
@@ -167,7 +167,7 @@ def test_boundaries_select_tier_status_and_outputs(
 def test_texts_match_the_approved_wording() -> None:
     """Every tier uses the fixed summary and status wording."""
     # Check the human-approved over-limit text exactly.
-    assert gate.summary_for("over", 2001, "7", HEAD, "") == (
+    assert gate.summary_for("over", 2001, "") == (
         "PR size check failed: this PR changes 2,001 lines (additions + deletions), "
         "over the 2,000-line limit.\n"
         "AI review was skipped. Re-evaluate the scope and split this into smaller PRs."
@@ -178,14 +178,10 @@ def test_texts_match_the_approved_wording() -> None:
         "Re-evaluate and split into smaller PRs.",
     )
     # Check the remaining tiers.
-    assert gate.summary_for("manual", 1500, "7", HEAD, "") == (
-        "This PR changes 1,500 lines (1,001–2,000): AI review needs a manual start for this "
-        f"commit. Run the AI review workflow with pr-number 7 and head-sha {HEAD}."
-    )
-    assert gate.summary_for("auto", 5, "7", HEAD, "") == (
+    assert gate.summary_for("auto", 5, "") == (
         "This PR changes 5 lines; AI review runs automatically."
     )
-    assert gate.summary_for("unknown", None, "7", HEAD, "boom") == (
+    assert gate.summary_for("unknown", None, "boom") == (
         "Could not determine PR size: boom. AI review was not run."
     )
     assert gate.status_for("auto", 1000) == ("success", "1,000 changed lines (limit 2,000)")
@@ -198,7 +194,7 @@ def test_texts_match_the_approved_wording() -> None:
 def test_descriptions_fit_the_github_limit_at_large_totals() -> None:
     """Descriptions stay within 140 characters for a nine-digit-scale total."""
     # Check each tier's description length.
-    for tier in ("auto", "manual", "over", "unknown"):
+    for tier in ("auto", "over", "unknown"):
         assert len(gate.status_for(tier, 9_999_999)[1]) <= 140
 
 

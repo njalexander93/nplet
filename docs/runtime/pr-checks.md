@@ -181,8 +181,7 @@ whole-PR additions plus deletions against the base and reports the result in the
 
 | Changed lines | Result |
 | --- | --- |
-| ≤ 1,000 | Review runs automatically. |
-| 1,001–2,000 | Status passes; review needs a manual start for that commit. |
+| ≤ 2,000 | Status passes; review runs automatically for a same-repository, non-draft PR. |
 | > 2,000 | Review is skipped and the status fails. Split the PR. |
 | Unknown or invalid totals | Status fails with "Could not determine PR size". |
 | `head-sha` is not the PR's current head | Run fails without posting a status. |
@@ -190,9 +189,9 @@ whole-PR additions plus deletions against the base and reports the result in the
 Only PRs into the default branch post the status, because a status is shared by
 every PR on that commit. Changing a PR's base recounts it.
 
-To start a 1,001–2,000 line review, run the "AI review" workflow from the default
-branch with the PR number and the PR's current full head SHA. A new push needs a
-new manual start.
+To review an authorized fork PR, or to retry a review for the current head, run
+the "AI review" workflow from the default branch with the PR number and the PR's
+current full head SHA. The same size limit and head/base checks apply.
 
 ```sh
 gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
@@ -226,7 +225,7 @@ These tests protect the validation machinery itself:
   Its integration counterpart checks that independent failures remain visible.
 - [test_pr_size_gate.py](../../tests/unit/tooling/test_pr_size_gate.py) and
   [test_ai_review_workflow.py](../../tests/integration/tooling/test_ai_review_workflow.py)
-  check the size tiers, status and summary text, SHA binding and the workflow
+  check the size limit, status and summary text, SHA binding and the workflow
   wiring. They do not execute GitHub's scheduler.
 
 ## Merge enforcement and human review
