@@ -189,8 +189,9 @@ Protected implementation is every file edit inside a project code repository,
 whatever its extension or purpose, plus package commands and other mutation-capable
 shell commands. The project code repositories are the session's Git repository and
 its linked worktrees. The gate covers only those. A separate clone or sibling
-repository of the same project is gated only by a session rooted inside it;
-multi-repository project identity is deferred to NPLET-90. A note, draft or README inside them is protected
+repository of the same project is gated only by a session rooted inside it.
+[Target repository evidence](#target-repository-identity-and-location-evidence)
+does not change this gate yet. A note, draft or README inside them is protected
 implementation. Unknown or mixed effects remain readiness-gated or unsupported. The [contributor procedure](contributor-workflow.md)
 separately requires explicit roadmap approval. Readiness verifies delivery facts;
 it does not authenticate human approval.
@@ -213,6 +214,54 @@ parent classification. Task-free work never broadens child authority. A completi
 settles only existing recorded admission by its native call ID or validated local
 poll handle. It does not classify changed targets again or create missing state.
 Corrupt registered or transactional state remains an error.
+
+### Target repository identity and location evidence
+
+`edit_locations` in `src/nplet/adapters/task_boundary.py` resolves every target of a
+supported edit shape to read-only evidence of the Git repositories that hold it.
+Each target gets one point per discovery spelling, in path order and never
+deduplicated:
+
+- `lexical`: the normalized target joined to the session working directory.
+- `link`: one per symlink component of the lexical spelling, queried at the link's
+  parent directory. Git follows links, so a query through the link would report
+  only its destination.
+- `resolved`: the link-resolved spelling.
+
+Each point names its path and either the innermost repository (worktree root,
+common Git directory, worktree roots, and `[st_dev, st_ino]` of the common
+directory from `os.stat`), proven absence or a bounded error code. A missing path
+is queried at its nearest existing ancestor.
+
+| Point | Path | Repository |
+| --- | --- | --- |
+| lexical | `repo-C/link/file.md` | V (Git follows the link) |
+| link | `repo-C/link` (queried at `repo-C`) | C |
+| resolved | `repo-V/notes/file.md` | V |
+
+*Example: `repo-C/link` points to `repo-V/notes`.*
+
+**Identity** is the normalized common Git directory plus its device and inode.
+Linked worktrees share it; separate clones and copied `.task` registration do not.
+Names, remotes, branches and `.task` registration are not identity.
+
+**State** is derived, not stored: `unresolved` when any point has an error,
+otherwise `resolved` when any point has a repository, otherwise `absent`. A failure
+is never treated as absence. Error codes: `INVALID_TARGET` (non-string, empty or NUL
+target), `DANGLING_LINK`, `REPOSITORY_MISMATCH` (unusable `.git`, malformed
+gitfile, stale worktree or other Git failure), `HOST_UNSUPPORTED` (bare
+repository), `GIT_TIMEOUT` and `UNREADABLE` (filesystem error).
+
+**Workspace membership** holds when a session worktree root, matched by path or
+filesystem identity, is on the lexical or resolved spelling, or when any point's
+repository has the session repository's common Git directory.
+
+Limits: resolution writes nothing, keeps results only for one call and scans no
+siblings or home directories. Git inherits the process environment, including
+`GIT_*` variables. Hard-link aliases are not inventoried. On Windows, junctions
+are not reported as `link` points because Python `os.path.islink` is false for
+them. No adapter calls `edit_locations` yet, so task admission is unchanged.
+Other location facts may be layered on this evidence later.
 
 ### Bootstrap exceptions
 
