@@ -3,6 +3,7 @@
 import errno
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -476,17 +477,44 @@ def test_link_before_parent_step_must_be_followable(
 
 
 @pytest.mark.parametrize("target", ["\ud800.md", "\ud800/../a.md"])
-def test_unencodable_target_is_evidence_not_an_exception(tmp_path: Path, target: str) -> None:
+def test_unencodable_target_is_evidence_not_an_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
     """A target the filesystem cannot encode yields bounded evidence through the boundary.
 
     Args:
         tmp_path: Session working directory outside every repository.
+        monkeypatch: Rejects the lone surrogate on every platform.
         target: Unencodable spelling, alone or walked through ``..``.
     """
+    # POSIX encodes paths as UTF-8 and rejects a lone surrogate; Windows paths are
+    # UTF-16 and accept it, so model the POSIX encoder there too.
+    for owner, name in [(os, "stat"), (os, "lstat"), (os.path, "realpath")]:
+        real = getattr(owner, name)
+
+        def probe(path: object, *args: object, real: Callable = real, **kwargs: object) -> object:
+            """Reject a lone surrogate as the POSIX encoder does and delegate otherwise.
+
+            Args:
+                path: Probed path or descriptor.
+                args: Positional probe arguments.
+                real: The real probe.
+                kwargs: Keyword probe arguments.
+
+            Returns:
+                The real probe's result.
+
+            Raises:
+                UnicodeEncodeError: For a spelling holding the lone surrogate.
+            """
+            if "\ud800" in str(path):
+                raise UnicodeEncodeError("utf-8", str(path), 0, 1, "surrogates not allowed")
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(owner, name, probe)
     session = core.Repository(tmp_path, tmp_path / ".git", [tmp_path])
     [result] = boundary.edit_locations(edit(tmp_path, target), session)
-    # Windows paths are UTF-16, so only POSIX fails to encode the lone surrogate.
-    assert result.state == ("absent" if os.name == "nt" else "unresolved")
+    assert result.state == "unresolved"
     assert result.workspace is True
 
 
