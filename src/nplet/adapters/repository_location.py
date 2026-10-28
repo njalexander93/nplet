@@ -219,7 +219,9 @@ def resolve(
     points = [point("lexical", lexical, lexical, memo)]
     # Links come from the unnormalized spelling: ``..`` after a link leaves its destination.
     holders = links(absolute)
+    # A holder reached through an earlier link also counts in its real directory.
     spellings = [lexical, *holders]
+    spellings += [Path(os.path.realpath(link.parent)) / link.name for link in holders]
     points += [point("link", link, link.parent, memo) for link in holders]
     # Resolve links; an unresolvable spelling is a failed point, not absence.
     try:

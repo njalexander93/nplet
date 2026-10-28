@@ -260,7 +260,8 @@ unsupported repository), `GIT_TIMEOUT` and `UNREADABLE` (filesystem error or
 undecodable path).
 
 **Workspace membership** holds when a session worktree root, matched by path or
-filesystem identity, is on the lexical, any link or the resolved spelling, or when
+filesystem identity, is on the lexical, any link (as reached or in its real
+directory) or the resolved spelling, or when
 any point's repository has the session repository's common Git directory. A
 failed query at a link therefore cannot hide a root that holds it.
 

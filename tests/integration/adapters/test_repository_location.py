@@ -267,7 +267,9 @@ def test_c3_apply_patch_move_locates_both_sides(world: Path) -> None:
 
 
 @posix_links
-def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> None:
+def test_c3_c4_links_keep_link_and_destination_repositories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Keep every hop's repository, and membership through any hop, for each session.
 
     Covers inward, outward, reverse and chained links, a link whose destination is a
@@ -276,6 +278,7 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
 
     Args:
         tmp_path: Disposable parent.
+        monkeypatch: Times out one hop's query.
     """
     base = tmp_path.resolve()
     c, v = cross_linked_repos(base)
@@ -359,6 +362,28 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
         locations = locate(session, *map(str, expected))
         assert [seen(loc) for loc in locations] == list(expected.values())
         assert [loc.workspace for loc in locations] == workspace, session
+    # A failed query at a hop reached through a link still sees the root holding it.
+    discover = core.project_repository
+
+    def time_out_at_hop(path: str) -> core.Repository | None:
+        """Time out at the real directory of ``c/l1/l2`` and delegate elsewhere.
+
+        Args:
+            path: Queried real directory.
+
+        Returns:
+            Git's answer for every other directory.
+
+        Raises:
+            subprocess.TimeoutExpired: For ``d/dir``.
+        """
+        if Path(path) == d / "dir":
+            raise subprocess.TimeoutExpired(["git"], 2)
+        return discover(path)
+
+    monkeypatch.setattr(core, "project_repository", time_out_at_hop)
+    [location] = locate(d, str(c / "l1/l2/file.md"))
+    assert (location.state, location.workspace) == ("unresolved", True)
 
 
 def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
