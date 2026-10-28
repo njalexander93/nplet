@@ -249,8 +249,9 @@ Names, remotes, branches and `.task` registration are not identity.
 otherwise `resolved` when any point has a repository, otherwise `absent`. A failure
 is never treated as absence. Error codes: `INVALID_TARGET` (non-string, empty or NUL
 target), `DANGLING_LINK`, `REPOSITORY_MISMATCH` (unusable `.git`, malformed
-gitfile, stale worktree or other Git failure), `HOST_UNSUPPORTED` (bare
-repository), `GIT_TIMEOUT` and `UNREADABLE` (filesystem error).
+gitfile, stale worktree, a path inside a bare repository or other Git failure),
+`HOST_UNSUPPORTED` (passed through when the repository helper reports an
+unsupported repository), `GIT_TIMEOUT` and `UNREADABLE` (filesystem error).
 
 **Workspace membership** holds when a session worktree root, matched by path or
 filesystem identity, is on the lexical or resolved spelling, or when any point's
