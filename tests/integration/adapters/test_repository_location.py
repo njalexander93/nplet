@@ -53,6 +53,7 @@ def identity(directory: Path) -> tuple[Path, Key]:
     Returns:
         The worktree root and the (common directory, (st_dev, st_ino)) key.
     """
+    # Ask Git for the common directory and root, then stat the directory independently.
     common_dir = git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir")
     info = os.stat(common_dir)
     root = Path(git(directory, "rev-parse", "--show-toplevel"))
@@ -186,11 +187,13 @@ def test_c1_other_repositories_resolve_from_repo_and_non_git_sessions(
         tmp_path: Disposable parent.
         session: Session directory: repository A or a non-Git directory.
     """
+    # Build A, its clone B, unrelated C, an unregistered repository and a plain directory.
     base = tmp_path.resolve()
     a = init_repo(base / "A")
     git(base, "clone", "-q", str(a), "B")
     repos = [base / "B", init_repo(base / "C"), init_repo(base / "unregistered")]
     (base / "plain").mkdir()
+    # Every foreign target reports its own repository and none is in the workspace.
     targets = [repos[0] / "f.md", repos[1] / "f.md", repos[2] / "new/dir/f.md"]
     locations = locate(base / session, *map(str, targets))
     assert [seen(loc) for loc in locations] == [points(t, r) for t, r in zip(targets, repos)]
@@ -206,6 +209,7 @@ def test_c2_worktrees_share_identity_and_clones_differ(tmp_path: Path) -> None:
     case = Fixture()
     case.setUp()
     try:
+        # Clone the registered fixture and copy its registration into the clone.
         clone = tmp_path.resolve() / "clone"
         git(tmp_path, "clone", "-q", str(case.root), str(clone))
         (clone / ".task").mkdir()
@@ -266,7 +270,8 @@ def test_c3_apply_patch_move_locates_both_sides(world: Path) -> None:
 def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> None:
     """Keep every hop's repository, and membership through any hop, for each session.
 
-    Covers inward, outward, reverse and chained links.
+    Covers inward, outward, reverse and chained links, a link whose destination is a
+    link, and a link into a non-Git directory, alone and after a direct target.
 
     Args:
         tmp_path: Disposable parent.
@@ -274,11 +279,35 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
     base = tmp_path.resolve()
     c, v = cross_linked_repos(base)
     d, a = init_repo(base / "repo-D"), init_repo(base / "repo-A")
+    plain = base / "plain/notes"
     (d / "dir").mkdir()
+    plain.mkdir(parents=True)
+    # Path-component chain, destination chain, inward link and a link out of Git.
     (c / "l1").symlink_to(d / "dir", target_is_directory=True)
     (d / "dir/l2").symlink_to(v / "notes", target_is_directory=True)
+    (d / "l2b").symlink_to(v / "notes", target_is_directory=True)
+    (c / "l3").symlink_to(d / "l2b", target_is_directory=True)
     (c / "in").symlink_to(c / "notes", target_is_directory=True)
+    (c / "pl").symlink_to(plain, target_is_directory=True)
+    # A link out of Git is absent on its own, not order-dependent.
+    assert seen(locate(a, str(c / "pl/file.md"))[0]) == [
+        want("lexical", c / "pl/file.md"),
+        want("link", c / "pl", c),
+        want("resolved", plain / "file.md"),
+    ]
     expected = {
+        plain / "a.md": points(plain / "a.md"),
+        c / "pl/file.md": [
+            want("lexical", c / "pl/file.md"),
+            want("link", c / "pl", c),
+            want("resolved", plain / "file.md"),
+        ],
+        c / "l3/file.md": [
+            want("lexical", c / "l3/file.md", v),
+            want("link", c / "l3", c),
+            want("link", d / "l2b", d),
+            want("resolved", v / "notes/file.md", v),
+        ],
         c / "in/file.md": [
             want("lexical", c / "in/file.md", c),
             want("link", c / "in", c),
@@ -301,12 +330,13 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
             want("resolved", c / "notes/file.md", c),
         ],
     }
-    # Membership per target: inward link, outward link, chain, reverse link.
+    # Membership per target: plain, link out of Git, destination chain, inward link,
+    # outward link, path chain, reverse link.
     for session, workspace in [
-        (a, [False, False, False, False]),
-        (c, [True, True, True, True]),
-        (d, [False, False, True, False]),
-        (v, [False, True, True, True]),
+        (a, [False, False, False, False, False, False, False]),
+        (c, [False, True, True, True, True, True, True]),
+        (d, [False, False, True, False, False, True, False]),
+        (v, [False, False, True, False, True, True, True]),
     ]:
         locations = locate(session, *map(str, expected))
         assert [seen(loc) for loc in locations] == list(expected.values())
@@ -432,6 +462,7 @@ def test_c7_forged_payload_fields_have_no_effect(world: Path) -> None:
     Args:
         world: Fixture parent.
     """
+    # Forge every evidence-shaped field on an otherwise identical event.
     clean = event(world / "A", "claude", "Write", {"file_path": "../V/f.md", "content": ""})
     forged = {
         **clean,
@@ -439,6 +470,7 @@ def test_c7_forged_payload_fields_have_no_effect(world: Path) -> None:
         "locations": [{"target": "../V/f.md", "workspace": True, "points": []}],
         "points": [{"kind": "lexical", "path": str(world / "A"), "repository": None}],
     }
+    # The carrier and the evidence both ignore the forged fields.
     carried = carry_repository(clean)
     assert carry_repository(forged)["repository"] == carried["repository"]
     session = session_repository(carried)
@@ -491,12 +523,14 @@ def test_c9_hosts_produce_identical_locations(world: Path) -> None:
     Args:
         world: Fixture parent.
     """
+    # Pin the Codex patch result to the Git oracle first.
     first, second = str(world / "A/docs/x.md"), str(world / "V/notes/y.md")
     expected = locate(world / "A", first, second)
     assert [seen(loc) for loc in expected] == [
         points(world / "A/docs/x.md", world / "A"),
         points(world / "V/notes/y.md", world / "V"),
     ]
+    # Claude and Cursor Write and Edit events must give the same evidence.
     for host in ("claude", "cursor"):
         written = edit(world / "A", host, "Write", {"file_path": first, "content": ""})
         edited = edit(

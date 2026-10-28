@@ -28,17 +28,17 @@ def fake_discovery(
     """
     calls: list[Path] = []
 
-    def project_repository(path: Path) -> core.Repository | None:
+    def project_repository(path: str) -> core.Repository | None:
         """Record one query and answer it from the table.
 
         Args:
-            path: Queried directory.
+            path: Queried real directory.
 
         Returns:
             The table's repository, or None for an absent directory.
         """
-        calls.append(path)
-        return repositories.get(path)
+        calls.append(Path(path))
+        return repositories.get(Path(path))
 
     monkeypatch.setattr(location.core, "project_repository", project_repository)
     return calls
@@ -257,6 +257,8 @@ def test_link_points_query_each_link_parent(
     link.mkdir()
     calls = fake_discovery(monkeypatch, {holder.root: holder, link: destination})
     monkeypatch.setattr(location.os.path, "islink", lambda path: Path(path) == link)
+    # A link that leads back to itself is followed once and reported once.
+    monkeypatch.setattr(location.os, "readlink", lambda _path: str(link))
     result = location.resolve(str(holder.root), "link/file.md", None, never_root, {})
     assert [(p.kind, p.path, p.repository and p.repository.repository) for p in result.points] == [
         ("lexical", link / "file.md", destination),

@@ -223,15 +223,18 @@ Each target gets one point per discovery spelling, in path order and never
 deduplicated:
 
 - `lexical`: the normalized target joined to the session working directory.
-- `link`: one per symlink component of the lexical spelling, queried at the link's
-  parent directory. Git follows links, so a query through the link would report
-  only its destination.
+- `link`: one per symbolic link or Windows junction on the lexical spelling and,
+  transitively, on each link's destination path, queried at the link's parent
+  directory. Git follows links, so a query through the link would report only its
+  destination.
 - `resolved`: the link-resolved spelling.
 
 Each point names its path and either the innermost repository (worktree root,
 common Git directory, worktree roots, and `(st_dev, st_ino)` of the common
 directory from `os.stat`), proven absence or a bounded error code. A missing path
-is queried at its nearest existing ancestor.
+is queried at its nearest existing ancestor, by its real path, so a link into a
+directory outside Git is absent rather than inheriting the link holder's
+repository.
 
 | Point | Path | Repository |
 | --- | --- | --- |
@@ -251,7 +254,8 @@ is never treated as absence. Error codes: `INVALID_TARGET` (non-string, empty or
 target), `DANGLING_LINK`, `REPOSITORY_MISMATCH` (unusable `.git`, malformed
 gitfile, stale worktree, a path inside a bare repository or other Git failure),
 `HOST_UNSUPPORTED` (passed through when the repository helper reports an
-unsupported repository), `GIT_TIMEOUT` and `UNREADABLE` (filesystem error).
+unsupported repository), `GIT_TIMEOUT` and `UNREADABLE` (filesystem error or
+undecodable path).
 
 **Workspace membership** holds when a session worktree root, matched by path or
 filesystem identity, is on the lexical or resolved spelling, or when any point's
@@ -259,9 +263,11 @@ repository has the session repository's common Git directory.
 
 Limits: resolution writes nothing, keeps results only for one call and scans no
 siblings or home directories. Git inherits the process environment, including
-`GIT_*` variables. Hard-link aliases are not inventoried. On Windows, junctions
-are not reported as `link` points because Python `os.path.islink` is false for
-them. No adapter calls `edit_locations` yet, so task admission is unchanged.
+`GIT_*` variables. A repository owned by another user fails Git's
+`safe.directory` check and reports `REPOSITORY_MISMATCH`. Hard-link aliases are
+not inventoried. Junction link points are implemented but not yet exercised by
+native Windows tests. No adapter calls `edit_locations` yet, so task admission is
+unchanged.
 Other location facts may be layered on this evidence later.
 
 ### Bootstrap exceptions

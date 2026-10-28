@@ -192,7 +192,7 @@ APPROVED_NATIVE_SKIPS: dict[str, tuple[set[str], str]] = {
         {"Linux", "Darwin"},
         "Requires native Windows cross-process sharing",
     ),
-    # Link points need symbolic links; Windows junctions are not reported as links.
+    # These location cases build POSIX symbolic links; Windows junction cases are pending.
     **{
         "tests/integration/adapters/test_repository_location.py::" + name: (
             {"Windows"},

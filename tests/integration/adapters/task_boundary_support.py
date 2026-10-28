@@ -95,6 +95,7 @@ def init_repo(path: Path) -> Path:
     Returns:
         Canonical repository root.
     """
+    # Return the canonical spelling so expected paths match Git's resolved output.
     subprocess.run(["git", "init", "-q", str(path)], check=True)
     return path.resolve()
 
@@ -112,6 +113,7 @@ def cross_linked_repos(base: Path) -> tuple[Path, Path]:
         The canonical C and V repository roots.
     """
     c, v = init_repo(base / "repo-C"), init_repo(base / "repo-V")
+    # Give each repository a notes directory and a link to the other's.
     for source, name, target in ((c, "link", v), (v, "back", c)):
         (target / "notes").mkdir()
         (source / name).symlink_to(target / "notes", target_is_directory=True)

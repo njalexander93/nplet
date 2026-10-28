@@ -7,6 +7,7 @@ writes, never caches beyond the caller's per-call memo and never decides admissi
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 from collections.abc import Callable
@@ -93,25 +94,52 @@ def discover(directory: Path, memo: Memo) -> tuple[Identity | None, str | None]:
         The repository identity and None, or None and a bounded error code; both are
         None when the directory is proven outside every repository.
     """
-    # Git resolves links itself, so alias spellings of one directory share one query.
+    # Query the real directory: a link holder's repository belongs to its own link point,
+    # and alias spellings then share one query with one answer regardless of order.
     key = os.path.realpath(directory)
     if key not in memo:
         try:
-            repository = core.project_repository(directory)
+            # Absence comes only from Git's proof; a repository also needs its identity.
+            repository = core.project_repository(key)
             if repository is None:
                 memo[key] = (None, None)
             else:
                 info = os.stat(repository.common)
                 memo[key] = (Identity(repository, (info.st_dev, info.st_ino)), None)
-        # Keep every discovery failure as its bounded code instead of absence;
         # project_repository raises only REPOSITORY_MISMATCH or HOST_UNSUPPORTED.
         except core.WorkspaceError as error:
             memo[key] = (None, error.code)
         except subprocess.TimeoutExpired:
             memo[key] = (None, "GIT_TIMEOUT")
-        except OSError:
+        # Unreadable paths and undecodable Git output cannot be located.
+        except (OSError, ValueError):
             memo[key] = (None, "UNREADABLE")
     return memo[key]
+
+
+def links(path: Path) -> list[Path]:
+    """List every link entry on a path and, transitively, on each link's destination path.
+
+    Args:
+        path: Normalized absolute spelling.
+
+    Returns:
+        Symbolic links and Windows junctions in discovery order, each once.
+    """
+    found: list[Path] = []
+    pending = [path]
+    # The list grows while iterating; each new link adds its destination to scan.
+    for current in pending:
+        for component in (*reversed(current.parents[:-1]), current):
+            if component not in found and (
+                os.path.islink(component) or os.path.isjunction(component)
+            ):
+                found.append(component)
+                # An unreadable link keeps its own point but cannot be followed further.
+                with contextlib.suppress(OSError):
+                    destination = component.parent / os.readlink(component)
+                    pending.append(Path(os.path.normpath(destination)))
+    return found
 
 
 def point(kind: str, path: Path, start: Path, memo: Memo) -> Point:
@@ -163,19 +191,17 @@ def resolve(
     # A malformed target has no spelling to locate.
     if not isinstance(target, str) or not target or "\x00" in target:
         return Location(target, False, [Point("lexical", Path(cwd), None, "INVALID_TARGET")])
-    # Build the lexical spelling and one link point per symlink component on it.
+    # Build the lexical spelling and one link point per link reached from it; the link
+    # entry lives in its parent directory, which Git would not see through the link.
     absolute = Path(cwd, target)
     lexical = Path(os.path.normpath(absolute))
     points = [point("lexical", lexical, lexical, memo)]
     spellings = [lexical]
-    for component in (*reversed(lexical.parents[:-1]), lexical):
-        # The link entry lives in its parent directory, which Git would not see through it.
-        if os.path.islink(component):
-            points.append(point("link", component, component.parent, memo))
+    points += [point("link", link, link.parent, memo) for link in links(lexical)]
     # Resolve links; an unresolvable spelling is a failed point, not absence.
     try:
         resolved = absolute.resolve(strict=False)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         points.append(Point("resolved", absolute, None, "UNREADABLE"))
     else:
         points.append(point("resolved", resolved, resolved, memo))
