@@ -446,6 +446,16 @@ def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
         ],
         "unresolved",
     )
+    # So does ``..`` that only returns above the dangling link after a further component.
+    layouts["dangling_link_then_deeper_parent"] = (
+        c / "dead/x/../../f.md",
+        [
+            want("lexical", c / "f.md", c),
+            want("link", c / "dead", c),
+            want("resolved", c / "dead/x/../../f.md", error="DANGLING_LINK"),
+        ],
+        "unresolved",
+    )
     layouts["symlinked_ancestor"] = (
         base / "alias/sub/f.md",
         [
@@ -464,6 +474,7 @@ def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
         pytest.param("symlinked_ancestor", marks=posix_links),
         pytest.param("dangling_link", marks=posix_links),
         pytest.param("dangling_link_then_parent", marks=posix_links),
+        pytest.param("dangling_link_then_deeper_parent", marks=posix_links),
         "malformed_gitfile",
         "bare",
         "stale_worktree",

@@ -292,6 +292,32 @@ def test_unreadable_link_is_recorded_but_not_followed(
     ]
 
 
+def test_excessive_link_chain_is_bounded_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An endless chain of distinct links stops at the limit instead of exhausting the stack.
+
+    Args:
+        tmp_path: Session working directory holding the modeled chain.
+        monkeypatch: Replaces Git discovery, link detection and link reading.
+    """
+    # Each ``l...`` entry is a link to a sibling one letter longer, without end.
+    fake_discovery(monkeypatch, {})
+    monkeypatch.setattr(
+        location.os.path,
+        "islink",
+        lambda path: Path(path).parent == tmp_path and Path(path).name.startswith("l"),
+    )
+    monkeypatch.setattr(location.os, "readlink", lambda path: Path(path).name + "l")
+    session = core.Repository(tmp_path, tmp_path / ".git", [tmp_path])
+    [result] = boundary.edit_locations(edit(tmp_path, "l/a.md"), session)
+    assert [p.path.name for p in result.points if p.kind == "link"] == [
+        "l" * n for n in range(1, location.LINK_LIMIT + 1)
+    ]
+    assert (result.points[-1].kind, result.points[-1].error) == ("resolved", "UNREADABLE")
+    assert result.state == "unresolved"
+
+
 def test_failed_middle_hop_keeps_root_membership(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

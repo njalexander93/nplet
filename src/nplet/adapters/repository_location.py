@@ -84,6 +84,8 @@ class Location(NamedTuple):
 Memo = dict[str, tuple[Identity | None, str | None]]
 # Probe errors that mean a path component does not exist.
 MISSING = (errno.ENOENT, errno.ENOTDIR)
+# Most links one target records; Linux follows at most 40 and macOS 32 per lookup.
+LINK_LIMIT = 64
 
 
 def discover(directory: Path, memo: Memo) -> tuple[Identity | None, str | None]:
@@ -127,42 +129,44 @@ def links(path: Path) -> tuple[list[Path], str | None]:
         path: Absolute spelling, possibly with ``..`` components.
 
     Returns:
-        Symbolic links and Windows junctions in discovery order, each once, and the
-        bounded code of the first link that ``..`` cannot leave, if any.
+        Symbolic links and Windows junctions in traversal order, each once, at most
+        ``LINK_LIMIT``, and the bounded code of the first failure: a link that ``..``
+        cannot leave, or more links than any traversal can follow.
     """
     found: list[Path] = []
     failure = None
-
-    def walk(spelling: Path) -> None:
-        """Visit one spelling's components, expanding each new link where it is met.
-
-        Args:
-            spelling: Absolute spelling to walk.
-        """
-        nonlocal failure
-        current = Path(spelling.anchor)
-        for part in spelling.parts[1:]:
-            # ``..`` leaves the real directory, as the filesystem does, so a link before
-            # it is still visited instead of being collapsed away.
-            if part == "..":
-                # The filesystem fails at a dangling link before ``..`` can collapse it.
-                if failure is None and current in found:
-                    failure = unfollowable(current)
-                current = Path(os.path.realpath(current)).parent
-                continue
-            current /= part
-            if current not in found and (os.path.islink(current) or os.path.isjunction(current)):
-                found.append(current)
-                # A relative target is read from the link's real directory, not the
-                # spelling that reached it. An unreadable link cannot be followed further.
-                try:
-                    destination = Path(os.path.realpath(current.parent)) / os.readlink(current)
-                except OSError:
-                    continue
-                # Depth first, as traversal meets the destination before later components.
-                walk(destination)
-
-    walk(path)
+    # Depth first with an explicit stack: each frame is a spelling's position and the
+    # rest of its components, and a destination is walked before later components.
+    stack = [(Path(path.anchor), iter(path.parts[1:]))]
+    while stack:
+        current, parts = stack[-1]
+        part = next(parts, None)
+        if part is None:
+            stack.pop()
+            continue
+        # ``..`` leaves the real directory, as the filesystem does, so a link before it is
+        # still visited instead of being collapsed away; the filesystem fails at a dangling
+        # link on the way before ``..`` can collapse it.
+        if part == "..":
+            held = [link for link in (current, *current.parents) if link in found]
+            failure = failure or next(filter(None, map(unfollowable, held)), None)
+            stack[-1] = (Path(os.path.realpath(current)).parent, parts)
+            continue
+        current /= part
+        stack[-1] = (current, parts)
+        if current in found or not (os.path.islink(current) or os.path.isjunction(current)):
+            continue
+        # Hosts stop following links well below this many, so stop recording here.
+        if len(found) == LINK_LIMIT:
+            return found, failure or "UNREADABLE"
+        found.append(current)
+        # A relative target is read from the link's real directory, not the spelling
+        # that reached it. An unreadable link cannot be followed further.
+        try:
+            destination = Path(os.path.realpath(current.parent)) / os.readlink(current)
+        except OSError:
+            continue
+        stack.append((Path(destination.anchor), iter(destination.parts[1:])))
     return found, failure
 
 
