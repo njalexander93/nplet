@@ -135,9 +135,10 @@ def links(path: Path) -> list[Path]:
                 os.path.islink(component) or os.path.isjunction(component)
             ):
                 found.append(component)
-                # An unreadable link keeps its own point but cannot be followed further.
+                # A relative target is read from the link's real directory, not the
+                # spelling that reached it. An unreadable link cannot be followed further.
                 with contextlib.suppress(OSError):
-                    destination = component.parent / os.readlink(component)
+                    destination = Path(os.path.realpath(component.parent)) / os.readlink(component)
                     pending.append(Path(os.path.normpath(destination)))
     return found
 

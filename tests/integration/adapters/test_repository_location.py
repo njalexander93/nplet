@@ -287,6 +287,8 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
     (d / "dir/l2").symlink_to(v / "notes", target_is_directory=True)
     (d / "l2b").symlink_to(v / "notes", target_is_directory=True)
     (c / "l3").symlink_to(d / "l2b", target_is_directory=True)
+    # A relative link reached through another link is read from its real directory.
+    (d / "dir/l4").symlink_to(Path("../l2b"), target_is_directory=True)
     (c / "in").symlink_to(c / "notes", target_is_directory=True)
     (c / "pl").symlink_to(plain, target_is_directory=True)
     # A link out of Git is absent on its own, not order-dependent.
@@ -305,6 +307,13 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
         c / "l3/file.md": [
             want("lexical", c / "l3/file.md", v),
             want("link", c / "l3", c),
+            want("link", d / "l2b", d),
+            want("resolved", v / "notes/file.md", v),
+        ],
+        c / "l1/l4/file.md": [
+            want("lexical", c / "l1/l4/file.md", v),
+            want("link", c / "l1", c),
+            want("link", c / "l1/l4", d),
             want("link", d / "l2b", d),
             want("resolved", v / "notes/file.md", v),
         ],
@@ -330,13 +339,13 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
             want("resolved", c / "notes/file.md", c),
         ],
     }
-    # Membership per target: plain, link out of Git, destination chain, inward link,
-    # outward link, path chain, reverse link.
+    # Membership per target: plain, link out of Git, destination chain, relative chain,
+    # inward link, outward link, path chain, reverse link.
     for session, workspace in [
-        (a, [False, False, False, False, False, False, False]),
-        (c, [False, True, True, True, True, True, True]),
-        (d, [False, False, True, False, False, True, False]),
-        (v, [False, False, True, False, True, True, True]),
+        (a, [False, False, False, False, False, False, False, False]),
+        (c, [False, True, True, True, True, True, True, True]),
+        (d, [False, False, True, True, False, False, True, False]),
+        (v, [False, False, True, True, False, True, True, True]),
     ]:
         locations = locate(session, *map(str, expected))
         assert [seen(loc) for loc in locations] == list(expected.values())
