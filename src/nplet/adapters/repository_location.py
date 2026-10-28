@@ -82,7 +82,8 @@ class Location(NamedTuple):
 
 
 Memo = dict[str, tuple[Identity | None, str | None]]
-# Probe errors that mean a path component does not exist.
+# Probe errors that mean a path component does not exist; a file in the way is
+# then found on the climb.
 MISSING = (errno.ENOENT, errno.ENOTDIR)
 # Most links one target records; Linux follows at most 40 and macOS 32 per lookup.
 LINK_LIMIT = 64
@@ -146,12 +147,9 @@ def links(path: Path) -> tuple[list[Path], str | None]:
             continue
         # ``..`` leaves the real directory, as the filesystem does, so a link before it is
         # still visited instead of being collapsed away; the filesystem fails at a dangling
-        # link or an unreadable component on the way before ``..`` can collapse it.
+        # link, a file or an unreadable component on the way before ``..`` can collapse it.
         if part == "..":
-            held = [link for link in (current, *current.parents) if link in found]
-            failure = (
-                failure or next(filter(None, map(unfollowable, held)), None) or impassable(current)
-            )
+            failure = failure or nearest(current, leaf=False)[1]
             stack[-1] = (Path(os.path.realpath(current)).parent, parts)
             continue
         current /= part
@@ -172,38 +170,46 @@ def links(path: Path) -> tuple[list[Path], str | None]:
     return found, failure
 
 
-def impassable(path: Path) -> str | None:
-    """Report a failure other than absence when the filesystem passes one component.
+def nearest(start: Path, leaf: bool = True) -> tuple[Path | None, str | None]:
+    """Find the nearest existing directory at or above ``start``, or why it is unreachable.
 
     Args:
-        path: Component spelling about to be left by ``..``.
+        start: First path to try.
+        leaf: Whether ``start`` itself may be an existing non-directory, such as an edited
+            file; any other non-directory on the way blocks traversal.
 
     Returns:
-        ``UNREADABLE`` for a probe error other than a missing component, else None.
+        The directory and None, or None and ``DANGLING_LINK`` or ``UNREADABLE``.
     """
-    # A missing component stays a lexical step, as everywhere else on the walk.
-    try:
-        os.stat(path)
-    except OSError as error:
-        return None if error.errno in MISSING else "UNREADABLE"
-    return None
-
-
-def unfollowable(link: Path) -> str | None:
-    """Report why the filesystem cannot pass through one link entry.
-
-    Args:
-        link: Existing link entry.
-
-    Returns:
-        ``DANGLING_LINK`` for a missing or looping destination, ``UNREADABLE`` for any
-        other failure, or None when the destination exists.
-    """
-    try:
-        os.stat(link)
-    except OSError as error:
-        return "DANGLING_LINK" if error.errno in (*MISSING, errno.ELOOP) else "UNREADABLE"
-    return None
+    # Climb only past genuinely missing components; any other probe failure is
+    # unreadable, and an entry that exists only as a link is dangling.
+    directory = start
+    while True:
+        try:
+            info = os.stat(directory)
+        # An unencodable spelling cannot be probed.
+        except ValueError:
+            return None, "UNREADABLE"
+        except OSError as target:
+            if target.errno not in (*MISSING, errno.ELOOP):
+                return None, "UNREADABLE"
+            try:
+                os.lstat(directory)
+            except OSError as entry:
+                if entry.errno not in MISSING:
+                    return None, "UNREADABLE"
+            else:
+                return None, "DANGLING_LINK"
+        else:
+            if stat.S_ISDIR(info.st_mode):
+                return directory, None
+            # A file below which the path continues cannot be traversed or created through.
+            if not leaf or directory != start:
+                return None, "UNREADABLE"
+        # A missing filesystem root has no ancestor left to query.
+        if directory.parent == directory:
+            return None, "UNREADABLE"
+        directory = directory.parent
 
 
 def point(kind: str, path: Path, start: Path, memo: Memo) -> Point:
@@ -218,30 +224,9 @@ def point(kind: str, path: Path, start: Path, memo: Memo) -> Point:
     Returns:
         The point with its repository, absence or error.
     """
-    # Climb only past genuinely missing components; any other probe failure is
-    # unreadable, and an entry that exists only as a link is dangling.
-    directory = start
-    while True:
-        try:
-            if stat.S_ISDIR(os.stat(directory).st_mode):
-                break
-        # An unencodable spelling cannot be probed.
-        except ValueError:
-            return Point(kind, path, None, "UNREADABLE")
-        except OSError as target:
-            if target.errno not in (*MISSING, errno.ELOOP):
-                return Point(kind, path, None, "UNREADABLE")
-            try:
-                os.lstat(directory)
-            except OSError as entry:
-                if entry.errno not in MISSING:
-                    return Point(kind, path, None, "UNREADABLE")
-            else:
-                return Point(kind, path, None, "DANGLING_LINK")
-        # A missing filesystem root has no ancestor left to query.
-        if directory.parent == directory:
-            return Point(kind, path, None, "UNREADABLE")
-        directory = directory.parent
+    directory, error = nearest(start)
+    if directory is None:
+        return Point(kind, path, None, error)
     # Query the directory and attach its result to this spelling.
     repository, error = discover(directory, memo)
     return Point(kind, path, repository, error)

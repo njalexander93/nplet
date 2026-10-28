@@ -493,9 +493,31 @@ def test_component_before_parent_step_keeps_probe_failures(
         state: Expected target state.
     """
     fake_discovery(monkeypatch, {})
-    fail_probe(monkeypatch, "stat", tmp_path / ("x" * 300), code)
+    for probe in ("stat", "lstat"):
+        fail_probe(monkeypatch, probe, tmp_path / ("x" * 300), code)
     result = location.resolve(str(tmp_path), "x" * 300 + "/../f.md", None, never_root, {})
     assert (result.points[-1].error, result.state) == (error, state)
+
+
+@pytest.mark.parametrize(
+    ("target", "errors"),
+    [("blocker/child.md", ["UNREADABLE", "UNREADABLE"]), ("blocker/../f.md", [None, "UNREADABLE"])],
+)
+def test_file_in_the_way_blocks_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, errors: list[str | None]
+) -> None:
+    """A file below which the path continues is a barrier, not a missing component.
+
+    Args:
+        tmp_path: Non-Git directory holding the file.
+        monkeypatch: Replaces Git discovery.
+        target: A child of the file, or ``..`` back out of it.
+        errors: Expected lexical and resolved codes.
+    """
+    (tmp_path / "blocker").write_text("file\n")
+    fake_discovery(monkeypatch, {})
+    result = location.resolve(str(tmp_path), target, None, never_root, {})
+    assert [p.error for p in result.points] == errors
 
 
 @pytest.mark.parametrize("target", ["\ud800.md", "\ud800/../a.md"])

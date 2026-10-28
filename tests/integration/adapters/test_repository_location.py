@@ -410,6 +410,9 @@ def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
     subprocess.run(["git", "init", "-q", "--bare", str(base / "bare.git")], check=True)
     (base / "bad").mkdir()
     (base / "bad/.git").write_text("garbage\n")
+    # A file in the way blocks a child path and a ``..`` step through it alike.
+    (base / "plain").mkdir()
+    (base / "plain/blocker").write_text("file\n")
     linked = commit_and_link_worktree(init_repo(base / "main"))
     shutil.rmtree(base / "main/.git/worktrees/linked")
     mismatch = "REPOSITORY_MISMATCH"
@@ -421,6 +424,19 @@ def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
             ("stale_worktree", linked / "f.md"),
         ]
     }
+    layouts["file_barrier_child"] = (
+        base / "plain/blocker/child.md",
+        points(base / "plain/blocker/child.md", error="UNREADABLE"),
+        "unresolved",
+    )
+    layouts["file_barrier_parent_step"] = (
+        base / "plain/blocker/../f.md",
+        [
+            want("lexical", base / "plain/f.md"),
+            want("resolved", base / "plain/blocker/../f.md", error="UNREADABLE"),
+        ],
+        "unresolved",
+    )
     if os.name == "nt":
         return layouts
     # Links: a dangling one under repository C, and an alias of repository V.
@@ -476,6 +492,8 @@ def failure_layouts(base: Path) -> dict[str, tuple[Path, list[Seen], str]]:
         pytest.param("dangling_link_then_parent", marks=posix_links),
         pytest.param("dangling_link_then_deeper_parent", marks=posix_links),
         "malformed_gitfile",
+        "file_barrier_child",
+        "file_barrier_parent_step",
         "bare",
         "stale_worktree",
     ],
