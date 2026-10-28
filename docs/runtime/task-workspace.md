@@ -223,10 +223,11 @@ Each target gets one point per discovery spelling, in path order and never
 deduplicated:
 
 - `lexical`: the normalized target joined to the session working directory.
-- `link`: one per symbolic link or Windows junction on the lexical spelling and,
+- `link`: one per symbolic link or Windows junction on the target as supplied and,
   transitively, on each link's destination path, queried at the link's parent
-  directory. Git follows links, so a query through the link would report only its
-  destination.
+  directory. A `..` after a link leaves the link's real directory, as the
+  filesystem does, so that link is still recorded. Git follows links, so a query
+  through the link would report only its destination.
 - `resolved`: the link-resolved spelling.
 
 Each point names its path and either the innermost repository (worktree root,
@@ -234,7 +235,8 @@ common Git directory, worktree roots, and `(st_dev, st_ino)` of the common
 directory from `os.stat`), proven absence or a bounded error code. A missing path
 is queried at its nearest existing ancestor, by its real path, so a link into a
 directory outside Git is absent rather than inheriting the link holder's
-repository.
+repository. Only a component that does not exist is skipped on the way; any other
+probe failure, such as an overlong name, is `UNREADABLE`.
 
 | Point | Path | Repository |
 | --- | --- | --- |
@@ -258,8 +260,9 @@ unsupported repository), `GIT_TIMEOUT` and `UNREADABLE` (filesystem error or
 undecodable path).
 
 **Workspace membership** holds when a session worktree root, matched by path or
-filesystem identity, is on the lexical or resolved spelling, or when any point's
-repository has the session repository's common Git directory.
+filesystem identity, is on the lexical, any link or the resolved spelling, or when
+any point's repository has the session repository's common Git directory. A
+failed query at a link therefore cannot hide a root that holds it.
 
 Limits: resolution writes nothing, keeps results only for one call and scans no
 siblings or home directories. Git inherits the process environment, including

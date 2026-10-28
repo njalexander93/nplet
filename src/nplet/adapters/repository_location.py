@@ -8,7 +8,9 @@ writes, never caches beyond the caller's per-call memo and never decides admissi
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
+import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -81,6 +83,8 @@ class Location(NamedTuple):
 
 
 Memo = dict[str, tuple[Identity | None, str | None]]
+# Probe errors that mean a path component does not exist.
+MISSING = (errno.ENOENT, errno.ENOTDIR)
 
 
 def discover(directory: Path, memo: Memo) -> tuple[Identity | None, str | None]:
@@ -121,7 +125,7 @@ def links(path: Path) -> list[Path]:
     """List every link entry on a path and, transitively, on each link's destination path.
 
     Args:
-        path: Normalized absolute spelling.
+        path: Absolute spelling, possibly with ``..`` components.
 
     Returns:
         Symbolic links and Windows junctions in discovery order, each once.
@@ -129,17 +133,21 @@ def links(path: Path) -> list[Path]:
     found: list[Path] = []
     pending = [path]
     # The list grows while iterating; each new link adds its destination to scan.
-    for current in pending:
-        for component in (*reversed(current.parents[:-1]), current):
-            if component not in found and (
-                os.path.islink(component) or os.path.isjunction(component)
-            ):
-                found.append(component)
+    for spelling in pending:
+        current = Path(spelling.anchor)
+        for part in spelling.parts[1:]:
+            # ``..`` leaves the real directory, as the filesystem does, so a link before
+            # it is still visited instead of being collapsed away.
+            if part == "..":
+                current = Path(os.path.realpath(current)).parent
+                continue
+            current /= part
+            if current not in found and (os.path.islink(current) or os.path.isjunction(current)):
+                found.append(current)
                 # A relative target is read from the link's real directory, not the
                 # spelling that reached it. An unreadable link cannot be followed further.
                 with contextlib.suppress(OSError):
-                    destination = Path(os.path.realpath(component.parent)) / os.readlink(component)
-                    pending.append(Path(os.path.normpath(destination)))
+                    pending.append(Path(os.path.realpath(current.parent)) / os.readlink(current))
     return found
 
 
@@ -155,11 +163,23 @@ def point(kind: str, path: Path, start: Path, memo: Memo) -> Point:
     Returns:
         The point with its repository, absence or error.
     """
-    # Walk up to an existing directory; a dangling link on the way cannot be located.
+    # Climb only past genuinely missing components; any other probe failure is
+    # unreadable, and an entry that exists only as a link is dangling.
     directory = start
-    while not os.path.isdir(directory):
-        if os.path.lexists(directory) and not os.path.exists(directory):
-            return Point(kind, path, None, "DANGLING_LINK")
+    while True:
+        try:
+            if stat.S_ISDIR(os.stat(directory).st_mode):
+                break
+        except OSError as target:
+            if target.errno not in (*MISSING, errno.ELOOP):
+                return Point(kind, path, None, "UNREADABLE")
+            try:
+                os.lstat(directory)
+            except OSError as entry:
+                if entry.errno not in MISSING:
+                    return Point(kind, path, None, "UNREADABLE")
+            else:
+                return Point(kind, path, None, "DANGLING_LINK")
         # A missing filesystem root has no ancestor left to query.
         if directory.parent == directory:
             return Point(kind, path, None, "UNREADABLE")
@@ -197,8 +217,10 @@ def resolve(
     absolute = Path(cwd, target)
     lexical = Path(os.path.normpath(absolute))
     points = [point("lexical", lexical, lexical, memo)]
-    spellings = [lexical]
-    points += [point("link", link, link.parent, memo) for link in links(lexical)]
+    # Links come from the unnormalized spelling: ``..`` after a link leaves its destination.
+    holders = links(absolute)
+    spellings = [lexical, *holders]
+    points += [point("link", link, link.parent, memo) for link in holders]
     # Resolve links; an unresolvable spelling is a failed point, not absence.
     try:
         resolved = absolute.resolve(strict=False)
@@ -207,7 +229,8 @@ def resolve(
     else:
         points.append(point("resolved", resolved, resolved, memo))
         spellings.append(resolved)
-    # Membership holds by a root on either spelling or by any point in the session family.
+    # Membership holds by a root on any spelling, link holders included, or by any point
+    # in the session family, so a failed query never hides a known root.
     workspace = any(
         is_root(ancestor) for spelling in spellings for ancestor in (spelling, *spelling.parents)
     ) or (

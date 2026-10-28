@@ -271,7 +271,8 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
     """Keep every hop's repository, and membership through any hop, for each session.
 
     Covers inward, outward, reverse and chained links, a link whose destination is a
-    link, and a link into a non-Git directory, alone and after a direct target.
+    link or passes through one before ``..``, and a link into a non-Git directory,
+    alone and after a direct target.
 
     Args:
         tmp_path: Disposable parent.
@@ -291,6 +292,8 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
     (d / "dir/l4").symlink_to(Path("../l2b"), target_is_directory=True)
     (c / "in").symlink_to(c / "notes", target_is_directory=True)
     (c / "pl").symlink_to(plain, target_is_directory=True)
+    # ``..`` after a link leaves the link's destination, so that link is still a hop.
+    (c / "up").symlink_to(d / "l2b/..", target_is_directory=True)
     # A link out of Git is absent on its own, not order-dependent.
     assert seen(locate(a, str(c / "pl/file.md"))[0]) == [
         want("lexical", c / "pl/file.md"),
@@ -317,6 +320,12 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
             want("link", d / "l2b", d),
             want("resolved", v / "notes/file.md", v),
         ],
+        c / "up/file.md": [
+            want("lexical", c / "up/file.md", v),
+            want("link", c / "up", c),
+            want("link", d / "l2b", d),
+            want("resolved", v / "file.md", v),
+        ],
         c / "in/file.md": [
             want("lexical", c / "in/file.md", c),
             want("link", c / "in", c),
@@ -340,12 +349,12 @@ def test_c3_c4_links_keep_link_and_destination_repositories(tmp_path: Path) -> N
         ],
     }
     # Membership per target: plain, link out of Git, destination chain, relative chain,
-    # inward link, outward link, path chain, reverse link.
+    # ``..`` after a link, inward link, outward link, path chain, reverse link.
     for session, workspace in [
-        (a, [False, False, False, False, False, False, False, False]),
-        (c, [False, True, True, True, True, True, True, True]),
-        (d, [False, False, True, True, False, False, True, False]),
-        (v, [False, False, True, True, False, True, True, True]),
+        (a, [False, False, False, False, False, False, False, False, False]),
+        (c, [False, True, True, True, True, True, True, True, True]),
+        (d, [False, False, True, True, True, False, False, True, False]),
+        (v, [False, False, True, True, True, False, True, True, True]),
     ]:
         locations = locate(session, *map(str, expected))
         assert [seen(loc) for loc in locations] == list(expected.values())

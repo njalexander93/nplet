@@ -1,5 +1,6 @@
 """Verify read-only target location evidence with stubbed discovery boundaries."""
 
+import errno
 import os
 import subprocess
 from pathlib import Path
@@ -269,21 +270,113 @@ def test_link_points_query_each_link_parent(
     assert result.workspace is False
 
 
-def test_dangling_link_on_the_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A link to a missing target on the walk to an existing directory is dangling.
+def test_failed_middle_hop_keeps_root_membership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session root holding only a middle link keeps membership when its query fails.
 
     Args:
-        tmp_path: Directory holding the modeled dangling link.
-        monkeypatch: Replaces Git discovery and link presence.
+        tmp_path: Parent of the modeled A/start -> D/hop -> V/notes chain.
+        monkeypatch: Replaces Git discovery and link detection.
     """
-    dangling = tmp_path / "gone"
-    lexists = os.path.lexists
-    fake_discovery(monkeypatch, {})
-    monkeypatch.setattr(
-        location.os.path, "lexists", lambda path: Path(path) == dangling or lexists(path)
-    )
+    # Real paths, so the hop reached after ``..`` compares equal to the modeled link.
+    base = tmp_path.resolve()
+    start, hop, notes = base / "A/start", base / "D/hop", base / "V/notes"
+    for directory in (start, hop, notes):
+        directory.mkdir(parents=True)
+    # The existing target file climbs to its directory; ``..`` is walked, not collapsed.
+    (start / "f.md").touch()
+    destinations = {start: base / "D/../D/hop", hop: notes}
+    monkeypatch.setattr(location.os.path, "islink", lambda path: Path(path) in destinations)
+    monkeypatch.setattr(location.os, "readlink", lambda path: str(destinations[Path(path)]))
+
+    def project_repository(path: str) -> None:
+        """Time out at the middle hop's directory and find nothing elsewhere.
+
+        Args:
+            path: Queried real directory.
+
+        Raises:
+            subprocess.TimeoutExpired: For the hop's parent.
+        """
+        if Path(path) == hop.parent:
+            raise subprocess.TimeoutExpired(["git"], 2)
+
+    monkeypatch.setattr(location.core, "project_repository", project_repository)
+    result = location.resolve(str(base), "A/start/f.md", None, lambda p: p == hop.parent, {})
+    assert [(p.kind, p.path, p.error) for p in result.points if p.kind == "link"] == [
+        ("link", start, None),
+        ("link", hop, "GIT_TIMEOUT"),
+    ]
+    assert result.workspace is True
+
+
+def fail_probe(monkeypatch: pytest.MonkeyPatch, name: str, path: Path, code: int | None) -> None:
+    """Make one ``os`` probe of one path fail, or succeed when ``code`` is None.
+
+    Args:
+        monkeypatch: Installs the probe for the case.
+        name: ``stat`` or ``lstat``.
+        path: The probed path; other paths keep the real probe.
+        code: Raised errno; None answers with the parent's real metadata.
+    """
+    real = getattr(os, name)
+
+    def probe(candidate: object, *args: object, **kwargs: object) -> os.stat_result:
+        """Answer the modeled path and delegate every other probe.
+
+        Args:
+            candidate: Probed path or descriptor.
+            args: Positional probe arguments.
+            kwargs: Keyword probe arguments.
+
+        Returns:
+            The probe result.
+
+        Raises:
+            OSError: The modeled failure for ``path``.
+        """
+        if candidate != path:
+            return real(candidate, *args, **kwargs)
+        if code is None:
+            return real(path.parent)
+        raise OSError(code, os.strerror(code), str(path))
+
+    monkeypatch.setattr(location.os, name, probe)
+
+
+@pytest.mark.parametrize(
+    ("stat_code", "lstat_code", "error"),
+    [
+        (errno.ENOENT, None, "DANGLING_LINK"),
+        (errno.ELOOP, None, "DANGLING_LINK"),
+        (errno.ENAMETOOLONG, errno.ENAMETOOLONG, "UNREADABLE"),
+        (errno.ENOENT, errno.EACCES, "UNREADABLE"),
+    ],
+)
+def test_probe_failures_on_the_walk_are_not_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stat_code: int,
+    lstat_code: int | None,
+    error: str,
+) -> None:
+    """A link-only entry is dangling and any other probe failure is unreadable, never absence.
+
+    Args:
+        tmp_path: Existing non-Git parent of the failing component.
+        monkeypatch: Replaces Git discovery and the component's probes.
+        stat_code: Errno of following the component.
+        lstat_code: Errno of reading the entry itself; None when it exists.
+        error: Expected code.
+    """
+    component = tmp_path / "gone"
+    calls = fake_discovery(monkeypatch, {})
+    fail_probe(monkeypatch, "stat", component, stat_code)
+    fail_probe(monkeypatch, "lstat", component, lstat_code)
     result = location.resolve(str(tmp_path), "gone/file.md", None, never_root, {})
-    assert {p.error for p in result.points} == {"DANGLING_LINK"}
+    assert {p.error for p in result.points} == {error}
+    assert calls == []
 
 
 def test_missing_filesystem_root_is_unreadable(
@@ -293,10 +386,13 @@ def test_missing_filesystem_root_is_unreadable(
 
     Args:
         tmp_path: Session working directory.
-        monkeypatch: Replaces Git discovery and directory presence.
+        monkeypatch: Replaces Git discovery and every probe on the target's path.
     """
     calls = fake_discovery(monkeypatch, {})
-    monkeypatch.setattr(location.os.path, "isdir", lambda _path: False)
+    target = tmp_path / "a.md"
+    for path in (target, *target.parents):
+        fail_probe(monkeypatch, "stat", path, errno.ENOENT)
+        fail_probe(monkeypatch, "lstat", path, errno.ENOENT)
     result = location.resolve(str(tmp_path), "a.md", None, never_root, {})
     assert {p.error for p in result.points} == {"UNREADABLE"}
     assert calls == []
