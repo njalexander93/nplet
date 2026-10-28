@@ -25,7 +25,7 @@ class Identity(NamedTuple):
     """
 
     repository: core.Repository
-    common_identity: list[int]
+    common_identity: tuple[int, int]
 
     def key(self) -> tuple[str, tuple[int, int]]:
         """Build the comparison key that identifies the repository.
@@ -33,10 +33,7 @@ class Identity(NamedTuple):
         Returns:
             The normalized common Git directory and its device/inode pair.
         """
-        return (
-            os.path.normpath(self.repository.common),
-            (self.common_identity[0], self.common_identity[1]),
-        )
+        return os.path.normpath(self.repository.common), self.common_identity
 
 
 class Point(NamedTuple):
@@ -82,7 +79,7 @@ class Location(NamedTuple):
         return "resolved" if any(point.repository for point in self.points) else "absent"
 
 
-Memo = dict[Path, Identity | str | None]
+Memo = dict[str, tuple[Identity | None, str | None]]
 
 
 def discover(directory: Path, memo: Memo) -> tuple[Identity | None, str | None]:
@@ -90,35 +87,31 @@ def discover(directory: Path, memo: Memo) -> tuple[Identity | None, str | None]:
 
     Args:
         directory: Existing directory to query.
-        memo: Invocation-local results keyed by directory.
+        memo: Invocation-local results keyed by the directory's real path.
 
     Returns:
         The repository identity and None, or None and a bounded error code; both are
         None when the directory is proven outside every repository.
     """
-    # Query Git and stat the common directory only for a directory not seen in this call.
-    if directory not in memo:
-        result: Identity | str | None
+    # Git resolves links itself, so alias spellings of one directory share one query.
+    key = os.path.realpath(directory)
+    if key not in memo:
         try:
             repository = core.project_repository(directory)
             if repository is None:
-                result = None
+                memo[key] = (None, None)
             else:
                 info = os.stat(repository.common)
-                result = Identity(repository, [info.st_dev, info.st_ino])
-        # Map every discovery failure to its finite code instead of absence.
+                memo[key] = (Identity(repository, (info.st_dev, info.st_ino)), None)
+        # Keep every discovery failure as its bounded code instead of absence;
+        # project_repository raises only REPOSITORY_MISMATCH or HOST_UNSUPPORTED.
         except core.WorkspaceError as error:
-            result = (
-                "HOST_UNSUPPORTED" if error.code == "HOST_UNSUPPORTED" else "REPOSITORY_MISMATCH"
-            )
+            memo[key] = (None, error.code)
         except subprocess.TimeoutExpired:
-            result = "GIT_TIMEOUT"
+            memo[key] = (None, "GIT_TIMEOUT")
         except OSError:
-            result = "UNREADABLE"
-        memo[directory] = result
-    # Split the cached result into its identity or error.
-    cached = memo[directory]
-    return (None, cached) if isinstance(cached, str) else (cached, None)
+            memo[key] = (None, "UNREADABLE")
+    return memo[key]
 
 
 def point(kind: str, path: Path, start: Path, memo: Memo) -> Point:

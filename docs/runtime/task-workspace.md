@@ -229,7 +229,7 @@ deduplicated:
 - `resolved`: the link-resolved spelling.
 
 Each point names its path and either the innermost repository (worktree root,
-common Git directory, worktree roots, and `[st_dev, st_ino]` of the common
+common Git directory, worktree roots, and `(st_dev, st_ino)` of the common
 directory from `os.stat`), proven absence or a bounded error code. A missing path
 is queried at its nearest existing ancestor.
 

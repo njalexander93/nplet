@@ -89,7 +89,6 @@ def never_root(_path: Path) -> bool:
     [
         (core.WorkspaceError("HOST_UNSUPPORTED"), "HOST_UNSUPPORTED"),
         (core.WorkspaceError("REPOSITORY_MISMATCH"), "REPOSITORY_MISMATCH"),
-        (core.WorkspaceError("REPOSITORY_ABSENT"), "REPOSITORY_MISMATCH"),
         (subprocess.TimeoutExpired(["git"], 2), "GIT_TIMEOUT"),
         (PermissionError("denied"), "UNREADABLE"),
     ],
@@ -151,7 +150,7 @@ def test_identity_and_memo_cover_a_whole_call(
     # Both targets and both spellings share the one existing directory.
     assert calls == [tmp_path]
     info = os.stat(session.common)
-    expected = location.Identity(session, [info.st_dev, info.st_ino])
+    expected = location.Identity(session, (info.st_dev, info.st_ino))
     for result, target in zip(locations, ("a.md", "new/b.md"), strict=True):
         assert result.target == target
         assert result.workspace is True
