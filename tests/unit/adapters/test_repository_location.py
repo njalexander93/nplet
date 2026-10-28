@@ -270,6 +270,28 @@ def test_link_points_query_each_link_parent(
     assert result.workspace is False
 
 
+def test_unreadable_link_is_recorded_but_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link whose target cannot be read still gets its point; the walk continues.
+
+    Args:
+        tmp_path: Directory holding the modeled link.
+        monkeypatch: Replaces Git discovery, link detection and link reading.
+    """
+    link = tmp_path / "link"
+    link.mkdir()
+    fake_discovery(monkeypatch, {})
+    monkeypatch.setattr(location.os.path, "islink", lambda path: Path(path) == link)
+    monkeypatch.setattr(location.os, "readlink", Mock(side_effect=PermissionError("denied")))
+    result = location.resolve(str(tmp_path), "link/a.md", None, never_root, {})
+    assert [(p.kind, p.path) for p in result.points] == [
+        ("lexical", link / "a.md"),
+        ("link", link),
+        ("resolved", link / "a.md"),
+    ]
+
+
 def test_failed_middle_hop_keeps_root_membership(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

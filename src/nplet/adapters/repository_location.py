@@ -7,7 +7,6 @@ writes, never caches beyond the caller's per-call memo and never decides admissi
 
 from __future__ import annotations
 
-import contextlib
 import errno
 import os
 import stat
@@ -133,9 +132,14 @@ def links(path: Path) -> tuple[list[Path], str | None]:
     """
     found: list[Path] = []
     failure = None
-    pending = [path]
-    # The list grows while iterating; each new link adds its destination to scan.
-    for spelling in pending:
+
+    def walk(spelling: Path) -> None:
+        """Visit one spelling's components, expanding each new link where it is met.
+
+        Args:
+            spelling: Absolute spelling to walk.
+        """
+        nonlocal failure
         current = Path(spelling.anchor)
         for part in spelling.parts[1:]:
             # ``..`` leaves the real directory, as the filesystem does, so a link before
@@ -151,8 +155,14 @@ def links(path: Path) -> tuple[list[Path], str | None]:
                 found.append(current)
                 # A relative target is read from the link's real directory, not the
                 # spelling that reached it. An unreadable link cannot be followed further.
-                with contextlib.suppress(OSError):
-                    pending.append(Path(os.path.realpath(current.parent)) / os.readlink(current))
+                try:
+                    destination = Path(os.path.realpath(current.parent)) / os.readlink(current)
+                except OSError:
+                    continue
+                # Depth first, as traversal meets the destination before later components.
+                walk(destination)
+
+    walk(path)
     return found, failure
 
 

@@ -225,7 +225,8 @@ deduplicated:
 - `lexical`: the normalized target joined to the session working directory.
 - `link`: one per symbolic link or Windows junction on the target as supplied and,
   transitively, on each link's destination path, queried at the link's parent
-  directory. A `..` after a link leaves the link's real directory, as the
+  directory. A link's destination chain is listed before later components, in
+  the order the filesystem meets them. A `..` after a link leaves the link's real directory, as the
   filesystem does, so that link is still recorded. Git follows links, so a query
   through the link would report only its destination.
 - `resolved`: the link-resolved spelling.
