@@ -8,6 +8,7 @@ import shlex
 from collections.abc import Callable
 from pathlib import Path
 
+from nplet.adapters import repository_location
 from nplet.lifecycle import task_workspace as core
 
 LINEAR_OPERATIONS = frozenset(
@@ -476,3 +477,30 @@ def edit_roles(event: core.JSONObject, repository: core.Repository | None) -> li
     # One worktree list covers the whole patch or single-file mutation.
     is_root = root_test([] if repository is None else repository.trees)
     return [target_role(event["cwd"], target, is_root) for target in targets]
+
+
+def edit_locations(
+    event: core.JSONObject, repository: core.Repository | None
+) -> list[repository_location.Location]:
+    """Resolve every deterministic native edit target to repository location evidence.
+
+    Args:
+        event: Validated native tool and argument envelope.
+        repository: The session's carried project repository; None when the session
+            lies outside every repository.
+
+    Returns:
+        One location per target in target order, or an empty list for an unknown
+        edit shape.
+    """
+    # Unknown edits have no targets to locate.
+    targets = edit_targets(event["tool_name"], event["tool_input"])
+    if not targets:
+        return []
+    # One root predicate and one discovery memo cover every target of the call.
+    is_root = root_test([] if repository is None else repository.trees)
+    memo: repository_location.Memo = {}
+    return [
+        repository_location.resolve(event["cwd"], target, repository, is_root, memo)
+        for target in targets
+    ]
