@@ -319,6 +319,7 @@ def test_approval_on_second_review_page_counts(tmp_path: Path) -> None:
     [
         ({PULL_URL: OSError("down")}, {}),
         ({PULL_URL: (404, {})}, {}),
+        ({PULL_URL: []}, {}),
         ({USER_URL: (401, {})}, {}),
         ({USER_URL: {"login": ""}}, {}),
         ({reviews_url(1): (500, None)}, {}),
