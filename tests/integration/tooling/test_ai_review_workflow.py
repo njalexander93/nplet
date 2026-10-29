@@ -33,7 +33,7 @@ def load() -> dict[Any, Any]:
 
 
 def test_triggers_inputs_and_concurrency() -> None:
-    """Require CI-completion and dispatch triggers only, the head-sha input and per-PR cancellation.
+    """Require CI-completion and dispatch triggers, the head-sha input and no workflow concurrency.
 
     Raises:
         AssertionError: A trigger, input or concurrency setting drifted.
@@ -48,11 +48,8 @@ def test_triggers_inputs_and_concurrency() -> None:
     assert set(inputs) == {"pr-number", "head-sha"}
     assert inputs["head-sha"]["required"] is True
     assert inputs["head-sha"]["type"] == "string"
-    # Require one cancelling group per PR.
-    assert workflow["concurrency"] == {
-        "group": f"ai-review-{NUMBER}",
-        "cancel-in-progress": True,
-    }
+    # Rejected CI completions must not cancel an admitted review.
+    assert "concurrency" not in workflow
 
 
 def test_size_job_runs_trusted_gate_without_secrets() -> None:
@@ -82,15 +79,15 @@ def test_size_job_runs_trusted_gate_without_secrets() -> None:
     assert gate["run"] == "python3 scripts/pr_size_gate.py"
     assert gate["env"] == GATE_ENV
     assert size["outputs"] == {
-        k: f"${{{{ steps.gate.outputs.{k} }}}}" for k in ("tier", "draft", "head", "base")
+        k: f"${{{{ steps.gate.outputs.{k} }}}}" for k in ("tier", "ready", "head", "base")
     }
 
 
 def test_reviewer_jobs_depend_on_size_tier_and_forward_shas() -> None:
-    """Require size-tier and non-draft eligibility and expected SHAs forwarded to the reviewer.
+    """Require size-tier and ready eligibility, per-PR cancellation and forwarded SHAs.
 
     Raises:
-        AssertionError: A review can start without the size tier, draft check or bound SHAs.
+        AssertionError: A review can start without the size tier, ready check or bound SHAs.
     """
     # Require the dependency graph.
     jobs = load()["jobs"]
@@ -101,8 +98,10 @@ def test_reviewer_jobs_depend_on_size_tier_and_forward_shas() -> None:
     condition = " ".join(resolve["if"].split())
     assert condition == (
         "needs.size.outputs.tier == 'auto' && "
-        "(github.event_name == 'workflow_dispatch' || needs.size.outputs.draft == 'false')"
+        "(github.event_name == 'workflow_dispatch' || needs.size.outputs.ready == 'true')"
     )
+    # Only an admitted review joins the per-PR cancelling group.
+    assert review["concurrency"] == {"group": f"ai-review-{NUMBER}", "cancel-in-progress": True}
     # Require the manual number converted for the reviewer's typed number input.
     assert review["with"]["pr-number"] == (
         "${{ github.event.workflow_run.pull_requests[0].number || fromJSON(inputs.pr-number) }}"
@@ -153,6 +152,7 @@ def test_workflow_env_names_match_gate_contract(tmp_path: Path) -> None:
             "additions": 3,
             "deletions": 2,
             "draft": False,
+            "state": "open",
         }
         return (200, pull) if method == "GET" else (201, None)
 
@@ -166,5 +166,5 @@ def test_workflow_env_names_match_gate_contract(tmp_path: Path) -> None:
         ("total", "5"),
         ("head", head),
         ("base", base),
-        ("draft", "false"),
+        ("ready", "true"),
     ]

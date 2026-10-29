@@ -261,8 +261,12 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
         "total": "" if total is None else str(total),
         "head": head,
         "base": (base or "") if total is not None else "",
-        # Only a PR GitHub reports as non-draft is eligible for automatic review.
-        "draft": "false" if isinstance(pull, dict) and pull.get("draft") is False else "true",
+        # Only a PR GitHub reports as open and non-draft is eligible for automatic review.
+        "ready": (
+            "true"
+            if isinstance(pull, dict) and pull.get("state") == "open" and pull.get("draft") is False
+            else "false"
+        ),
     }
 
     # Post the commit status for the admitted head.

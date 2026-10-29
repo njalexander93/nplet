@@ -15,10 +15,6 @@ on:
         description: Full head commit SHA to review; must be the PR's current head
         required: true
         type: string
-# Cancellation stops only older runs; it never touches published reviews or threads.
-concurrency:
-  group: ai-review-${{ github.event.workflow_run.pull_requests[0].number || inputs.pr-number }}
-  cancel-in-progress: true
 permissions:
   contents: read
   issues: read
@@ -38,7 +34,7 @@ jobs:
       statuses: write
     outputs:
       tier: ${{ steps.gate.outputs.tier }}
-      draft: ${{ steps.gate.outputs.draft }}
+      ready: ${{ steps.gate.outputs.ready }}
       head: ${{ steps.gate.outputs.head }}
       base: ${{ steps.gate.outputs.base }}
     steps:
@@ -58,7 +54,7 @@ jobs:
     needs: size
     if: >-
       needs.size.outputs.tier == 'auto' &&
-      (github.event_name == 'workflow_dispatch' || needs.size.outputs.draft == 'false')
+      (github.event_name == 'workflow_dispatch' || needs.size.outputs.ready == 'true')
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -73,6 +69,11 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
   review:
     needs: [size, resolve-reviewer]
+    # Only an admitted review cancels an older one, so rejected CI completions cannot.
+    # Cancellation never touches published reviews or threads.
+    concurrency:
+      group: ai-review-${{ github.event.workflow_run.pull_requests[0].number || inputs.pr-number }}
+      cancel-in-progress: true
     uses: njalexander93/ai-reviewer/.github/workflows/review.yml@main
     with:
       # Convert the dispatch input explicitly for the reviewer's typed number input.

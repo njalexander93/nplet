@@ -188,7 +188,7 @@ whole-PR additions plus deletions against the base and reports the result in the
 
 | Changed lines | Result |
 | --- | --- |
-| ≤ 2,000 | Status passes; review runs automatically for a non-draft PR. |
+| ≤ 2,000 | Status passes; review runs automatically for an open, non-draft PR. |
 | > 2,000 | Review is skipped and the status fails. Split the PR. |
 | Unknown or invalid totals | Status fails with "Could not determine PR size". |
 | `head-sha` is not the PR's current head | Run fails without posting a status. |
@@ -206,9 +206,9 @@ and head/base checks apply.
 gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
 ```
 
-A newer run for the same PR cancels older ones. If the head then has no
-`PR Size Check`, re-run that commit's AI review run or dispatch with the current
-head SHA. A CI run for a commit that is no longer the PR head fails the size gate
+A newly admitted review for a PR cancels that PR's older review still in progress.
+Failed, cancelled or stale CI completions are rejected before that point, so they
+never cancel a review. A CI run for a commit that is no longer the PR head fails the size gate
 without posting a status.
 
 ## Tests for the checking tools
@@ -235,7 +235,7 @@ These tests protect the validation machinery itself:
   Its integration counterpart checks that independent failures remain visible.
 - [test_pr_size_gate.py](../../tests/unit/tooling/test_pr_size_gate.py) and
   [test_ai_review_workflow.py](../../tests/integration/tooling/test_ai_review_workflow.py)
-  check the size limit, status and summary text, SHA binding, draft output and
+  check the size limit, status and summary text, SHA binding, ready output and
   the workflow's CI trigger and skip conditions. They do not execute GitHub's scheduler.
 
 ## Merge enforcement and human review
