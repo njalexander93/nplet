@@ -109,9 +109,42 @@ def test_reviewer_jobs_depend_on_size_tier_and_forward_shas() -> None:
     # Require the reviewer to receive the admitted head and base.
     assert review["with"]["expected-head-sha"] == "${{ needs.size.outputs.head }}"
     assert review["with"]["expected-base-sha"] == "${{ needs.size.outputs.base }}"
-    # Require secrets only in the reviewer call.
+    # Require secrets only in the reviewer and announcer calls.
     for name, job in jobs.items():
-        assert ("secrets." in yaml.safe_dump(job)) == (name == "review")
+        assert ("secrets." in yaml.safe_dump(job)) == (name in ("review", "notify"))
+
+
+def test_notify_job_calls_local_announcer_after_review() -> None:
+    """Require the ready announcement to follow a review with the admitted SHAs only.
+
+    Raises:
+        AssertionError: The announcer runs without a review, receives other SHAs,
+            more secrets or write permissions, or is not the local workflow.
+    """
+    # Require the dependency graph and the review-ran condition.
+    notify = load()["jobs"]["notify"]
+    assert notify["needs"] == ["size", "review"]
+    assert notify["if"] == "needs.review.result == 'success'"
+    # Require the local reusable announcer with read-only permissions.
+    assert notify["uses"] == "./.github/workflows/pr-announce.yml"
+    assert notify["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "read",
+    }
+    # Require the same PR number as the review and the size gate's admitted SHAs.
+    assert notify["with"] == {
+        "pr-number": (
+            "${{ github.event.workflow_run.pull_requests[0].number || fromJSON(inputs.pr-number) }}"
+        ),
+        "head-sha": "${{ needs.size.outputs.head }}",
+        "base-sha": "${{ needs.size.outputs.base }}",
+    }
+    # Require exactly the two named secrets, never inherited ones.
+    assert notify["secrets"] == {
+        "DISCORD_PR_WEBHOOK_URL": "${{ secrets.DISCORD_PR_WEBHOOK_URL }}",
+        "AI_REVIEWER_TOKEN": "${{ secrets.AI_REVIEWER_TOKEN }}",
+    }
 
 
 def test_workflow_env_names_match_gate_contract(tmp_path: Path) -> None:
