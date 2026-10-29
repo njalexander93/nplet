@@ -189,8 +189,9 @@ Protected implementation is every file edit inside a project code repository,
 whatever its extension or purpose, plus package commands and other mutation-capable
 shell commands. The project code repositories are the session's Git repository and
 its linked worktrees. The gate covers only those. A separate clone or sibling
-repository of the same project is gated only by a session rooted inside it;
-multi-repository project identity is deferred to NPLET-90. A note, draft or README inside them is protected
+repository of the same project is gated only by a session rooted inside it.
+[Target repository evidence](#target-repository-identity-and-location-evidence)
+does not change this gate yet. A note, draft or README inside them is protected
 implementation. Unknown or mixed effects remain readiness-gated or unsupported. The [contributor procedure](contributor-workflow.md)
 separately requires explicit roadmap approval. Readiness verifies delivery facts;
 it does not authenticate human approval.
@@ -213,6 +214,74 @@ parent classification. Task-free work never broadens child authority. A completi
 settles only existing recorded admission by its native call ID or validated local
 poll handle. It does not classify changed targets again or create missing state.
 Corrupt registered or transactional state remains an error.
+
+### Target repository identity and location evidence
+
+`edit_locations` in `src/nplet/adapters/task_boundary.py` resolves every target of a
+supported edit shape to read-only evidence of the Git repositories that hold it.
+Each target gets one point per discovery spelling, in path order and never
+deduplicated:
+
+- `lexical`: the normalized target joined to the session working directory.
+- `link`: one per symbolic link or Windows junction on the target as supplied and,
+  transitively, on each link's destination path, queried at the link's parent
+  directory. A link's destination chain is listed before later components, in
+  the order the filesystem meets them. A `..` after a link leaves the link's real directory, as the
+  filesystem does, so that link is still recorded. Git follows links, so a query
+  through the link would report only its destination.
+- `resolved`: the link-resolved spelling.
+
+Each point names its path and either the innermost repository (worktree root,
+common Git directory, worktree roots, and `(st_dev, st_ino)` of the common
+directory from `os.stat`), proven absence or a bounded error code. A missing path
+is queried at its nearest existing ancestor, by its real path, so a link into a
+directory outside Git is absent rather than inheriting the link holder's
+repository. Only a component that does not exist is skipped on the way; a file the
+path continues below, or any other probe failure such as an overlong or unencodable
+name, is `UNREADABLE`. A `..`
+anywhere below a link whose destination is missing fails the `resolved` point
+with `DANGLING_LINK`, because the filesystem stops at that link; a `..` after a
+component the filesystem cannot pass for another reason, such as a file or an overlong name,
+fails it with `UNREADABLE`. At most 64 link
+points are recorded per target, more than Linux (40) or macOS (32) follows in one
+lookup; a longer chain stops there and fails the `resolved` point with
+`UNREADABLE`.
+
+| Point | Path | Repository |
+| --- | --- | --- |
+| lexical | `repo-C/link/file.md` | V (Git follows the link) |
+| link | `repo-C/link` (queried at `repo-C`) | C |
+| resolved | `repo-V/notes/file.md` | V |
+
+*Example: `repo-C/link` points to `repo-V/notes`.*
+
+**Identity** is the normalized common Git directory plus its device and inode.
+Linked worktrees share it; separate clones and copied `.task` registration do not.
+Names, remotes, branches and `.task` registration are not identity.
+
+**State** is derived, not stored: `unresolved` when any point has an error,
+otherwise `resolved` when any point has a repository, otherwise `absent`. A failure
+is never treated as absence. Error codes: `INVALID_TARGET` (non-string, empty or NUL
+target), `DANGLING_LINK`, `REPOSITORY_MISMATCH` (unusable `.git`, malformed
+gitfile, stale worktree, a path inside a bare repository or other Git failure),
+`HOST_UNSUPPORTED` (passed through when the repository helper reports an
+unsupported repository), `GIT_TIMEOUT` and `UNREADABLE` (filesystem error or
+undecodable path).
+
+**Workspace membership** holds when a session worktree root, matched by path or
+filesystem identity, is on the lexical, any link (as reached or in its real
+directory) or the resolved spelling, or when
+any point's repository has the session repository's common Git directory. A
+failed query at a link therefore cannot hide a root that holds it.
+
+Limits: resolution writes nothing, keeps results only for one call and scans no
+siblings or home directories. Git inherits the process environment, including
+`GIT_*` variables. A repository owned by another user fails Git's
+`safe.directory` check and reports `REPOSITORY_MISMATCH`. Hard-link aliases are
+not inventoried. Junction link points are implemented but not yet exercised by
+native Windows tests. No adapter calls `edit_locations` yet, so task admission is
+unchanged.
+Other location facts may be layered on this evidence later.
 
 ### Bootstrap exceptions
 
