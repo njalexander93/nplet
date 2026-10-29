@@ -321,7 +321,8 @@ without error.
 | --- | --- |
 | `UNSAFE_PATH` | Symlinked component or file, wrong owner, group- or world-writable file, multiple hard links, or non-regular file |
 | `SIZE_LIMIT` | File larger than 64 KiB |
-| `UNREADABLE` | Other filesystem failure or unencodable path |
+| `UNREADABLE` | Other filesystem or discovery failure, or a POSIX unencodable path (Windows reports `UNSAFE_PATH`) |
+| `HOST_UNSUPPORTED_FILESYSTEM` | Windows policy directory not on a fixed NTFS volume |
 | `IN_REPOSITORY` | Policy directory inside any Git repository, including a vault, so a declaration copied into a vault has no effect |
 | `INVALID_CONFIG` | Invalid UTF-8, JSON or schema |
 | `DUPLICATE_VAULT` | The same path or identity declared twice |
@@ -342,6 +343,9 @@ To declare a vault, read its values, then write the file yourself (for example
 git -C <vault> rev-parse --path-format=absolute --git-common-dir
 python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(s.st_dev, s.st_ino)' <that dir>
 ```
+
+Declare Git's output exactly, including case; on Windows pass it through
+`os.path.normpath` first, because Git prints forward slashes.
 
 This is user-controlled workflow configuration, not containment against the
 same user.

@@ -138,9 +138,9 @@ def test_c1_declared_vaults_and_their_worktrees_match_only(tmp_path: Path) -> No
         assert not any(flags(base, repo / "f.md", exemptions)), repo
 
 
-@pytest.mark.parametrize("change", ["replaced_git_directory", "changed_identity"])
+@pytest.mark.parametrize("change", ["replaced_git_directory", "moved_vault", "changed_identity"])
 def test_c2_replaced_vault_or_changed_identity_stops_matching(tmp_path: Path, change: str) -> None:
-    """Stop matching on the next load after ``.git`` is replaced or the identity changes.
+    """Stop matching on the next load after ``.git`` is replaced or moved, or the identity changes.
 
     Args:
         tmp_path: Disposable parent.
@@ -156,6 +156,10 @@ def test_c2_replaced_vault_or_changed_identity_stops_matching(tmp_path: Path, ch
         (v / ".git").rename(base / "old-git")
         init_repo(v)
         assert declared(v) != entry
+    # A moved vault keeps its identity but loses the declared path.
+    elif change == "moved_vault":
+        v = v.rename(base / "W")
+        assert declared(v)["common_identity"] == entry["common_identity"]
     else:
         write_policy(base / "cfg", {**entry, "common_identity": [entry["common_identity"][0], 0]})
     assert not any(flags(base, v / "f.md", load(policy)))

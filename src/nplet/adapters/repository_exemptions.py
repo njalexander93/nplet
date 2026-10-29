@@ -66,10 +66,11 @@ def load(policy: Path = POLICY, memo: repository_location.Memo | None = None) ->
         return Exemptions(frozenset(), "IN_REPOSITORY")
     if error_code is not None:
         return Exemptions(frozenset(), error_code)
-    # Decode strict JSON, rejecting duplicate keys and non-finite numbers.
+    # Decode strict JSON, rejecting duplicate keys and non-finite numbers; deep nesting
+    # exhausts the parser's recursion on some supported Python versions.
     try:
         value = core.strict_json(data.decode("utf-8"))
-    except (UnicodeDecodeError, core.WorkspaceError):
+    except (UnicodeDecodeError, RecursionError, core.WorkspaceError):
         return Exemptions(frozenset(), "INVALID_CONFIG")
     # Validate the document shape and build the repository keys.
     try:

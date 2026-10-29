@@ -112,6 +112,8 @@ INVALID = {
 }
 RAW_INVALID = {
     "bad_utf8": b'{"schema_version": 1, "vaults": ["\xff"]}',
+    "utf16": '{"schema_version": 1, "vaults": []}'.encode("utf-16"),
+    "deep_nesting": b"[" * 30000 + b"]" * 30000,
     "not_json": b'{"schema_version": 1,',
     "duplicate_key": b'{"schema_version": 1, "schema_version": 1, "vaults": []}',
     "nan": b'{"schema_version": NaN, "vaults": []}',
@@ -246,21 +248,27 @@ def test_filesystem_failures_map_to_bounded_codes(
     policy = write(tmp_path, json.dumps(doc(vault())).encode())
 
     def fail(*_: object) -> bytes:
-        """Raise the selected failure from the read."""
+        """Raise the selected failure from the read.
+
+        Raises:
+            OSError: Always, the selected failure.
+        """
         raise error
 
     monkeypatch.setattr(core.Directory, "read", fail)
     assert repository_exemptions.load(policy) == (frozenset(), code)
 
 
-def test_unencodable_path_is_unreadable(tmp_path: Path) -> None:
-    """Report a path the filesystem cannot encode as ``UNREADABLE``.
+def test_unencodable_path_is_rejected(tmp_path: Path) -> None:
+    """Report a NUL path component as ``UNREADABLE``, or ``UNSAFE_PATH`` on Windows.
 
     Args:
         tmp_path: Disposable parent.
     """
+    # Windows validates entry names before opening; POSIX fails the encoding.
     policy = tmp_path.resolve() / "c\x00fg" / "policy.json"
-    assert repository_exemptions.load(policy) == (frozenset(), "UNREADABLE")
+    code = "UNSAFE_PATH" if os.name == "nt" else "UNREADABLE"
+    assert repository_exemptions.load(policy) == (frozenset(), code)
 
 
 @pytest.mark.parametrize(
