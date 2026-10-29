@@ -1,7 +1,10 @@
 name: AI review
 on:
-  pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize, edited]
+  # Review only after PR Pre-Merge Check finishes; it succeeds only when Code Quality
+  # Check and Test Quality Check (which needs every OS test job) succeed.
+  workflow_run:
+    workflows: [PR Pre-Merge Check]
+    types: [completed]
   workflow_dispatch:
     inputs:
       pr-number:
@@ -13,12 +16,8 @@ on:
         required: true
         type: string
 # Cancellation stops only older runs; it never touches published reviews or threads.
-# Title or description edits get their own group so they never cancel a review.
 concurrency:
-  group: >-
-    ai-review-${{ github.event.pull_request.number || inputs.pr-number }}${{
-    github.event.action == 'edited' && !github.event.changes.base &&
-    format('-edit-{0}', github.run_id) || '' }}
+  group: ai-review-${{ github.event.workflow_run.pull_requests[0].number || inputs.pr-number }}
   cancel-in-progress: true
 permissions:
   contents: read
@@ -27,8 +26,11 @@ permissions:
 jobs:
   size:
     name: PR size gate
-    # Edits recount only when the base changed.
-    if: github.event.action != 'edited' || github.event.changes.base
+    # Failed, cancelled or fork CI runs (no PR association) skip the review.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.pull_requests[0].number)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,6 +38,7 @@ jobs:
       statuses: write
     outputs:
       tier: ${{ steps.gate.outputs.tier }}
+      draft: ${{ steps.gate.outputs.draft }}
       head: ${{ steps.gate.outputs.head }}
       base: ${{ steps.gate.outputs.base }}
     steps:
@@ -47,17 +50,15 @@ jobs:
         id: gate
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr-number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head-sha }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || inputs.pr-number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.head-sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 scripts/pr_size_gate.py
   resolve-reviewer:
     needs: size
     if: >-
       needs.size.outputs.tier == 'auto' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (!github.event.pull_request.draft &&
-        github.event.pull_request.head.repo.full_name == github.repository))
+      (github.event_name == 'workflow_dispatch' || needs.size.outputs.draft == 'false')
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -75,7 +76,7 @@ jobs:
     uses: njalexander93/ai-reviewer/.github/workflows/review.yml@main
     with:
       # Convert the dispatch input explicitly for the reviewer's typed number input.
-      pr-number: ${{ github.event.pull_request.number || fromJSON(inputs.pr-number) }}
+      pr-number: ${{ github.event.workflow_run.pull_requests[0].number || fromJSON(inputs.pr-number) }}
       implementation-ref: ${{ needs.resolve-reviewer.outputs.sha }}
       expected-head-sha: ${{ needs.size.outputs.head }}
       expected-base-sha: ${{ needs.size.outputs.base }}

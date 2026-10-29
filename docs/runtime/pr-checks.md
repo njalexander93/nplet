@@ -174,32 +174,42 @@ an upstream `sysmon` repair will not fail the check.
 
 ## AI review size gate
 
-The [AI review workflow](../../.github/workflows/ai-review.yml) runs the
-[size gate](../../scripts/pr_size_gate.py) before any review. It counts GitHub's
+The [AI review workflow](../../.github/workflows/ai-review.yml) starts when a
+PR Pre-Merge Check run finishes. It continues only when `Code Quality Check` and
+`Test Quality Check` passed, which means every OS test job passed too. Then it
+runs the [size gate](../../scripts/pr_size_gate.py) on the run's head commit,
+and the review starts only when `PR Size Check` passes. If any of the three
+fails or does not run, the review is skipped. Fork PRs are skipped, because
+GitHub does not link their CI runs to the PR.
+
+The size gate counts GitHub's
 whole-PR additions plus deletions against the base and reports the result in the
 `PR Size Check` commit status and the run's job summary.
 
 | Changed lines | Result |
 | --- | --- |
-| ≤ 2,000 | Status passes; review runs automatically for a same-repository, non-draft PR. |
+| ≤ 2,000 | Status passes; review runs automatically for a non-draft PR. |
 | > 2,000 | Review is skipped and the status fails. Split the PR. |
 | Unknown or invalid totals | Status fails with "Could not determine PR size". |
 | `head-sha` is not the PR's current head | Run fails without posting a status. |
 
 Only PRs into the default branch post the status, because a status is shared by
-every PR on that commit. Changing a PR's base recounts it.
+every PR on that commit.
 
-To review an authorized fork PR, or to retry a review for the current head, run
+Marking a draft ready does not rerun CI, so its review waits for the next push.
+To review it sooner, to review an authorized fork PR, or to retry a review, run
 the "AI review" workflow from the default branch with the PR number and the PR's
-current full head SHA. The same size limit and head/base checks apply.
+current full head SHA. A manual run skips the CI condition; the same size limit
+and head/base checks apply.
 
 ```sh
 gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
 ```
 
 A newer run for the same PR cancels older ones. If the head then has no
-`PR Size Check`, re-run that push's AI review run or dispatch with the current
-head SHA.
+`PR Size Check`, re-run that commit's AI review run or dispatch with the current
+head SHA. A CI run for a commit that is no longer the PR head fails the size gate
+without posting a status.
 
 ## Tests for the checking tools
 
@@ -225,8 +235,8 @@ These tests protect the validation machinery itself:
   Its integration counterpart checks that independent failures remain visible.
 - [test_pr_size_gate.py](../../tests/unit/tooling/test_pr_size_gate.py) and
   [test_ai_review_workflow.py](../../tests/integration/tooling/test_ai_review_workflow.py)
-  check the size limit, status and summary text, SHA binding and the workflow
-  wiring. They do not execute GitHub's scheduler.
+  check the size limit, status and summary text, SHA binding, draft output and
+  the workflow's CI trigger and skip conditions. They do not execute GitHub's scheduler.
 
 ## Merge enforcement and human review
 

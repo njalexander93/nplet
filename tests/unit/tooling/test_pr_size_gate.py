@@ -5,6 +5,7 @@ import json
 import runpy
 from pathlib import Path
 from typing import Any
+from unittest.mock import ANY
 
 import pytest
 
@@ -67,7 +68,11 @@ class Fake:
 
 
 def pull(
-    additions: object = 0, deletions: object = 0, head: str = HEAD, target: str = "main"
+    additions: object = 0,
+    deletions: object = 0,
+    head: str = HEAD,
+    target: str = "main",
+    draft: bool = False,
 ) -> dict[str, Any]:
     """Build a pull request response.
 
@@ -76,6 +81,7 @@ def pull(
         deletions: Reported deletions.
         head: Live head SHA.
         target: Base branch; the repository default branch is ``main``.
+        draft: Whether GitHub reports the PR as a draft.
 
     Returns:
         Minimal pull response body.
@@ -85,6 +91,7 @@ def pull(
         "deletions": deletions,
         "head": {"sha": head},
         "base": {"sha": BASE, "ref": target, "repo": {"default_branch": "main"}},
+        "draft": draft,
     }
 
 
@@ -160,7 +167,13 @@ def test_boundaries_select_tier_status_and_outputs(
         "description": gate.status_for(tier, total)[1],
         "target_url": "https://run",
     }
-    assert outputs == {"tier": tier, "total": str(total), "head": HEAD, "base": BASE}
+    assert outputs == {
+        "tier": tier,
+        "total": str(total),
+        "head": HEAD,
+        "base": BASE,
+        "draft": "false",
+    }
     assert f"{total:,} lines" in summary
 
 
@@ -239,7 +252,7 @@ def test_unreadable_size_fails_and_posts_unless_the_base_is_known_non_default(
     # Check the failure, outputs and that branch identity alone decides posting.
     assert code == 1
     assert fake.statuses == ([UNKNOWN_STATUS] if posted else [])
-    assert outputs == {"tier": "unknown", "total": "", "head": HEAD, "base": ""}
+    assert outputs == {"tier": "unknown", "total": "", "head": HEAD, "base": "", "draft": ANY}
     assert summary.startswith("Could not determine PR size: ")
     assert ("not posted" in summary) is not posted
 
@@ -436,7 +449,7 @@ def test_malformed_refs_make_size_unknown(
     assert summary.startswith(
         f"Could not determine PR size: pull request response had {reason}. AI review was not run.\n"
     )
-    assert outputs == {"tier": "unknown", "total": "", "head": HEAD, "base": ""}
+    assert outputs == {"tier": "unknown", "total": "", "head": HEAD, "base": "", "draft": ANY}
 
 
 @pytest.mark.parametrize(("additions", "tier", "code"), [(5, "auto", 0), (2001, "over", 1)])
@@ -457,7 +470,13 @@ def test_non_default_base_posts_no_status(
     # Check that only the pull was read and the PR's own result is intact.
     assert [c[0] for c in fake.calls] == ["GET"]
     assert result == code
-    assert outputs == {"tier": tier, "total": str(additions), "head": HEAD, "base": BASE}
+    assert outputs == {
+        "tier": tier,
+        "total": str(additions),
+        "head": HEAD,
+        "base": BASE,
+        "draft": "false",
+    }
     assert summary.endswith(
         "PR Size Check not posted: base release is not the default branch main.\n"
     )
@@ -476,3 +495,16 @@ def test_unreadable_recount_replaces_an_earlier_success(tmp_path: Path) -> None:
     # Check that both runs posted to the same head, the second as a failure.
     assert [c[1] for c in first.calls + second.calls if c[0] == "POST"] == [STATUS_URL] * 2
     assert [s["state"] for s in first.statuses + second.statuses if s] == ["success", "failure"]
+
+
+@pytest.mark.parametrize("body", [pull(1, 1, draft=True), {**pull(1, 1), "draft": None}])
+def test_draft_or_unreported_draft_is_not_eligible(tmp_path: Path, body: dict[str, Any]) -> None:
+    """A draft PR, or one whose draft flag is missing, is reported as a draft.
+
+    Args:
+        tmp_path: Disposable directory supplied by pytest.
+        body: Pull response with a draft or invalid draft flag.
+    """
+    # Size still passes, but the review job reads the draft output and skips.
+    code, _, outputs = run(tmp_path, Fake(body))
+    assert (code, outputs["tier"], outputs["draft"]) == (0, "auto", "true")
