@@ -15,16 +15,16 @@ pytestmark = pytest.mark.integration
 WORKFLOW = ROOT / ".github/workflows/pr-checks.yml"
 
 
-def test_workflow_exposes_five_checks_without_masking_failed_steps() -> None:
-    """Require explicit continuation, native platforms and a named quality result.
+def test_workflow_exposes_six_checks_without_masking_failed_steps() -> None:
+    """Require explicit continuation, native platforms and named size and quality results.
 
     Raises:
         AssertionError: A failed check is masked or prevents a later required check.
     """
     # Load the actual PR workflow job and dependency graph.
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    # Require the five named checks and failure-preserving step conditions.
-    assert set(jobs) == {"quality", "tests", "coverage"}
+    # Require the six named checks and failure-preserving step conditions.
+    assert set(jobs) == {"size", "quality", "tests", "coverage"}
     assert jobs["quality"]["name"] == "Code Quality Check"
     assert jobs["coverage"]["name"] == "Test Quality Check"
     tests = jobs["tests"]
@@ -36,6 +36,22 @@ def test_workflow_exposes_five_checks_without_masking_failed_steps() -> None:
         "MacOS",
     }
     assert "needs" not in jobs["quality"] and "needs" not in tests
+    # The size check starts at once, reads only, and runs the base revision's gate.
+    size = jobs["size"]
+    assert size["name"] == "PR Size Check" and "needs" not in size
+    assert size["permissions"] == {"contents": "read", "pull-requests": "read"}
+    checkout, gate = size["steps"]
+    assert checkout["with"] == {
+        "ref": "${{ github.event.pull_request.base.sha }}",
+        "persist-credentials": False,
+    }
+    assert gate["run"] == "python3 scripts/pr_size_gate.py"
+    assert gate["env"] == {
+        "GITHUB_TOKEN": "${{ github.token }}",
+        "PR_NUMBER": "${{ github.event.pull_request.number }}",
+        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    }
+    assert "secrets." not in WORKFLOW.read_text()
     assert jobs["coverage"]["needs"] == "tests"
     assert jobs["coverage"]["if"] == "${{ !cancelled() }}"
     download_names = {

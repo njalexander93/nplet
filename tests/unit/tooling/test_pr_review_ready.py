@@ -1,10 +1,11 @@
-"""Check review-readiness decisions and outputs without network access."""
+"""Check review admission and readiness decisions and outputs without network access."""
 
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from scripts import pr_review_admit as admit
 from scripts import pr_review_ready as ready
 
 pytestmark = pytest.mark.unit
@@ -274,10 +275,11 @@ def test_approved_current_green_pull_is_eligible(tmp_path: Path) -> None:
             },
             "in_progress",
         ),
+        ({JOBS_URL: green_jobs(**{"PR Size Check": "failure"})}, "PR Size Check"),
         ({JOBS_URL: green_jobs(**{"Code Quality Check": "failure"})}, "Code Quality Check"),
         ({JOBS_URL: green_jobs(**{"Test Quality Check": "skipped"})}, "Test Quality Check"),
         ({JOBS_URL: green_jobs(**{"MacOS Tests (Unit/Integration)": "missing"})}, "MacOS"),
-        ({JOBS_URL: {"jobs": []}}, "Code Quality Check"),
+        ({JOBS_URL: {"jobs": []}}, "PR Size Check"),
     ],
 )
 def test_unready_pull_is_skipped(tmp_path: Path, changes: dict[str, Any], reason: str) -> None:
@@ -350,3 +352,113 @@ def test_failures_block_announcement_with_error(
     # Expect an error exit that is not eligible and echoes no token.
     assert (code, outputs) == (1, {"eligible": "false"})
     assert "ai-token" not in summary
+
+
+def admit_run(tmp_path: Path, fake: Fake, **overrides: str) -> tuple[int, str, dict[str, str]]:
+    """Run review admission with a valid environment plus overrides.
+
+    Args:
+        tmp_path: Directory for the runner output and summary files.
+        fake: Fake request function.
+        overrides: Environment values to replace.
+
+    Returns:
+        Exit code, summary text and parsed step outputs.
+    """
+    # Assemble the Actions environment and run admission.
+    env = {
+        "GITHUB_TOKEN": "read-token",
+        "GITHUB_REPOSITORY": "o/r",
+        "PR_NUMBER": "7",
+        "HEAD_SHA": HEAD,
+        "GITHUB_OUTPUT": str(tmp_path / "out"),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        **overrides,
+    }
+    code = admit.main(env, fake)
+    # Read back what admission wrote for the runner.
+    lines = (tmp_path / "out").read_text().splitlines()
+    return code, (tmp_path / "summary").read_text(), dict(line.split("=", 1) for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("changes", "is_ready"),
+    [
+        ({}, "true"),
+        ({PULL_URL: pull(draft=True)}, "false"),
+        ({PULL_URL: pull(state="closed")}, "false"),
+    ],
+)
+def test_admission_passes_current_green_head(
+    tmp_path: Path, changes: dict[str, Any], is_ready: str
+) -> None:
+    """A current head with fully passing CI is admitted with its head, base and readiness.
+
+    Args:
+        tmp_path: Directory for the runner output and summary files.
+        changes: URL to response replacements.
+        is_ready: Expected draft-readiness output.
+    """
+    # Admit using only the workflow token; the reviewer token is never needed.
+    fake = Fake(responses(**changes))
+    code, _, outputs = admit_run(tmp_path, fake)
+    assert (code, outputs) == (0, {"head": HEAD, "base": BASE, "ready": is_ready})
+    assert [url for url, _ in fake.calls] == [PULL_URL, CI_URL, JOBS_URL]
+    assert {token for _, token in fake.calls} == {"read-token"}
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({PULL_URL: pull(head={"sha": OTHER})}, f"not the current PR head {OTHER}"),
+        ({PULL_URL: pull(base={})}, "no head or base SHA"),
+        ({PULL_URL: (500, None)}, "HTTP 500"),
+        ({CI_URL: {"workflow_runs": []}}, "no CI run"),
+        (
+            {
+                CI_URL: {
+                    "workflow_runs": [
+                        {
+                            "id": 9,
+                            "head_sha": HEAD,
+                            "status": "completed",
+                            "conclusion": "cancelled",
+                        }
+                    ]
+                }
+            },
+            "completed/cancelled",
+        ),
+        ({JOBS_URL: green_jobs(**{"PR Size Check": "failure"})}, "PR Size Check"),
+        ({JOBS_URL: green_jobs(**{"PR Size Check": "skipped"})}, "PR Size Check"),
+        ({JOBS_URL: green_jobs(**{"PR Size Check": "missing"})}, "PR Size Check"),
+        ({JOBS_URL: green_jobs(**{"Linux Tests (Unit/Integration)": "failure"})}, "Linux"),
+        ({CI_URL: OSError("down")}, "OSError"),
+    ],
+)
+def test_admission_refuses_unproven_heads(
+    tmp_path: Path, changes: dict[str, Any], reason: str
+) -> None:
+    """A stale head, unreadable PR, missing or unfinished CI, or any failed job is refused.
+
+    Args:
+        tmp_path: Directory for the runner output and summary files.
+        changes: URL to response replacements that break one condition.
+        reason: Text the error must contain.
+    """
+    # Run against the broken condition and expect a failing step with no outputs.
+    code, summary, outputs = admit_run(tmp_path, Fake(responses(**changes)))
+    assert (code, outputs) == (1, {})
+    assert summary.startswith("AI review not admitted:") and reason in summary
+
+
+def test_admission_rejects_invalid_input_without_requests(tmp_path: Path) -> None:
+    """Malformed inputs fail before any request.
+
+    Args:
+        tmp_path: Directory for the runner output and summary files.
+    """
+    fake = Fake(responses())
+    code, summary, _ = admit_run(tmp_path, fake, HEAD_SHA="A" * 40)
+    assert (code, fake.calls) == (1, [])
+    assert summary.startswith("Invalid input:")

@@ -1,7 +1,7 @@
 name: AI review
 on:
-  # Review only after PR Pre-Merge Check finishes; it succeeds only when Code Quality
-  # Check and Test Quality Check (which needs every OS test job) succeed.
+  # Review only after PR Pre-Merge Check finishes; it succeeds only when PR Size Check,
+  # Code Quality Check and Test Quality Check (which needs every OS test job) succeed.
   workflow_run:
     workflows: [PR Pre-Merge Check]
     types: [completed]
@@ -20,41 +20,45 @@ permissions:
   issues: read
   pull-requests: write
 jobs:
-  size:
-    name: PR size gate
-    # Failed, cancelled or fork CI runs (no PR association) skip the review.
+  admit:
+    name: Admit review
+    # Failed, cancelled or fork CI runs (no PR association) skip the review. Every
+    # admitted run, including a manual one, also needs the head's CI to have passed.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.pull_requests[0].number)
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       pull-requests: read
-      statuses: write
     outputs:
-      tier: ${{ steps.gate.outputs.tier }}
-      ready: ${{ steps.gate.outputs.ready }}
-      head: ${{ steps.gate.outputs.head }}
-      base: ${{ steps.gate.outputs.base }}
+      ready: ${{ steps.admit.outputs.ready }}
+      head: ${{ steps.admit.outputs.head }}
+      base: ${{ steps.admit.outputs.base }}
     steps:
       # Trusted base checkout only; the PR head is never checked out.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Classify PR size and post status
-        id: gate
+      # Recount size from trusted code; the PR can redefine its own CI size job.
+      - name: Check PR size
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || inputs.pr-number }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.head-sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 scripts/pr_size_gate.py
+      - name: Require passing CI for the current head
+        id: admit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || inputs.pr-number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.head-sha }}
+        run: python3 -m scripts.pr_review_admit
   resolve-reviewer:
-    needs: size
-    if: >-
-      needs.size.outputs.tier == 'auto' &&
-      (github.event_name == 'workflow_dispatch' || needs.size.outputs.ready == 'true')
+    needs: admit
+    if: github.event_name == 'workflow_dispatch' || needs.admit.outputs.ready == 'true'
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -68,7 +72,7 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
   review:
-    needs: [size, resolve-reviewer]
+    needs: [admit, resolve-reviewer]
     # Only an admitted review cancels an older one, so rejected CI completions cannot.
     # Cancellation never touches published reviews or threads.
     concurrency:
@@ -79,15 +83,15 @@ jobs:
       # Convert the dispatch input explicitly for the reviewer's typed number input.
       pr-number: ${{ github.event.workflow_run.pull_requests[0].number || fromJSON(inputs.pr-number) }}
       implementation-ref: ${{ needs.resolve-reviewer.outputs.sha }}
-      expected-head-sha: ${{ needs.size.outputs.head }}
-      expected-base-sha: ${{ needs.size.outputs.base }}
+      expected-head-sha: ${{ needs.admit.outputs.head }}
+      expected-base-sha: ${{ needs.admit.outputs.base }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       AI_REVIEWER_TOKEN: ${{ secrets.AI_REVIEWER_TOKEN }}
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
   notify:
-    needs: [size, review]
+    needs: [admit, review]
     # Announce only when the AI reviewer approved: the reviewer exposes no verdict output,
     # so this runs after every completed review and the ready check posts only on approval.
     if: needs.review.result == 'success'
@@ -98,8 +102,8 @@ jobs:
     uses: ./.github/workflows/pr-announce.yml
     with:
       pr-number: ${{ github.event.workflow_run.pull_requests[0].number || fromJSON(inputs.pr-number) }}
-      head-sha: ${{ needs.size.outputs.head }}
-      base-sha: ${{ needs.size.outputs.base }}
+      head-sha: ${{ needs.admit.outputs.head }}
+      base-sha: ${{ needs.admit.outputs.base }}
     secrets:
       DISCORD_PR_WEBHOOK_URL: ${{ secrets.DISCORD_PR_WEBHOOK_URL }}
       AI_REVIEWER_TOKEN: ${{ secrets.AI_REVIEWER_TOKEN }}

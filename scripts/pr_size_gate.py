@@ -1,8 +1,9 @@
-"""Classify a pull request by changed lines and publish the PR Size Check commit status.
+"""Classify a pull request by changed lines for the PR Size Check job.
 
-The gate runs in a GitHub Actions job from the trusted base checkout with only the
-workflow token. It uses the standard library, reads the live pull request totals
-reported by GitHub and never inspects files or patches.
+The gate runs in the PR Pre-Merge Check workflow from the trusted base checkout with
+a read-only workflow token; the job's own result is the size result. It uses the
+standard library, reads the live pull request totals reported by GitHub and never
+inspects files or patches.
 """
 
 import json
@@ -14,8 +15,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 LIMIT = 2000
-CONTEXT = "PR Size Check"
-DESCRIPTION_LIMIT = 140
 NUMBER = re.compile(r"^[1-9][0-9]*$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -84,32 +83,6 @@ def read_totals(pull: object) -> int | None:
     return sum(counts)
 
 
-def status_for(tier: str, total: int | None) -> tuple[str, str]:
-    """Build the commit status state and description for a tier.
-
-    Args:
-        tier: ``auto``, ``over`` or ``unknown``.
-        total: Changed-line total, or ``None`` when unknown.
-
-    Returns:
-        GitHub status state and a description of at most 140 characters.
-    """
-    # Select the state and wording for the tier.
-    if tier == "auto":
-        state, description = "success", f"{total:,} changed lines (limit 2,000)"
-    elif tier == "over":
-        state = "failure"
-        description = (
-            f"PR changes {total:,} lines, over the 2,000-line limit. "
-            "AI review skipped. Re-evaluate and split into smaller PRs."
-        )
-    else:
-        state, description = "failure", "Could not determine PR size. AI review was not run."
-    # Enforce GitHub's status description limit.
-    assert len(description) <= DESCRIPTION_LIMIT, description
-    return state, description
-
-
 def summary_for(tier: str, total: int | None, reason: str) -> str:
     """Build the job summary text shown for a tier.
 
@@ -129,7 +102,7 @@ def summary_for(tier: str, total: int | None, reason: str) -> str:
             "AI review was skipped. Re-evaluate the scope and split this into smaller PRs."
         )
     if tier == "auto":
-        return f"This PR changes {total:,} lines; AI review runs automatically."
+        return f"This PR changes {total:,} lines; AI review runs once the other CI checks pass."
     return f"Could not determine PR size: {reason}. AI review was not run."
 
 
@@ -147,26 +120,6 @@ def ref_sha(pull: object, key: str) -> str | None:
     ref = pull.get(key) if isinstance(pull, dict) else None
     sha = ref.get("sha") if isinstance(ref, dict) else None
     return sha if isinstance(sha, str) and SHA.match(sha) else None
-
-
-def branch_names(pull: object) -> tuple[str | None, str | None]:
-    """Return the PR's base branch and its repository's default branch.
-
-    Args:
-        pull: Decoded pull request response.
-
-    Returns:
-        Base branch and default branch names, each ``None`` when absent or empty.
-    """
-    # Walk the response defensively; GitHub data is untrusted here.
-    ref = pull.get("base") if isinstance(pull, dict) else None
-    repo = ref.get("repo") if isinstance(ref, dict) else None
-    names = [
-        ref.get("ref") if isinstance(ref, dict) else None,
-        repo.get("default_branch") if isinstance(repo, dict) else None,
-    ]
-    target, default = (n if isinstance(n, str) and n else None for n in names)
-    return target, default
 
 
 def append(path: str | None, text: str) -> None:
@@ -211,7 +164,7 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
     # Validate untrusted inputs before any request is sent.
     number, head = env.get("PR_NUMBER", ""), env.get("HEAD_SHA", "")
     repo = env.get("GITHUB_REPOSITORY", "")
-    outputs = {"tier": "invalid", "total": "", "head": head, "base": ""}
+    outputs = {"tier": "invalid", "total": ""}
     if not NUMBER.match(number) or not SHA.match(head) or not REPOSITORY.match(repo):
         message = (
             f"Invalid input: PR_NUMBER {number!r}, HEAD_SHA {head!r}, GITHUB_REPOSITORY {repo!r}."
@@ -230,11 +183,9 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
             pull, reason = None, f"GitHub API returned HTTP {code}"
     except Exception as error:  # Every API failure means unknown size
         pull, reason = None, f"GitHub API request failed ({type(error).__name__})"
-    # Keep branch identity apart from admission, which may clear the response below.
-    target, default = branch_names(pull)
 
-    # Refuse to judge a head this run was not admitted for.
-    live, base = ref_sha(pull, "head"), ref_sha(pull, "base")
+    # Refuse to judge a head this run was not started for.
+    live = ref_sha(pull, "head")
     if pull is not None and live is None:
         pull, reason = None, "pull request response had no head SHA"
     if live is not None and live != head:
@@ -244,55 +195,12 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
         finish(env, message, error=True, outputs={**outputs, "tier": "stale"})
         return 1
 
-    # Bind admission to the base commit as well; without it the size is unknown.
-    if pull is not None and base is None:
-        pull, reason = None, "pull request response had no base SHA"
-    if pull is not None and (target is None or default is None):
-        pull, reason = None, "pull request response had no base or default branch"
-    # Commit statuses are shared by every PR on a head, so a known non-default PR never sets one.
-    # Unknown branches still post, so a failed recount cannot leave an earlier success in place.
-    enforced = target is None or default is None or target == default
-
-    # Classify the totals without ever substituting zero.
+    # Classify the totals without ever substituting zero; the job result is the size result.
     total = read_totals(pull)
     tier = "unknown" if total is None else classify(total)
-    outputs = {
-        "tier": tier,
-        "total": "" if total is None else str(total),
-        "head": head,
-        "base": (base or "") if total is not None else "",
-        # Only a PR GitHub reports as open and non-draft is eligible for automatic review.
-        "ready": (
-            "true"
-            if isinstance(pull, dict) and pull.get("state") == "open" and pull.get("draft") is False
-            else "false"
-        ),
-    }
-
-    # Post the commit status for the admitted head.
-    state, description = status_for(tier, total)
-    payload = {
-        "state": state,
-        "context": CONTEXT,
-        "description": description,
-        "target_url": env.get("RUN_URL", ""),
-    }
-    posted = True
-    if enforced:
-        try:
-            code, _ = http("POST", f"{api}/statuses/{head}", token, payload)
-            posted = 200 <= code < 300
-        except Exception:  # Any failure to post fails the gate
-            posted = False
-
-    # Report the outcome and choose the exit code.
-    message = summary_for(tier, total, reason)
-    if not enforced:
-        message += f"\n{CONTEXT} not posted: base {target} is not the default branch {default}."
-    if not posted:
-        message += f"\nCould not post the {CONTEXT} status for {head}."
-    failed = tier in {"over", "unknown"} or not posted
-    finish(env, message, error=failed, outputs=outputs)
+    failed = tier != "auto"
+    outputs = {"tier": tier, "total": "" if total is None else str(total)}
+    finish(env, summary_for(tier, total, reason), error=failed, outputs=outputs)
     return 1 if failed else 0
 
 

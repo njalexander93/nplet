@@ -1,25 +1,21 @@
-"""Verify the AI review workflow gates every review on passing CI and the PR size check."""
+"""Verify the AI review workflow admits every review only after its head's CI passed."""
 
-import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from scripts import pr_size_gate
+from scripts import pr_review_admit, pr_review_ready
 from tests.support import ROOT
 
 pytestmark = pytest.mark.integration
 WORKFLOW = ROOT / ".github/workflows/ai-review.yml"
 NUMBER = "${{ github.event.workflow_run.pull_requests[0].number || inputs.pr-number }}"
-GATE_ENV = {
+ADMIT_ENV = {
     "GITHUB_TOKEN": "${{ github.token }}",
     "PR_NUMBER": NUMBER,
     "HEAD_SHA": "${{ github.event.workflow_run.head_sha || inputs.head-sha }}",
-    "RUN_URL": (
-        "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-    ),
 }
 
 
@@ -52,53 +48,57 @@ def test_triggers_inputs_and_concurrency() -> None:
     assert "concurrency" not in workflow
 
 
-def test_size_job_runs_trusted_gate_without_secrets() -> None:
-    """Require least-privilege permissions, a base checkout and the gate env wiring.
+def test_admit_job_runs_trusted_read_only_admission() -> None:
+    """Require read-only permissions, a base checkout, a trusted size recount and admission.
 
     Raises:
-        AssertionError: The size job gains access, checks out the head or miswires env.
+        AssertionError: Admission gains access, checks out the head, miswires env or
+            lets a trigger skip the size or CI requirement.
     """
-    # Inspect the size job's permissions and secret use.
-    size = load()["jobs"]["size"]
-    assert size["permissions"] == {
+    # Inspect the admission job's permissions and secret use; no size job remains.
+    jobs = load()["jobs"]
+    assert "size" not in jobs
+    admit = jobs["admit"]
+    assert admit["permissions"] == {
+        "actions": "read",
         "contents": "read",
         "pull-requests": "read",
-        "statuses": "write",
     }
-    assert "secrets." not in yaml.safe_dump(size)
+    assert "secrets." not in yaml.safe_dump(admit)
     # Only a successful CI run with a PR association (never a fork) or a dispatch proceeds.
-    assert " ".join(size["if"].split()) == (
+    assert " ".join(admit["if"].split()) == (
         "github.event_name == 'workflow_dispatch' || "
         "(github.event.workflow_run.conclusion == 'success' && "
         "github.event.workflow_run.pull_requests[0].number)"
     )
-    # Require the trusted base checkout and the gate step wiring.
-    checkout, gate = size["steps"]
+    # Require the trusted base checkout, then unconditional size and admission steps.
+    checkout, size, step = admit["steps"]
     assert checkout["uses"].startswith("actions/checkout@11d5960a326750d5838078e36cf38b85af677262")
     assert checkout["with"] == {"persist-credentials": False}
-    assert gate["run"] == "python3 scripts/pr_size_gate.py"
-    assert gate["env"] == GATE_ENV
-    assert size["outputs"] == {
-        k: f"${{{{ steps.gate.outputs.{k} }}}}" for k in ("tier", "ready", "head", "base")
+    assert size["run"] == "python3 scripts/pr_size_gate.py" and "if" not in size
+    assert size["env"] == ADMIT_ENV
+    assert step["run"] == "python3 -m scripts.pr_review_admit" and "if" not in step
+    assert step["env"] == ADMIT_ENV
+    assert admit["outputs"] == {
+        k: f"${{{{ steps.admit.outputs.{k} }}}}" for k in ("ready", "head", "base")
     }
 
 
-def test_reviewer_jobs_depend_on_size_tier_and_forward_shas() -> None:
-    """Require size-tier and ready eligibility, per-PR cancellation and forwarded SHAs.
+def test_reviewer_jobs_depend_on_admission_and_forward_shas() -> None:
+    """Require admission and ready eligibility, per-PR cancellation and forwarded SHAs.
 
     Raises:
-        AssertionError: A review can start without the size tier, ready check or bound SHAs.
+        AssertionError: A review can start without admission, ready check or bound SHAs.
     """
     # Require the dependency graph.
     jobs = load()["jobs"]
     resolve, review = jobs["resolve-reviewer"], jobs["review"]
-    assert resolve["needs"] == "size"
-    assert review["needs"] == ["size", "resolve-reviewer"]
+    assert resolve["needs"] == "admit"
+    assert review["needs"] == ["admit", "resolve-reviewer"]
     # Require the exact eligibility expression.
     condition = " ".join(resolve["if"].split())
     assert condition == (
-        "needs.size.outputs.tier == 'auto' && "
-        "(github.event_name == 'workflow_dispatch' || needs.size.outputs.ready == 'true')"
+        "github.event_name == 'workflow_dispatch' || needs.admit.outputs.ready == 'true'"
     )
     # Only an admitted review joins the per-PR cancelling group.
     assert review["concurrency"] == {"group": f"ai-review-{NUMBER}", "cancel-in-progress": True}
@@ -107,8 +107,8 @@ def test_reviewer_jobs_depend_on_size_tier_and_forward_shas() -> None:
         "${{ github.event.workflow_run.pull_requests[0].number || fromJSON(inputs.pr-number) }}"
     )
     # Require the reviewer to receive the admitted head and base.
-    assert review["with"]["expected-head-sha"] == "${{ needs.size.outputs.head }}"
-    assert review["with"]["expected-base-sha"] == "${{ needs.size.outputs.base }}"
+    assert review["with"]["expected-head-sha"] == "${{ needs.admit.outputs.head }}"
+    assert review["with"]["expected-base-sha"] == "${{ needs.admit.outputs.base }}"
     # Require secrets only in the reviewer and announcer calls.
     for name, job in jobs.items():
         assert ("secrets." in yaml.safe_dump(job)) == (name in ("review", "notify"))
@@ -123,7 +123,7 @@ def test_notify_job_calls_local_announcer_after_review() -> None:
     """
     # Require the dependency graph and the review-ran condition.
     notify = load()["jobs"]["notify"]
-    assert notify["needs"] == ["size", "review"]
+    assert notify["needs"] == ["admit", "review"]
     assert notify["if"] == "needs.review.result == 'success'"
     # Require the local reusable announcer with read-only permissions.
     assert notify["uses"] == "./.github/workflows/pr-announce.yml"
@@ -132,13 +132,13 @@ def test_notify_job_calls_local_announcer_after_review() -> None:
         "contents": "read",
         "pull-requests": "read",
     }
-    # Require the same PR number as the review and the size gate's admitted SHAs.
+    # Require the same PR number as the review and the admitted SHAs.
     assert notify["with"] == {
         "pr-number": (
             "${{ github.event.workflow_run.pull_requests[0].number || fromJSON(inputs.pr-number) }}"
         ),
-        "head-sha": "${{ needs.size.outputs.head }}",
-        "base-sha": "${{ needs.size.outputs.base }}",
+        "head-sha": "${{ needs.admit.outputs.head }}",
+        "base-sha": "${{ needs.admit.outputs.base }}",
     }
     # Require exactly the two named secrets, never inherited ones.
     assert notify["secrets"] == {
@@ -147,8 +147,8 @@ def test_notify_job_calls_local_announcer_after_review() -> None:
     }
 
 
-def test_workflow_env_names_match_gate_contract(tmp_path: Path) -> None:
-    """Run the gate with exactly the env names the workflow passes.
+def test_workflow_env_names_match_admission_contract(tmp_path: Path) -> None:
+    """Run admission with exactly the env names the workflow passes.
 
     Args:
         tmp_path: Disposable runner output files.
@@ -158,14 +158,16 @@ def test_workflow_env_names_match_gate_contract(tmp_path: Path) -> None:
     """
     # Build the env from the workflow's own names plus the runner-provided ones.
     head, base = "a" * 40, "b" * 40
-    values = {"GITHUB_TOKEN": "t", "PR_NUMBER": "7", "HEAD_SHA": head, "RUN_URL": "https://run"}
-    assert set(values) == set(GATE_ENV)
+    values = {"GITHUB_TOKEN": "t", "PR_NUMBER": "7", "HEAD_SHA": head}
+    assert set(values) == set(ADMIT_ENV)
     output = tmp_path / "out"
     env = {**values, "GITHUB_REPOSITORY": "o/r", "GITHUB_OUTPUT": str(output)}
-    calls: list[tuple[str, str, str, dict[str, str] | None]] = []
+    calls: list[str] = []
+    run = {"id": 9, "head_sha": head, "status": "completed", "conclusion": "success"}
+    jobs = [{"name": name, "conclusion": "success"} for name in pr_review_ready.REQUIRED_JOBS]
 
     def http(method: str, url: str, token: str, body: dict[str, str] | None) -> tuple[int, Any]:
-        """Answer the pull GET and status POST without network.
+        """Answer the pull, run and job reads without network.
 
         Args:
             method: HTTP method.
@@ -176,28 +178,19 @@ def test_workflow_env_names_match_gate_contract(tmp_path: Path) -> None:
         Returns:
             Scripted status code and body.
         """
-        # Record the call, then answer it by method.
-        calls.append((method, url, token, body))
-        base_ref = {"sha": base, "ref": "main", "repo": {"default_branch": "main"}}
-        pull = {
-            "head": {"sha": head},
-            "base": base_ref,
-            "additions": 3,
-            "deletions": 2,
-            "draft": False,
-            "state": "open",
-        }
-        return (200, pull) if method == "GET" else (201, None)
+        # Record the call, then answer it by URL.
+        assert method == "GET" and token == "t" and body is None
+        calls.append(url)
+        if url.endswith("/pulls/7"):
+            return 200, {
+                "head": {"sha": head},
+                "base": {"sha": base},
+                "state": "open",
+                "draft": False,
+            }
+        return 200, {"jobs": jobs} if "/jobs" in url else {"workflow_runs": [run]}
 
-    # Run the gate and check each env value reached its use.
-    assert pr_size_gate.main(env, http) == 0
-    (_, get_url, token, _), (_, post_url, _, body) = calls
-    assert get_url.endswith("/repos/o/r/pulls/7") and token == "t"
-    assert post_url.endswith(f"/statuses/{head}") and body["target_url"] == "https://run"
-    assert re.findall(r"^(\w+)=(.*)$", output.read_text(), re.M) == [
-        ("tier", "auto"),
-        ("total", "5"),
-        ("head", head),
-        ("base", base),
-        ("ready", "true"),
-    ]
+    # Run admission and check each env value reached its use.
+    assert pr_review_admit.main(env, http) == 0
+    assert calls[0].endswith("/repos/o/r/pulls/7") and f"head_sha={head}" in calls[1]
+    assert output.read_text() == f"head={head}\nbase={base}\nready=true\n"
