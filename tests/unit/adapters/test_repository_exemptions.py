@@ -232,17 +232,18 @@ def test_unsafe_policy_files_are_rejected(tmp_path: Path, case: str) -> None:
         (OSError(errno.ELOOP, "loop"), "UNSAFE_PATH"),
         (OSError(errno.ENOTDIR, "not a directory"), "UNSAFE_PATH"),
         (OSError(errno.EIO, "io"), "UNREADABLE"),
+        (ValueError("embedded null byte"), "UNREADABLE"),
     ],
 )
 def test_filesystem_failures_map_to_bounded_codes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: OSError, code: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, code: str
 ) -> None:
     """Map linked-component errors to ``UNSAFE_PATH`` and other failures to ``UNREADABLE``.
 
     Args:
         tmp_path: Disposable parent.
         monkeypatch: Replaces the boundary read.
-        error: Raised filesystem failure.
+        error: Raised filesystem or path-encoding failure.
         code: Expected bounded code.
     """
     policy = write(tmp_path, json.dumps(doc(vault())).encode())
@@ -251,7 +252,7 @@ def test_filesystem_failures_map_to_bounded_codes(
         """Raise the selected failure from the read.
 
         Raises:
-            OSError: Always, the selected failure.
+            Exception: Always, the selected failure.
         """
         raise error
 
@@ -296,3 +297,38 @@ def test_policy_directory_discovery_failures_exempt_nothing(
     )
     assert repository_exemptions.load(policy, {}) == (frozenset(), code)
     assert seen == [policy.parent]
+
+
+def test_exempt_flags_only_points_in_declared_vaults() -> None:
+    """Flag a point only when both its common directory and identity are declared."""
+    vaults = frozenset({(PATH, (1, 2))})
+
+    def point(path: str, identity: tuple[int, int]) -> repository_location.Point:
+        """Build one point in a repository with the given common directory and identity.
+
+        Args:
+            path: Common Git directory.
+            identity: Device and inode pair.
+
+        Returns:
+            The discovery point.
+        """
+        repository = core.Repository(Path(ROOT), Path(path), [Path(ROOT)])
+        found = repository_location.Identity(repository, identity)
+        return repository_location.Point("lexical", Path(ROOT), found, None)
+
+    points = [
+        point(PATH, (1, 2)),
+        point(PATH + "2", (1, 2)),
+        point(PATH, (1, 3)),
+        repository_location.Point("resolved", Path(ROOT), None, "UNREADABLE"),
+    ]
+    location = repository_location.Location(ROOT, False, points)
+    assert repository_exemptions.exempt(
+        location, repository_exemptions.Exemptions(vaults, None)
+    ) == [
+        True,
+        False,
+        False,
+        False,
+    ]
