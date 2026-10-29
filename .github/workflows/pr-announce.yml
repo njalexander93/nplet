@@ -16,18 +16,74 @@ name: PR Discord Announcement
 # names only that event's target, never every pending reviewer. Review-request
 # removals, assignee changes and review submissions (a separate
 # pull_request_review event) are deliberately not subscribed.
+#
+# The ready route is called by the AI review workflow with the reviewed head and
+# base. A "ready" job checks readiness from the caller's checkout (the default
+# branch for CI-triggered runs, the dispatched ref for manual runs), never the PR
+# head; the announce job still never checks out PR code and its token has no
+# permissions.
 on:
   pull_request_target:
     types: [opened, closed, review_requested]
+  workflow_call:
+    inputs:
+      pr-number:
+        required: true
+        type: number
+      head-sha:
+        required: true
+        type: string
+      base-sha:
+        required: true
+        type: string
+    secrets:
+      DISCORD_PR_WEBHOOK_URL:
+        required: true
+      AI_REVIEWER_TOKEN:
+        required: true
 
 permissions: {}
 
 jobs:
+  ready:
+    name: Check PR readiness
+    # Only the workflow_call route passes a head; pull_request_target skips this job.
+    if: inputs.head-sha != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.check.outputs.eligible }}
+      number: ${{ steps.check.outputs.number }}
+      title: ${{ steps.check.outputs.title }}
+      author: ${{ steps.check.outputs.author }}
+      url: ${{ steps.check.outputs.url }}
+      ci_url: ${{ steps.check.outputs.ci_url }}
+      review_url: ${{ steps.check.outputs.review_url }}
+    steps:
+      # Trusted default-branch checkout only; the PR head is never checked out.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check AI approval and CI for the reviewed head
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AI_REVIEWER_TOKEN: ${{ secrets.AI_REVIEWER_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          HEAD_SHA: ${{ inputs.head-sha }}
+          BASE_SHA: ${{ inputs.base-sha }}
+        run: python3 -m scripts.pr_review_ready
   announce:
     name: Announce PR in Discord
-    # One job serves all three announcements so the delivery logic exists once;
-    # a PR closed without merging (or any other action) leaves the job skipped.
-    if: github.event.action == 'opened' || (github.event.action == 'closed' && github.event.pull_request.merged == true) || github.event.action == 'review_requested'
+    needs: ready
+    # One job serves every announcement so the delivery logic exists once; a PR
+    # closed without merging, any other action or an ineligible ready check leaves
+    # it skipped. !cancelled() lets it run when the ready job was skipped.
+    if: ${{ !cancelled() && (github.event.action == 'opened' || (github.event.action == 'closed' && github.event.pull_request.merged == true) || github.event.action == 'review_requested' || needs.ready.outputs.eligible == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -37,11 +93,14 @@ jobs:
         shell: python
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_PR_WEBHOOK_URL }}
-          ANNOUNCE_KIND: ${{ github.event.action == 'closed' && 'merged' || github.event.action == 'review_requested' && 'review' || 'opened' }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          ANNOUNCE_KIND: ${{ needs.ready.outputs.eligible == 'true' && 'ready' || github.event.action == 'closed' && 'merged' || github.event.action == 'review_requested' && 'review' || 'opened' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || needs.ready.outputs.number }}
+          PR_TITLE: ${{ github.event.pull_request.title || needs.ready.outputs.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login || needs.ready.outputs.author }}
+          PR_URL: ${{ github.event.pull_request.html_url || needs.ready.outputs.url }}
+          # Set only by the ready route; required by the script only for it.
+          PR_CI_URL: ${{ needs.ready.outputs.ci_url }}
+          PR_REVIEW_URL: ${{ needs.ready.outputs.review_url }}
           # Empty for opened PRs; required by the script only for merges.
           PR_MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
           # Review requests carry exactly one of a user or a team; the other is
@@ -50,8 +109,8 @@ jobs:
           PR_REVIEW_TEAM: ${{ github.event.requested_team.name }}
           PR_REQUESTED_BY: ${{ github.event.sender.login }}
         run: |
-          # Announce one opened or merged pull request, or one review request on
-          # it, through a Discord webhook.
+          # Announce one opened, merged or ready-for-review pull request, or one
+          # review request on it, through a Discord webhook.
           # Diagnostics never print the webhook URL, which embeds its token.
           import http.client
           import json
@@ -66,9 +125,9 @@ jobs:
               "https://discord.com/api/webhooks/",
               "https://discordapp.com/api/webhooks/",
           )
-          # Embed colors distinguish the three kinds at a glance (GitHub's open
-          # green, merged purple and attention yellow).
-          COLORS = {"opened": 0x2DA44E, "merged": 0x8250DF, "review": 0xBF8700}
+          # Embed colors distinguish the kinds at a glance (GitHub's open green,
+          # merged purple, attention yellow and accent blue).
+          COLORS = {"opened": 0x2DA44E, "merged": 0x8250DF, "review": 0xBF8700, "ready": 0x0969DA}
           TITLE_LIMIT = 256
           MAX_ATTEMPTS = 2
           MAX_DELAY = 10.0
@@ -159,11 +218,14 @@ jobs:
               return title + "…"
 
 
-          def payload(kind, number, title, author, url, merged_by, reviewer, team, requested_by):
+          def payload(
+              kind, number, title, author, url, merged_by, reviewer, team, requested_by,
+              ci_url, review_url,
+          ):
               """Build a message whose PR and reviewer text cannot mention anyone.
 
               Args:
-                  kind: "opened", "merged" or "review".
+                  kind: "opened", "merged", "review" or "ready".
                   number: Pull request number.
                   title: Pull request title, treated as untrusted text.
                   author: Login of the pull request author.
@@ -175,6 +237,8 @@ jobs:
                       a user request; used only when kind is "review".
                   requested_by: Login of who requested the review; used only when
                       kind is "review".
+                  ci_url: Passing CI run URL; used only when kind is "ready".
+                  review_url: AI approval URL; used only when kind is "ready".
 
               Returns:
                   Discord execute-webhook JSON body.
@@ -197,6 +261,12 @@ jobs:
                       fields.append({"name": "Reviewer", "value": reviewer, "inline": True})
                   content = f"Review requested from {target} on pull request #{number} by {author}"
                   fields.append({"name": "Requested by", "value": requested_by, "inline": True})
+              elif kind == "ready":
+                  content = f"Ready for human review: pull request #{number} by {author}"
+                  fields.append({"name": "CI run", "value": f"[View run]({ci_url})", "inline": True})
+                  fields.append(
+                      {"name": "AI review", "value": f"[View review]({review_url})", "inline": True}
+                  )
               else:
                   content = f"Pull request #{number} opened by {author}"
               # Suppress every mention type so @everyone or <@id> stays plain text.
@@ -307,7 +377,8 @@ jobs:
               kind = os.environ.get("ANNOUNCE_KIND", "")
               if kind not in COLORS:
                   fail(
-                      f"ANNOUNCE_KIND must be 'opened', 'merged' or 'review', not {kind[:20]!r}."
+                      "ANNOUNCE_KIND must be 'opened', 'merged', 'review' or 'ready', "
+                      f"not {kind[:20]!r}."
                   )
               # Require the event metadata that the workflow passes as env data.
               names = ["PR_NUMBER", "PR_AUTHOR", "PR_URL"]
@@ -315,12 +386,16 @@ jobs:
                   names.append("PR_MERGED_BY")
               elif kind == "review":
                   names.append("PR_REQUESTED_BY")
+              elif kind == "ready":
+                  names += ["PR_CI_URL", "PR_REVIEW_URL"]
               optional = [
                   "PR_TITLE",
                   "PR_MERGED_BY",
                   "PR_REVIEWER",
                   "PR_REVIEW_TEAM",
                   "PR_REQUESTED_BY",
+                  "PR_CI_URL",
+                  "PR_REVIEW_URL",
               ]
               fields = {name: os.environ.get(name, "") for name in [*names, *optional]}
               missing = [name for name in names if not fields[name]]
@@ -346,6 +421,8 @@ jobs:
                   fields["PR_REVIEWER"],
                   fields["PR_REVIEW_TEAM"],
                   fields["PR_REQUESTED_BY"],
+                  fields["PR_CI_URL"],
+                  fields["PR_REVIEW_URL"],
               )
               data = json.dumps(message).encode("utf-8")
               headers = {

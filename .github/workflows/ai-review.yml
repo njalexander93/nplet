@@ -86,3 +86,19 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       AI_REVIEWER_TOKEN: ${{ secrets.AI_REVIEWER_TOKEN }}
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+  notify:
+    needs: [size, review]
+    # Announce only after a review actually ran; the helper still requires a real approval.
+    if: needs.review.result == 'success'
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/pr-announce.yml
+    with:
+      pr-number: ${{ github.event.workflow_run.pull_requests[0].number || fromJSON(inputs.pr-number) }}
+      head-sha: ${{ needs.size.outputs.head }}
+      base-sha: ${{ needs.size.outputs.base }}
+    secrets:
+      DISCORD_PR_WEBHOOK_URL: ${{ secrets.DISCORD_PR_WEBHOOK_URL }}
+      AI_REVIEWER_TOKEN: ${{ secrets.AI_REVIEWER_TOKEN }}
