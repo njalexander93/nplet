@@ -213,7 +213,12 @@ without posting a status.
 
 ## Readiness notification
 
-After a review run succeeds, the AI review workflow calls the
+The "Ready for human review" message means the PR passed all automation: the
+AI reviewer account approved it after PR Pre-Merge Check passed. A review that
+requests changes, or any other outcome, posts nothing.
+
+The reviewer exposes no verdict output, so after every completed review run the
+AI review workflow calls the
 [Discord announcer](../../.github/workflows/pr-announce.yml). Its `ready` job runs
 the [readiness check](../../scripts/pr_review_ready.py), which reads GitHub only
 and never checks out PR code. The announcer posts "Ready for human review" with

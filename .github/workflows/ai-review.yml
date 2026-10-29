@@ -88,7 +88,8 @@ jobs:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
   notify:
     needs: [size, review]
-    # Announce only after a review actually ran; the helper still requires a real approval.
+    # Announce only when the AI reviewer approved: the reviewer exposes no verdict output,
+    # so this runs after every completed review and the ready check posts only on approval.
     if: needs.review.result == 'success'
     permissions:
       actions: read
