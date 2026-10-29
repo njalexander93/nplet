@@ -207,6 +207,28 @@ APPROVED_NATIVE_SKIPS: dict[str, tuple[set[str], str]] = {
             "test_c6_repointed_link_is_followed_on_next_call",
         )
     },
+    # These exemption cases build POSIX links, modes and FIFOs for the policy reader.
+    **{
+        "tests/integration/adapters/test_repository_exemptions.py::"
+        f"test_c4_links_flag_only_vault_points[{session}]": (
+            {"Windows"},
+            "POSIX symbolic link points",
+        )
+        for session in ("plain", "C")
+    },
+    **{
+        "tests/unit/adapters/test_repository_exemptions.py::"
+        f"test_unsafe_policy_files_are_rejected[{case}]": ({"Windows"}, "POSIX policy reader cases")
+        for case in (
+            "symlinked_file",
+            "symlinked_directory",
+            "group_writable",
+            "world_writable",
+            "hard_link",
+            "fifo",
+            "directory",
+        )
+    },
     "tests/integration/lifecycle/test_posix_boundaries.py::"
     "test_held_directory_stays_on_original_inode_after_path_replacement": (
         {"Windows"},
