@@ -551,7 +551,9 @@ finite implemented contracts, not prefix-based permission grants.
 Adapters classify edits only through the existing edit roles. The
 [target repository resolver](task-workspace.md#target-repository-identity-and-location-evidence)
 exists, but no adapter consumes its evidence yet, so it changes no admission
-decision or hook latency.
+decision or hook latency. The
+[explicit vault-exemption reader](task-workspace.md#explicit-vault-exemptions)
+is likewise unconsumed.
 
 The five operations `delete_comment`, `delete_customer`, `delete_customer_need`,
 `delete_diff_comment` and `delete_status_update` remain outside this task-free

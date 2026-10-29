@@ -283,6 +283,69 @@ native Windows tests. No adapter calls `edit_locations` yet, so task admission i
 unchanged.
 Other location facts may be layered on this evidence later.
 
+### Explicit vault exemptions
+
+`src/nplet/adapters/repository_exemptions.py` reads
+`~/.config/nplet/repository-exemptions.json` (`POLICY`, from `Path.home()`)
+read-only on every call. It keeps no cache and never creates, repairs or edits
+the file. `exempt(location, exemptions)` returns one flag per location point:
+true only when that point's repository `Identity.key()` (normalized common Git
+directory plus `(st_dev, st_ino)`) is declared. It never changes or drops the
+location evidence (workspace flag, points or errors), and a failed point is
+never exempt. No adapter calls it yet, so admission is unchanged.
+
+```json
+{"schema_version": 1, "vaults": [{"common_git_dir": "/Users/me/vault/.git", "common_identity": [16777230, 1234567]}]}
+```
+
+Keys are exact; `schema_version` is the integer 1; at most 256 vaults. Each path is
+absolute, normalized, NUL-free and at most 4,096 characters; each identity is two
+non-negative integers. The file is at most 64 KiB of strict UTF-8 JSON, and
+duplicate keys are rejected.
+
+**Matching.** Linked worktrees share the key and match. A separate clone, a
+name-alike, a moved or replaced common Git directory, or a changed declared
+identity does not match, from the next call. A nested independent repository has
+its own identity and does not inherit its parent's exemption. For a link from
+repository C into vault V, only V's points match.
+
+**Precedence.** When admission applies this policy, workspace membership always
+takes precedence over an exemption. `POLICY` is a reserved configuration target:
+a match never authorizes editing it, and edits are explicit user-authorized
+administration.
+
+Any error yields no exemptions. A missing file or directory is an empty set
+without error.
+
+| Code | Cause |
+| --- | --- |
+| `UNSAFE_PATH` | Symlinked component or file, wrong owner, group- or world-writable file, multiple hard links, or non-regular file |
+| `SIZE_LIMIT` | File larger than 64 KiB |
+| `UNREADABLE` | Other filesystem failure or unencodable path |
+| `IN_REPOSITORY` | Policy directory inside any Git repository, including a vault, so a declaration copied into a vault has no effect |
+| `INVALID_CONFIG` | Invalid UTF-8, JSON or schema |
+| `DUPLICATE_VAULT` | The same path or identity declared twice |
+| `REPOSITORY_MISMATCH`, `HOST_UNSUPPORTED`, `GIT_TIMEOUT` | Passed through from repository discovery of the policy directory |
+
+These reader restrictions apply to the policy file only; target lookup is
+unchanged. On POSIX every component is opened without following links, the
+policy directory must be owned by the current user, and the file must be regular,
+single-link, user-owned and not group- or world-writable. On Windows no
+component may be a reparse point, the path must match exact case and the file
+needs private security; this is implemented but not verified natively.
+Root-owned file cases are not tested.
+
+To declare a vault, read its values, then write the file yourself (for example
+`mkdir -p ~/.config/nplet` and `chmod 600` the file):
+
+```sh
+git -C <vault> rev-parse --path-format=absolute --git-common-dir
+python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(s.st_dev, s.st_ino)' <that dir>
+```
+
+This is user-controlled workflow configuration, not containment against the
+same user.
+
 ### Bootstrap exceptions
 
 Beyond the task-free parent operations above, an unready session may use:
