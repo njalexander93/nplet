@@ -211,6 +211,35 @@ Failed, cancelled or stale CI completions are rejected before that point, so the
 never cancel a review. A CI run for a commit that is no longer the PR head fails the size gate
 without posting a status.
 
+## Readiness notification
+
+The "Ready for human review" message means the PR passed all automation: the
+AI reviewer account approved it after PR Pre-Merge Check passed. A review that
+requests changes, or any other outcome, posts nothing.
+
+The reviewer exposes no verdict output, so after every completed review run the
+AI review workflow calls the
+[Discord announcer](../../.github/workflows/pr-announce.yml). Its `ready` job runs
+the [readiness check](../../scripts/pr_review_ready.py), which reads GitHub only
+and never checks out PR code. The announcer posts "Ready for human review" with
+the PR, CI run and AI review links only when:
+
+- the PR is open, not a draft and still at the reviewed head and base;
+- the AI reviewer account's latest review of that head is an approval carrying
+  the head/base marker; the account is resolved from the reviewer token, so
+  another user's approval never counts;
+- the latest PR Pre-Merge Check run for the head, when GitHub links it to PRs,
+  includes this PR, and that run and its five required jobs succeeded.
+
+Otherwise the run notes the reason and posts nothing. GitHub API or
+authentication failures fail the run. The post uses the existing
+`DISCORD_PR_WEBHOOK_URL` secret and sends no mentions. Repeated review runs may
+announce again; delivery is not exactly-once. A review run before CI passes,
+such as an early manual run, stays silent: rerun the "AI review" workflow after
+CI is green. The check runs in its own job just before the post, not at the
+same instant, so a push in between can still be announced; the next CI run
+reviews the new head.
+
 ## Tests for the checking tools
 
 These tests protect the validation machinery itself:
@@ -237,6 +266,12 @@ These tests protect the validation machinery itself:
   [test_ai_review_workflow.py](../../tests/integration/tooling/test_ai_review_workflow.py)
   check the size limit, status and summary text, SHA binding, ready output and
   the workflow's CI trigger and skip conditions. They do not execute GitHub's scheduler.
+- [test_pr_review_ready.py](../../tests/unit/tooling/test_pr_review_ready.py)
+  checks each readiness condition with injected GitHub responses: PR state and
+  commits, reviewer identity, the latest approval and its marker, CI run and job
+  results, and failure handling. `test_pr_announce_workflow.py` and
+  `test_ai_review_workflow.py` check the ready route wiring and its Discord
+  payload. They do not execute GitHub's scheduler.
 
 ## Merge enforcement and human review
 

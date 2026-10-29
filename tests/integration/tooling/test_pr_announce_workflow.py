@@ -1,134 +1,60 @@
 """Verify the PR Discord announcer's trigger safety and webhook delivery behavior.
 
-The workflow's inline script runs unmodified in a subprocess. A test-only wrapper
-replaces urllib's transport and ``time.sleep`` before executing it, so requests
-reach a local fake Discord server and retries finish instantly. The production
-script has no test branch.
+Delivery tests run the workflow's unmodified announcer script against a local
+fake Discord webhook through ``tests.pr_announce_support``.
 """
 
 import json
-import os
 import re
-import subprocess
-import sys
 import threading
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
-from urllib.parse import parse_qs
 
 import pytest
-import yaml
 
-from tests.support import ROOT
+from tests.pr_announce_support import (
+    CANARY,
+    CI_URL,
+    REVIEW_URL,
+    WEBHOOK,
+    WORKFLOW,
+    FakeDiscord,
+    announce,
+    announce_step,
+    load_workflow,
+    output,
+)
 
 pytestmark = pytest.mark.integration
-WORKFLOW = ROOT / ".github/workflows/pr-announce.yml"
-CANARY = "leak-canary-5c1e7d"
-WEBHOOK = f"https://discord.com/api/webhooks/4242/{CANARY}"
-OFFLINE = "offline"
 JOB_IF = (
-    "github.event.action == 'opened' || "
+    "${{ !cancelled() && (github.event.action == 'opened' || "
     "(github.event.action == 'closed' && github.event.pull_request.merged == true) || "
-    "github.event.action == 'review_requested'"
+    "github.event.action == 'review_requested' || "
+    "needs.ready.outputs.eligible == 'true') }}"
 )
 KIND = (
-    "${{ github.event.action == 'closed' && 'merged' || "
+    "${{ needs.ready.outputs.eligible == 'true' && 'ready' || "
+    "github.event.action == 'closed' && 'merged' || "
     "github.event.action == 'review_requested' && 'review' || 'opened' }}"
 )
+READY_ENV = {
+    "GITHUB_TOKEN": "${{ github.token }}",
+    "AI_REVIEWER_TOKEN": "${{ secrets.AI_REVIEWER_TOKEN }}",
+    "PR_NUMBER": "${{ inputs.pr-number }}",
+    "HEAD_SHA": "${{ inputs.head-sha }}",
+    "BASE_SHA": "${{ inputs.base-sha }}",
+}
+READY_OUTPUTS = ("eligible", "number", "title", "author", "url", "ci_url", "review_url")
 # Actions that must never announce, so they must stay out of the trigger types.
 UNSUBSCRIBED = ("review_request_removed", "assigned", "unassigned")
-# Expressions the evaluator accepts: event paths, quoted lowercase/underscore
-# literals, comparisons, logical operators, parentheses and booleans. Anything
-# else fails the test.
-EXPRESSION = re.compile(r"(?:github(?:\.\w+)+|'[a-z_]*'|==|&&|\|\||[()]|true|false|\s+)+")
-
-# Swap urllib's transport for a proxy-free opener aimed at the fake server, record
-# sleeps instead of waiting, then run the unmodified announcer as __main__.
-WRAPPER = """
-import sys, time, urllib.error, urllib.parse, urllib.request
-
-address, script = sys.argv[1], sys.argv[2]
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-def redirected(request, *args, **kwargs):
-    if address == "offline":
-        raise urllib.error.URLError(ConnectionRefusedError(61, "refused " + request.full_url))
-    parts = urllib.parse.urlsplit(request.full_url)
-    request.full_url = urllib.parse.urlunsplit(("http", address, parts.path, parts.query, ""))
-    return opener.open(request, *args, **kwargs)
-
-urllib.request.urlopen = redirected
-time.sleep = lambda seconds: print(f"fake-sleep {seconds:g}", file=sys.stderr)
-with open(script, encoding="utf-8") as handle:
-    code = compile(handle.read(), script, "exec")
-exec(code, {"__name__": "__main__"})
-"""
-
-
-class FakeDiscord:
-    """Scripted stand-in for a Discord execute-webhook endpoint.
-
-    Attributes:
-        address: ``host:port`` of the running server, set by the fixture.
-        responses: Queued ``(status, headers, body)`` replies, served in order.
-        requests: Recorded path, query, headers and JSON body of each POST.
-    """
-
-    def __init__(self) -> None:
-        """Start with no queued replies, so every POST receives a 200 message."""
-        self.address = ""
-        self.responses: list[tuple[int, dict[str, str], dict[str, Any]]] = []
-        self.requests: list[dict[str, Any]] = []
-
-    def handler(self) -> type[BaseHTTPRequestHandler]:
-        """Build a request handler class bound to this fake's queue and log.
-
-        Returns:
-            Handler class that records each POST and replays the next reply.
-        """
-        fake = self
-
-        class Handler(BaseHTTPRequestHandler):
-            """Record one webhook POST and answer with the next scripted reply."""
-
-            def do_POST(self) -> None:
-                """Record the request, then send the queued or default reply."""
-                # Record the request exactly as the announcer sent it.
-                length = int(self.headers.get("Content-Length", "0"))
-                path, _, query = self.path.partition("?")
-                fake.requests.append(
-                    {
-                        "path": path,
-                        "query": parse_qs(query),
-                        "headers": dict(self.headers),
-                        "json": json.loads(self.rfile.read(length)),
-                    }
-                )
-                # Reply with the next scripted response, or a Discord-like success.
-                status, headers, body = (
-                    fake.responses.pop(0) if fake.responses else (200, {}, {"id": "1"})
-                )
-                encoded = json.dumps(body).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
-                for name, value in headers.items():
-                    self.send_header(name, value)
-                self.end_headers()
-                self.wfile.write(encoded)
-
-            def log_message(self, format: str, *args: Any) -> None:
-                """Silence per-request logging in test output.
-
-                Args:
-                    format: Ignored log format string.
-                    *args: Ignored log arguments.
-                """
-
-        return Handler
+# Expressions the evaluator accepts: event and needs paths, !cancelled(), quoted
+# lowercase/underscore literals, comparisons, logical operators, parentheses and
+# booleans. Anything else fails the test.
+EXPRESSION = re.compile(
+    r"(?:(?:github|needs)(?:\.\w+)+|!cancelled\(\)|'[a-z_]*'|==|&&|\|\||[()]|true|false|\s+)+"
+)
 
 
 @pytest.fixture
@@ -156,40 +82,19 @@ def discord() -> Iterator[FakeDiscord]:
         thread.join(timeout=5)
 
 
-def load_workflow() -> dict[Any, Any]:
-    """Parse the announcer workflow file.
-
-    Returns:
-        Workflow mapping; PyYAML reads the bare ``on`` key as boolean ``True``.
-    """
-    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-
-
-def announce_step() -> dict[str, Any]:
-    """Return the single step of the single announcer job.
-
-    Returns:
-        Step mapping containing the inline Python script and its env.
-    """
-    # Require exactly one job with exactly one step before returning it.
-    jobs = load_workflow()["jobs"]
-    assert list(jobs) == ["announce"]
-    steps = jobs["announce"]["steps"]
-    assert len(steps) == 1
-    return steps[0]
-
-
-def evaluate(expression: str, action: str, merged: bool) -> object:
+def evaluate(expression: str, action: str, merged: bool, eligible: str = "") -> object:
     """Evaluate a simple GitHub Actions expression against a pull request event.
 
     Only the subset used by the announcer is supported. GitHub's ``&&`` and ``||``
     return operand values like Python's ``and`` and ``or``, so a token-for-token
     translation preserves both boolean conditions and ``a && 'x' || 'y'`` selection.
+    The run is never cancelled, so ``!cancelled()`` is true.
 
     Args:
         expression: Condition or value, with or without ``${{ }}`` delimiters.
         action: Pull request event action, such as ``opened`` or ``closed``.
         merged: Value of ``github.event.pull_request.merged``.
+        eligible: Ready job ``eligible`` output; empty when that job was skipped.
 
     Returns:
         Expression result as GitHub would compute it.
@@ -201,91 +106,18 @@ def evaluate(expression: str, action: str, merged: bool) -> object:
     text = expression.strip().removeprefix("${{").removesuffix("}}").strip()
     assert EXPRESSION.fullmatch(text), text
     # Translate operators and literals to their Python equivalents.
-    python = (
-        text.replace("&&", " and ")
-        .replace("||", " or ")
-        .replace("true", "True")
-        .replace("false", "False")
-    )
-    # Evaluate with only the event context in scope.
+    # Bare booleans become Python's; the quoted 'true' output literal stays a string.
+    python = text.replace("!cancelled()", " True ").replace("&&", " and ").replace("||", " or ")
+    python = re.sub(r"(?<!')\b(true|false)\b(?!')", lambda m: m[1].title(), python)
+    # Evaluate with only the event and ready-job contexts in scope.
     event = SimpleNamespace(action=action, pull_request=SimpleNamespace(merged=merged))
-    context = {"__builtins__": {}, "github": SimpleNamespace(event=event)}
-    return eval(python, context)  # noqa: S307 - grammar-checked, repository-owned text
-
-
-def announce(
-    tmp_path: Path,
-    discord: FakeDiscord | None,
-    webhook: str | None = WEBHOOK,
-    title: str = "Add widget registry",
-    kind: str = "opened",
-    merged_by: str = "",
-    reviewer: str = "",
-    team: str = "",
-    requested_by: str = "",
-) -> subprocess.CompletedProcess[str]:
-    """Run the workflow's announcer script through the redirecting wrapper.
-
-    Args:
-        tmp_path: Directory receiving the extracted script.
-        discord: Fake server to receive requests, or None for a network failure.
-        webhook: Value for the webhook env var, or None to leave it unset.
-        title: Pull request title passed as event data.
-        kind: Announcement kind the workflow derives from the event action.
-        merged_by: Merger login; empty as on an opened event.
-        reviewer: Requested reviewer login; empty unless a user review request.
-        team: Requested team name; empty unless a team review request.
-        requested_by: Login of who requested the review; empty unless a review
-            request.
-
-    Returns:
-        Completed process with captured stdout and stderr.
-    """
-    # Extract the run body verbatim so the test executes the shipped program.
-    script = tmp_path / "announce.py"
-    script.write_text(announce_step()["run"], encoding="utf-8")
-    # Pass event data only through env, as the workflow does, without host leftovers.
-    # Absent event fields arrive as empty strings, matching GitHub's expression result.
-    env = {
-        key: value for key, value in os.environ.items() if not key.startswith(("DISCORD_", "PR_"))
+    ready = SimpleNamespace(outputs=SimpleNamespace(eligible=eligible))
+    context = {
+        "__builtins__": {},
+        "github": SimpleNamespace(event=event),
+        "needs": SimpleNamespace(ready=ready),
     }
-    env.update(
-        ANNOUNCE_KIND=kind,
-        PR_MERGED_BY=merged_by,
-        PR_REVIEWER=reviewer,
-        PR_REVIEW_TEAM=team,
-        PR_REQUESTED_BY=requested_by,
-        PR_NUMBER="17",
-        PR_TITLE=title,
-        PR_AUTHOR="octo-dev",
-        PR_URL="https://github.com/example/repo/pull/17",
-        PYTHONIOENCODING="utf-8",
-    )
-    if webhook is not None:
-        env["DISCORD_WEBHOOK_URL"] = webhook
-    # Execute the script in a fresh interpreter, never inside the test process.
-    address = discord.address if discord is not None else OFFLINE
-    return subprocess.run(
-        [sys.executable, "-c", WRAPPER, address, str(script)],
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=60,
-        check=False,
-    )
-
-
-def output(result: subprocess.CompletedProcess[str]) -> str:
-    """Join both captured streams for content assertions.
-
-    Args:
-        result: Completed announcer process.
-
-    Returns:
-        Combined stdout and stderr text.
-    """
-    return result.stdout + result.stderr
+    return eval(python, context)  # noqa: S307 - grammar-checked, repository-owned text
 
 
 def test_workflow_trigger_and_permissions_cannot_run_pr_code() -> None:
@@ -295,11 +127,24 @@ def test_workflow_trigger_and_permissions_cannot_run_pr_code() -> None:
         AssertionError: The trigger widens, permissions appear, an action or checkout
             is used, or event expressions reach the script body.
     """
-    # Require the opened/closed/review_requested pull_request_target trigger and an
-    # empty token scope.
+    # Require the opened/closed/review_requested pull_request_target trigger, the
+    # typed reusable route and an empty token scope.
     workflow = load_workflow()
     trigger = workflow.get("on", workflow.get(True))
-    assert trigger == {"pull_request_target": {"types": ["opened", "closed", "review_requested"]}}
+    assert trigger == {
+        "pull_request_target": {"types": ["opened", "closed", "review_requested"]},
+        "workflow_call": {
+            "inputs": {
+                "pr-number": {"required": True, "type": "number"},
+                "head-sha": {"required": True, "type": "string"},
+                "base-sha": {"required": True, "type": "string"},
+            },
+            "secrets": {
+                "DISCORD_PR_WEBHOOK_URL": {"required": True},
+                "AI_REVIEWER_TOKEN": {"required": True},
+            },
+        },
+    }
     assert workflow["permissions"] == {}
     # Require one bounded Linux job that cannot regain permissions or run actions.
     job = workflow["jobs"]["announce"]
@@ -307,14 +152,19 @@ def test_workflow_trigger_and_permissions_cannot_run_pr_code() -> None:
     assert job["runs-on"] == "ubuntu-24.04"
     assert 0 < job["timeout-minutes"] <= 10
     assert "permissions" not in job
+    assert job["needs"] == "ready"
     step = announce_step()
     assert all("uses" not in item for item in job["steps"])
     assert step["shell"] == "python"
     # Require metadata to arrive only as env data and the secret to be the named one.
     assert "${{" not in step["run"]
     assert step["env"]["DISCORD_WEBHOOK_URL"] == "${{ secrets.DISCORD_PR_WEBHOOK_URL }}"
+    # The AI reviewer token reaches only the ready check, never the announcer.
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert re.findall(r"secrets\.\w+", text) == ["secrets.DISCORD_PR_WEBHOOK_URL"]
+    assert re.findall(r"secrets\.\w+", text) == [
+        "secrets.AI_REVIEWER_TOKEN",
+        "secrets.DISCORD_PR_WEBHOOK_URL",
+    ]
     assert set(step["env"]) == {
         "DISCORD_WEBHOOK_URL",
         "ANNOUNCE_KIND",
@@ -326,7 +176,21 @@ def test_workflow_trigger_and_permissions_cannot_run_pr_code() -> None:
         "PR_REVIEWER",
         "PR_REVIEW_TEAM",
         "PR_REQUESTED_BY",
+        "PR_CI_URL",
+        "PR_REVIEW_URL",
     }
+    # Require PR data to fall back to the ready job's outputs on the reusable route.
+    for name, event, field in (
+        ("PR_NUMBER", "pull_request.number", "number"),
+        ("PR_TITLE", "pull_request.title", "title"),
+        ("PR_AUTHOR", "pull_request.user.login", "author"),
+        ("PR_URL", "pull_request.html_url", "url"),
+    ):
+        assert (
+            step["env"][name] == f"${{{{ github.event.{event} || needs.ready.outputs.{field} }}}}"
+        )
+    assert step["env"]["PR_CI_URL"] == "${{ needs.ready.outputs.ci_url }}"
+    assert step["env"]["PR_REVIEW_URL"] == "${{ needs.ready.outputs.review_url }}"
     assert step["env"]["PR_MERGED_BY"] == "${{ github.event.pull_request.merged_by.login }}"
     # Require review data to come from the event's own single target and sender.
     assert step["env"]["PR_REVIEWER"] == "${{ github.event.requested_reviewer.login }}"
@@ -376,6 +240,68 @@ def test_job_runs_only_for_opened_merged_or_review_requested_prs(
     # For running jobs, require the env to carry the matching announcement kind.
     if kind is not None:
         assert evaluate(KIND, action, merged) == kind
+
+
+@pytest.mark.parametrize(
+    ("action", "eligible", "kind"),
+    [
+        ("completed", "true", "ready"),
+        ("", "true", "ready"),
+        ("completed", "false", None),
+        ("", "false", None),
+        ("completed", "", None),
+    ],
+)
+def test_reusable_route_announces_only_an_eligible_ready_check(
+    action: str, eligible: str, kind: str | None
+) -> None:
+    """Announce a caller's run only when the ready check reported eligibility.
+
+    Args:
+        action: Caller event action: ``completed`` for a CI completion, empty for a
+            manual dispatch.
+        eligible: Ready job ``eligible`` output; empty when it failed to write one.
+        kind: Expected announcement kind, or None when the job must be skipped.
+
+    Raises:
+        AssertionError: An ineligible or failed check announces, or an eligible one
+            is not announced as ready.
+    """
+    # Evaluate the pinned condition and kind for the caller's event.
+    job = load_workflow()["jobs"]["announce"]
+    assert evaluate(job["if"], action, False, eligible) is (kind is not None)
+    if kind is not None:
+        assert evaluate(KIND, action, False, eligible) == kind
+
+
+def test_ready_job_runs_trusted_helper_only_on_reusable_route() -> None:
+    """Pin the ready job's skip condition, read-only scope, checkout and helper wiring.
+
+    Raises:
+        AssertionError: The job runs on pull_request_target, gains write access,
+            checks out PR code, keeps credentials or miswires the helper.
+    """
+    # Require a skip on pull_request_target, where no head input exists.
+    job = load_workflow()["jobs"]["ready"]
+    assert job["if"] == "inputs.head-sha != ''"
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert 0 < job["timeout-minutes"] <= 10
+    assert job["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "read",
+    }
+    assert job["outputs"] == {
+        name: f"${{{{ steps.check.outputs.{name} }}}}" for name in READY_OUTPUTS
+    }
+    # Require the trusted default checkout without a PR ref or persisted token.
+    checkout, check = job["steps"]
+    assert checkout["uses"].startswith("actions/checkout@11d5960a326750d5838078e36cf38b85af677262")
+    assert checkout["with"] == {"persist-credentials": False}
+    # Require the helper module and the env it reads.
+    assert check["id"] == "check"
+    assert check["run"] == "python3 -m scripts.pr_review_ready"
+    assert check["env"] == READY_ENV
 
 
 @pytest.mark.parametrize(
@@ -630,8 +556,8 @@ def test_untrusted_team_name_stays_inert_data(tmp_path: Path, discord: FakeDisco
     ("kind", "merged_by", "message"),
     [
         ("merged", "", "metadata is missing: PR_MERGED_BY"),
-        ("", "", "ANNOUNCE_KIND must be 'opened', 'merged' or 'review'"),
-        ("closed", "maint-lead", "ANNOUNCE_KIND must be 'opened', 'merged' or 'review'"),
+        ("", "", "ANNOUNCE_KIND must be 'opened', 'merged', 'review' or 'ready'"),
+        ("closed", "maint-lead", "ANNOUNCE_KIND must be 'opened', 'merged', 'review' or 'ready'"),
     ],
 )
 def test_invalid_event_data_fails_before_any_request(
@@ -655,6 +581,75 @@ def test_invalid_event_data_fails_before_any_request(
     assert result.returncode != 0
     assert "::error::" in result.stdout
     assert message in result.stdout
+    assert CANARY not in output(result)
+    assert discord.requests == []
+
+
+def test_ready_announcement_links_ci_and_review(tmp_path: Path, discord: FakeDiscord) -> None:
+    """Post one ready message linking the passing CI run and the AI approval.
+
+    Args:
+        tmp_path: Directory for the extracted script.
+        discord: Fake webhook endpoint recording the request.
+
+    Raises:
+        AssertionError: The ready message omits a link, enables mentions, leaves a
+            long title unclipped or leaks the webhook URL.
+    """
+    # Announce a ready PR whose hostile title is too long and carries mentions.
+    title = "@everyone <@123> " + "x" * 300
+    result = announce(
+        tmp_path, discord, title=title, kind="ready", ci_url=CI_URL, review_url=REVIEW_URL
+    )
+    assert result.returncode == 0, output(result)
+    assert "Announced ready pull request #17 in Discord." in result.stdout
+    assert CANARY not in output(result)
+    assert "@everyone" not in output(result)
+    # Require one post with the PR data and both links, mentions disabled.
+    assert len(discord.requests) == 1
+    body = discord.requests[0]["json"]
+    embed = body["embeds"][0]
+    assert body["content"] == "Ready for human review: pull request #17 by octo-dev"
+    assert embed["url"] == "https://github.com/example/repo/pull/17"
+    assert embed["fields"] == [
+        {"name": "Pull request", "value": "#17", "inline": True},
+        {"name": "Author", "value": "octo-dev", "inline": True},
+        {"name": "CI run", "value": f"[View run]({CI_URL})", "inline": True},
+        {"name": "AI review", "value": f"[View review]({REVIEW_URL})", "inline": True},
+    ]
+    assert body["allowed_mentions"] == {"parse": []}
+    # Require the title clipped but otherwise literal.
+    assert embed["title"] == title[:255] + "…"
+
+
+@pytest.mark.parametrize(
+    ("ci_url", "review_url", "missing"),
+    [
+        ("", REVIEW_URL, "PR_CI_URL"),
+        (CI_URL, "", "PR_REVIEW_URL"),
+        ("", "", "PR_CI_URL, PR_REVIEW_URL"),
+    ],
+)
+def test_ready_without_links_fails_before_any_request(
+    tmp_path: Path, discord: FakeDiscord, ci_url: str, review_url: str, missing: str
+) -> None:
+    """Refuse to post a ready message without both evidence links.
+
+    Args:
+        tmp_path: Directory for the extracted script.
+        discord: Fake webhook endpoint that must stay unused.
+        ci_url: CI run URL passed by the workflow.
+        review_url: AI approval URL passed by the workflow.
+        missing: Expected missing-metadata list.
+
+    Raises:
+        AssertionError: The job passes, sends a request or leaks the webhook URL.
+    """
+    # Run a ready announcement lacking a link.
+    result = announce(tmp_path, discord, kind="ready", ci_url=ci_url, review_url=review_url)
+    # Require an annotated failure without any delivery or URL echo.
+    assert result.returncode != 0
+    assert f"metadata is missing: {missing}." in result.stdout
     assert CANARY not in output(result)
     assert discord.requests == []
 
