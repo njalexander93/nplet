@@ -264,9 +264,9 @@ These tests protect the validation machinery itself:
 - [test_pr_review_ready.py](../../tests/unit/tooling/test_pr_review_ready.py)
   checks each readiness condition with injected GitHub responses: PR state and
   commits, reviewer identity, the latest approval and its marker, CI run and job
-  results, and failure handling. `test_pr_announce_workflow.py` and
-  `test_ai_review_workflow.py` check the ready route wiring and its Discord
-  payload. They do not execute GitHub's scheduler.
+  results, and failure handling. `test_pr_announce_workflow.py`,
+  `test_pr_announce_delivery.py` and `test_ai_review_workflow.py` check the ready
+  route wiring and its Discord payload. They do not execute GitHub's scheduler.
 
 ## Merge enforcement and human review
 

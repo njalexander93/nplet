@@ -56,6 +56,27 @@ def get(http: Http, url: str, token: str, kind: type) -> Any:
     return body
 
 
+def collection(http: Http, url: str, token: str, key: str) -> list[Any]:
+    """Read one GitHub response object and require its named list field.
+
+    Args:
+        http: Request function.
+        url: Absolute GitHub REST API URL.
+        token: Bearer token for this read.
+        key: Field that must hold a list, such as ``"jobs"``.
+
+    Returns:
+        The list held by the field, possibly empty.
+
+    Raises:
+        Failure: The response failed or the field is missing or not a list.
+    """
+    items = get(http, url, token, dict).get(key)
+    if not isinstance(items, list):
+        raise Failure(f"GitHub API returned no {key} list")
+    return items
+
+
 def check_pull(pull: dict[str, Any], head: str, base: str) -> None:
     """Require the pull request to be open, ready and still at the admitted commits.
 
@@ -180,10 +201,9 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
             f"{api}/actions/workflows/{CI_WORKFLOW}/runs"
             f"?head_sha={head}&event=pull_request&per_page={PAGE}"
         )
-        runs = get(http, url, token, dict).get("workflow_runs")
         runs = [
             r
-            for r in (runs if isinstance(runs, list) else [])
+            for r in collection(http, url, token, "workflow_runs")
             if isinstance(r, dict) and r.get("head_sha") == head and isinstance(r.get("id"), int)
         ]
         if not runs:
@@ -199,10 +219,9 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
 
         # Require every required CI job to have succeeded in that run.
         url = f"{api}/actions/runs/{run['id']}/jobs?filter=latest&per_page={PAGE}"
-        jobs = get(http, url, token, dict).get("jobs")
         results = {
             j.get("name"): j.get("conclusion")
-            for j in (jobs if isinstance(jobs, list) else [])
+            for j in collection(http, url, token, "jobs")
             if isinstance(j, dict)
         }
         failed = [name for name in REQUIRED_JOBS if results.get(name) != "success"]

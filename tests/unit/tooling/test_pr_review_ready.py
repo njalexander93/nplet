@@ -277,6 +277,7 @@ def test_approved_current_green_pull_is_eligible(tmp_path: Path) -> None:
         ({JOBS_URL: green_jobs(**{"Code Quality Check": "failure"})}, "Code Quality Check"),
         ({JOBS_URL: green_jobs(**{"Test Quality Check": "skipped"})}, "Test Quality Check"),
         ({JOBS_URL: green_jobs(**{"MacOS Tests (Unit/Integration)": "missing"})}, "MacOS"),
+        ({JOBS_URL: {"jobs": []}}, "Code Quality Check"),
     ],
 )
 def test_unready_pull_is_skipped(tmp_path: Path, changes: dict[str, Any], reason: str) -> None:
@@ -324,6 +325,11 @@ def test_approval_on_second_review_page_counts(tmp_path: Path) -> None:
         ({USER_URL: {"login": ""}}, {}),
         ({reviews_url(1): (500, None)}, {}),
         ({JOBS_URL: OSError("down")}, {}),
+        # Malformed collections fail; valid empty ones skip in the test above.
+        ({CI_URL: {}}, {}),
+        ({CI_URL: {"workflow_runs": {}}}, {}),
+        ({JOBS_URL: {}}, {}),
+        ({JOBS_URL: {"jobs": None}}, {}),
         ({}, {"AI_REVIEWER_TOKEN": ""}),
         ({}, {"PR_NUMBER": "x"}),
         ({}, {"BASE_SHA": "B" * 40}),
