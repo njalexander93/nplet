@@ -61,19 +61,22 @@ def test_content_states_follow_exclusive_evidence(tmp_path: Path, data: bytes, s
     assert boundary.classify(write(tmp_path / "f.bin", data), boundary.Budget()) == state
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
 def test_special_files_and_missing_paths_are_never_opened(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A FIFO is unknown and a missing path absent, without any open call.
+    """A FIFO or directory is unknown and a missing path absent, without any open call.
 
     Args:
         tmp_path: Directory holding the FIFO.
         monkeypatch: Fails any open so a read attempt cannot hang the test.
     """
-    os.mkfifo(tmp_path / "pipe")
+    # FIFOs exist only on POSIX; the directory and missing cases run everywhere.
+    fifo = hasattr(os, "mkfifo")
+    if fifo:
+        os.mkfifo(tmp_path / "pipe")
     monkeypatch.setattr(boundary.os, "open", pytest.fail)
-    assert boundary.classify(tmp_path / "pipe", boundary.Budget()) == UNKNOWN
+    if fifo:
+        assert boundary.classify(tmp_path / "pipe", boundary.Budget()) == UNKNOWN
     assert boundary.classify(tmp_path, boundary.Budget()) == UNKNOWN
     assert boundary.classify(tmp_path / "missing", boundary.Budget()) == ABSENT
 
