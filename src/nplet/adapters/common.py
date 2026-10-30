@@ -2183,8 +2183,9 @@ def _recovery_route(code: str, host: str) -> str:
     # A working directory outside every repository has no protected checkout.
     if code == "REPOSITORY_ABSENT":
         return (
-            "This working directory is inside no Git repository. File edits here are "
-            "task-free; protected shell and lifecycle tools need a repository checkout."
+            "This working directory is inside no Git repository. Edits outside every Git "
+            "repository, or in a declared vault, stay task-free; protected repository "
+            "changes need a task started from inside that repository's checkout."
         )
     # Lifecycle requests must name the registered checkout.
     if code == "REPOSITORY_MISMATCH":

@@ -487,7 +487,10 @@ def test_recovery_message_preserves_exact_diagnostic_without_task_content() -> N
                 ("REVISION_CONFLICT", ["Read the current revision", "reapply"]),
                 ("BINDING_CONFLICT", ["Continue the bound issue", "rebind"]),
                 ("REPOSITORY_MISMATCH", ["registered checkout"]),
-                ("REPOSITORY_ABSENT", ["inside no Git repository", "task-free"]),
+                (
+                    "REPOSITORY_ABSENT",
+                    ["inside no Git repository", "task-free", "repository's checkout"],
+                ),
                 ("PROVIDER_RESPONSE_INVALID", ["exact selected-ticket get_issue", "new native"]),
                 (
                     "ISSUE_MISMATCH",
