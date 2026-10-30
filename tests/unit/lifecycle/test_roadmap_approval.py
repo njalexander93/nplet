@@ -129,3 +129,9 @@ def test_roadmap_approved_requires_matching_recorded_revision(text: str, approve
         approved: Expected approval result.
     """
     assert core.roadmap_approved(text) is approved
+
+
+def test_legacy_scope_reports_malformed_committed_scope_as_none() -> None:
+    """Return parsed entries for valid committed scope and None for malformed scope."""
+    assert core.legacy_scope(scope(f"- `{ROOT}`: `./`")) == [{"root": ROOT, "paths": ["./"]}]
+    assert core.legacy_scope("**Repository scope:** everything\n") is None

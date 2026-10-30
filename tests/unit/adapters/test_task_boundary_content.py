@@ -81,6 +81,40 @@ def test_special_files_and_missing_paths_are_never_opened(
     assert boundary.classify(tmp_path / "missing", boundary.Budget()) == ABSENT
 
 
+@pytest.mark.parametrize("fault", ["open", "fstat-type", "fstat-error", "resized"])
+def test_classify_reports_unknown_when_the_file_changes_or_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """A failed open, a non-regular or unreadable handle, or a resized file is unknown.
+
+    Args:
+        tmp_path: Directory holding the text file.
+        monkeypatch: Injects the selected failure into the classifier's os calls.
+        fault: Which step fails or observes a changed file.
+    """
+    path = write(tmp_path / "note.md", b"plain text\n")
+    real_lstat = os.lstat
+
+    def fail(*args: object) -> None:
+        raise OSError("injected")
+
+    if fault == "open":
+        monkeypatch.setattr(boundary.os, "open", fail)
+    elif fault == "fstat-type":
+        monkeypatch.setattr(boundary.os, "fstat", lambda fd: os.stat(tmp_path))
+    elif fault == "fstat-error":
+        monkeypatch.setattr(boundary.os, "fstat", fail)
+    else:
+        # Report a smaller size than the file holds, as if it grew after lstat.
+        def shrunk(target: Path) -> os.stat_result:
+            info = list(real_lstat(target))
+            info[6] -= 1
+            return os.stat_result(info)
+
+        monkeypatch.setattr(boundary.os, "lstat", shrunk)
+    assert boundary.classify(path, boundary.Budget()) == UNKNOWN
+
+
 def test_call_limit_makes_later_sides_unknown(tmp_path: Path) -> None:
     """Once a call's inspection budget is exhausted, every further side is unknown.
 

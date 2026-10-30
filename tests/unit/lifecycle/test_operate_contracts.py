@@ -1191,6 +1191,20 @@ SCOPED_ROADMAP = (
 )
 
 
+def test_ready_reports_recorded_approval_and_scope() -> None:
+    """Ready returns the roadmap's recorded approval and syntax-checked scope."""
+    issue = MemoryIssue()
+    issue.payload["roadmap.md"] = SCOPED_ROADMAP.encode()
+    member = next(iter(issue.state["participants"].values()))
+    member["packet"][0]["sha256"] = core.sha(issue.payload["roadmap.md"])
+    member["ack"] = core.sha(core.canonical(member["packet"]))
+    result = core.operate(MemoryStore(), issue, base_request("ready"))  # type: ignore[arg-type]
+    assert result["approval"] == {
+        "approved": True,
+        "scope": [{"root": SCOPE_ROOT, "paths": ["./"]}],
+    }
+
+
 @pytest.mark.parametrize(
     ("path", "content"),
     [
