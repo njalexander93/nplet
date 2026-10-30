@@ -178,7 +178,7 @@ an upstream `sysmon` repair will not fail the check.
 `PR Size Check` runs first in parallel with the other jobs, so an oversized PR
 fails without waiting for the native tests. It runs the
 [size gate](../../scripts/pr_size_gate.py) from the PR's base commit, never PR
-code, with no secrets and read-only repository access, so fork PRs run it too. The gate
+code, with a read-only token and no secrets, so fork PRs run it too. The gate
 counts GitHub's whole-PR additions plus deletions against the base; the job
 result is the size result. A failing size check does not cancel the other jobs.
 
@@ -190,9 +190,7 @@ result is the size result. A failing size check does not cancel the other jobs.
 | Head moved since the run started | Job fails; the newer push runs its own check. |
 
 The size result used to be a `PR Size Check` commit status posted by the AI review
-workflow. It is now a job with the same name, and the new gate posts no status.
-The job temporarily keeps `statuses: write` so the change that introduced it
-could pass with the old base gate; a follow-up removes it.
+workflow. It is now a job with the same name, and nothing posts that status.
 
 The [AI review workflow](../../.github/workflows/ai-review.yml) starts when a
 PR Pre-Merge Check run succeeds. Its `admit` job reads GitHub only and runs

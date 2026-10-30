@@ -7,6 +7,7 @@ head. The AI reviewer token is used solely to resolve the reviewer's login.
 """
 
 import os
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -130,7 +131,9 @@ def approved_review(reviews: list[Any], publisher: str, head: str, base: str) ->
     if latest.get("state") != "APPROVED":
         raise Skip(f"the latest AI review is {latest.get('state')}, not APPROVED")
     body = latest.get("body")
-    if not isinstance(body, str) or not body.startswith(f"<!-- ai-reviewer:{head}:{base} -->"):
+    # Newer reviewer versions append a request id (uuid4 hex) after the base.
+    marker = re.compile(rf"<!-- ai-reviewer:{head}:{base}(:[0-9a-f]{{32}})? -->")
+    if not isinstance(body, str) or not marker.match(body):
         raise Skip("the latest AI approval lacks the marker for this head and base")
     return latest
 

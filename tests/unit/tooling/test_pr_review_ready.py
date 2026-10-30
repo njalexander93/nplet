@@ -16,6 +16,7 @@ REPO = f"{API}/repos/o/r"
 PULL_URL = f"{REPO}/pulls/7"
 USER_URL = f"{API}/user"
 MARKER = f"<!-- ai-reviewer:{HEAD}:{BASE} -->\n## AI review"
+ID = "d" * 32
 CI_URL = (
     f"{REPO}/actions/workflows/pr-checks.yml/runs?head_sha={HEAD}&event=pull_request&per_page=100"
 )
@@ -217,6 +218,8 @@ def test_approved_current_green_pull_is_eligible(tmp_path: Path) -> None:
         ({reviews_url(1): [review(state="COMMENTED")]}, "COMMENTED"),
         ({reviews_url(1): [review(body="## AI review")]}, "marker"),
         ({reviews_url(1): [review(body=f"<!-- ai-reviewer:{HEAD}:{OTHER} -->")]}, "marker"),
+        ({reviews_url(1): [review(body=f"<!-- ai-reviewer:{HEAD}:{BASE}:xyz -->")]}, "marker"),
+        ({reviews_url(1): [review(body=f"<!-- ai-reviewer:{HEAD}:{OTHER}:{ID} -->")]}, "marker"),
         ({reviews_url(1): [review(login="spoof")]}, "no AI review"),
         ({reviews_url(1): [review(commit_id=OTHER)]}, "no AI review"),
         ({reviews_url(1): []}, "no AI review"),
@@ -305,6 +308,16 @@ def test_recheck_finding_new_head_skips(tmp_path: Path) -> None:
     # Expect a skip naming the moved head.
     assert (code, outputs) == (0, {"eligible": "false"})
     assert "no longer at head" in summary
+
+
+def test_approval_with_request_id_marker_counts(tmp_path: Path) -> None:
+    """The reviewer's per-request marker suffix still identifies the head and base."""
+    # Mark the approval the way ai-reviewer publishes it since request ids were added.
+    body = f"<!-- ai-reviewer:{HEAD}:{BASE}:{ID} -->\n## AI review"
+    fake = Fake(responses(**{reviews_url(1): [review(body=body)]}))
+    code, _, outputs = run(tmp_path, fake)
+    # Expect the approval to make the pull eligible.
+    assert (code, outputs["eligible"]) == (0, "true")
 
 
 def test_approval_on_second_review_page_counts(tmp_path: Path) -> None:
