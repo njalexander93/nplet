@@ -135,3 +135,19 @@ def test_legacy_scope_reports_malformed_committed_scope_as_none() -> None:
     """Return parsed entries for valid committed scope and None for malformed scope."""
     assert core.legacy_scope(scope(f"- `{ROOT}`: `./`")) == [{"root": ROOT, "paths": ["./"]}]
     assert core.legacy_scope("**Repository scope:** everything\n") is None
+
+
+def test_scope_change_needs_a_new_pending_revision_and_a_known_previous_record() -> None:
+    """Accept a changed scope only under a new pending revision of a known record."""
+    granted = scope(f"- `{ROOT}`: `./`")
+    pending = APPROVED.replace("Human approved revision r5.", "Pending approval.") + granted
+    previous = core.roadmap_record(APPROVED)
+    assert core.check_scope_change(None, APPROVED) == previous
+    assert core.check_scope_change(previous, pending.replace("r5 (", "r6 (")) == {
+        "revision": "r6",
+        "scope": [{"root": ROOT, "paths": ["./"]}],
+    }
+    # Unknown history, a reused revision or an approved record cannot change scope.
+    for record, text in ((None, pending), (previous, pending), (previous, APPROVED + granted)):
+        with pytest.raises(core.WorkspaceError):
+            core.check_scope_change(record, text)

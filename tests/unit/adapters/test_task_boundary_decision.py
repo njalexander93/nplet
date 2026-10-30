@@ -246,6 +246,22 @@ def test_scope_covers_only_granted_paths_of_each_repository() -> None:
     assert boundary.unauthorized(decision, scope, None, memo, VAULT)[:2] == covered[:2]
 
 
+def test_workspace_membership_and_vault_exemption_are_decided_per_point() -> None:
+    """A nested repository needs both grants; a vault point behind a workspace link stays exempt."""
+    nested = identity("w/sub", 5)
+    inner = effect((BASE / "w" / "sub" / "x.py", nested, None), ws=True)
+    linked = effect((BASE / "w" / "notes", W, None), (BASE / "v" / "n.md", V, None), ws=True)
+    decision = boundary.decide([inner, linked], VAULT)
+    memo = {str(BASE / "w"): (W, None), str(BASE / "w" / "sub"): (nested, None)}
+    grants = [
+        {"root": str(BASE / "w"), "paths": ["sub/", "notes"]},
+        {"root": str(BASE / "w" / "sub"), "paths": ["x.py"]},
+    ]
+    assert boundary.unauthorized(decision, grants, W.repository, memo, VAULT) == []
+    assert boundary.unauthorized(decision, grants[:1], W.repository, memo, VAULT) == [inner]
+    assert boundary.unauthorized(decision, grants[1:], W.repository, memo, VAULT) == [inner, linked]
+
+
 def test_alias_spelling_is_related_through_its_real_directory(tmp_path: Path) -> None:
     """A lexical point under a linked ancestor matches the root Git reports in real form.
 

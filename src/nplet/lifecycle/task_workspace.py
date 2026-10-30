@@ -36,6 +36,15 @@ from nplet.lifecycle._primitives import expected as expected
 from nplet.lifecycle._primitives import participant_key as participant_key
 from nplet.lifecycle._primitives import sha as sha
 from nplet.lifecycle._primitives import token as token
+from nplet.lifecycle._roadmap import RoadmapRecord as RoadmapRecord
+from nplet.lifecycle._roadmap import ScopeEntry as ScopeEntry
+from nplet.lifecycle._roadmap import check_scope_change as check_scope_change
+from nplet.lifecycle._roadmap import header_value as header_value
+from nplet.lifecycle._roadmap import legacy_scope as legacy_scope
+from nplet.lifecycle._roadmap import repository_scope as repository_scope
+from nplet.lifecycle._roadmap import revision_token as revision_token
+from nplet.lifecycle._roadmap import roadmap_approved as roadmap_approved
+from nplet.lifecycle._roadmap import roadmap_record as roadmap_record
 
 MAX_REQUEST = 96 * 1024 * 1024
 MAX_FILE = 16 * 1024 * 1024
@@ -48,9 +57,6 @@ NOTE = re.compile(r"context/[a-z0-9][a-z0-9._-]{0,79}\.md", re.ASCII)
 SEGMENT = re.compile(r"events-([0-9]{12})-([0-9]{12})\.jsonl", re.ASCII)
 DIGEST = re.compile(r"[0-9a-f]{64}")
 TERMINAL = {"completed", "cancelled", "failed"}
-REVISION = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", re.ASCII)
-APPROVED_REVISION = re.compile(r"(?<![\w-])approved revision (" + REVISION.pattern + ")", re.ASCII)
-SCOPE_ENTRY = re.compile(r"- `([^`\x00]+)`: (`[^`]*`(?:, `[^`]*`)*)")
 FAILPOINT: Callable[[str], None] | None = (
     None  # Test-only callable; never accepted in requests or environment.
 )
@@ -158,6 +164,7 @@ class WorkspaceState(TypedDict):
     tombstone: NotRequired[JSONObject]
     history: NotRequired[list[JSONObject]]
     reconciliation: NotRequired[JSONObject]
+    roadmap: NotRequired[RoadmapRecord]
     submitted_pr: NotRequired[str]
     provider_completion: NotRequired[JSONObject]
     cursor_plans: NotRequired[dict[str, invocation_records.InvocationPlan]]
@@ -1504,163 +1511,6 @@ def roadmap_refreshed(packet: list[SourceRef], digest: str) -> list[SourceRef]:
     return refreshed
 
 
-class ScopeEntry(TypedDict):
-    """Name repository-relative paths granted under one absolute worktree root."""
-
-    root: str
-    paths: list[str]
-
-
-def header_value(text: str, name: str) -> str | None:
-    """Return the value of one unique ``**Name:**`` roadmap header line.
-
-    Args:
-        text: Roadmap markdown.
-        name: Header field name without the bold markers or colon.
-
-    Returns:
-        The stripped value, or ``None`` when the field is absent or repeated.
-    """
-    # Accept only one header line so a duplicate cannot shadow the recorded value.
-    prefix = "**" + name + ":**"
-    values = [line[len(prefix) :].strip() for line in text.splitlines() if line.startswith(prefix)]
-    return values[0] if len(values) == 1 else None
-
-
-def revision_token(text: str) -> str | None:
-    """Return the roadmap's proposal revision token, if its first word is one.
-
-    Args:
-        text: Roadmap markdown.
-
-    Returns:
-        The first ``**Proposal revision:**`` word when it matches the token syntax.
-    """
-    # A trailing period or annotation is not part of the revision token.
-    words = (header_value(text, "Proposal revision") or "").split()
-    return words[0] if words and REVISION.fullmatch(words[0]) else None
-
-
-def roadmap_approved(text: str) -> bool:
-    """Check that the roadmap records approval of its current proposal revision.
-
-    This reads recorded state only. It does not authenticate the approving human or
-    enforce the prose intent of the approval record.
-
-    Args:
-        text: Roadmap markdown.
-
-    Returns:
-        Whether status is approved and the record names the current revision token.
-    """
-    # Require all three recorded fields with no template placeholder or pending record.
-    status, revision, record = (
-        header_value(text, name)
-        for name in ("Proposal status", "Proposal revision", "Approval record")
-    )
-    if status is None or revision is None or record is None:
-        return False
-    pending = record.casefold().startswith("pending")
-    if pending or any("<" in value for value in (status, revision, record)):
-        return False
-    # Match the approved revision named by the record against the current revision.
-    approved = APPROVED_REVISION.search(record)
-    current = revision_token(text)
-    return status.startswith("Approved") and approved is not None and approved[1] == current
-
-
-def repository_scope(text: str) -> list[ScopeEntry]:
-    """Parse the roadmap's repository scope grant syntax.
-
-    Repository identity is resolved later by the adapter; this checks syntax only.
-
-    Args:
-        text: Roadmap markdown.
-
-    Returns:
-        Granted entries; empty when the field is absent, ``none`` or a template placeholder.
-
-    Raises:
-        WorkspaceError: ``INVALID_REQUEST`` if the field is repeated or malformed.
-    """
-    # Treat an absent field, explicit none, or template placeholder as no grant.
-    prefix = "**Repository scope:**"
-    lines = text.splitlines()
-    found = [i for i, line in enumerate(lines) if line.startswith(prefix)]
-    if not found:
-        return []
-    require(len(found) == 1)
-    value = lines[found[0]][len(prefix) :].strip()
-    if value == "none" or re.fullmatch(r"<[^<>]*>", value):
-        return []
-    require(value == "")
-    # Read the consecutive entry lines directly below the header.
-    entries: list[ScopeEntry] = []
-    for line in lines[found[0] + 1 :]:
-        if not line.startswith("- "):
-            break
-        match = SCOPE_ENTRY.fullmatch(line)
-        if match is None:
-            raise WorkspaceError("INVALID_REQUEST")
-        root, paths = match[1], re.findall(r"`([^`]*)`", match[2])
-        require(Path(root).is_absolute() and all(e["root"] != root for e in entries))
-        # Accept one file, one subtree, or exactly ./ for the whole repository.
-        for path in paths:
-            parts = path.removesuffix("/").split("/")
-            require(
-                path == "./"
-                or (
-                    not path.startswith("/")
-                    and not set(path) & set("*?[\\\x00")
-                    and all(part not in {"", ".", ".."} for part in parts)
-                )
-            )
-        entries.append({"root": root, "paths": paths})
-    # Bound the grant and require at least one entry under an empty header value.
-    require(0 < len(entries) <= 32 and sum(len(e["paths"]) for e in entries) <= 256)
-    return entries
-
-
-def legacy_scope(text: str) -> list[ScopeEntry] | None:
-    """Parse repository scope from committed bytes that predate validation.
-
-    Args:
-        text: Roadmap markdown.
-
-    Returns:
-        Parsed entries, or ``None`` when the committed field is malformed.
-    """
-    # Committed roadmaps may predate the validator, so report rather than fail.
-    try:
-        return repository_scope(text)
-    except WorkspaceError:
-        return None
-
-
-def check_scope_change(old: str, new: str) -> None:
-    """Require a new pending proposal revision for any repository scope change.
-
-    Args:
-        old: Committed roadmap markdown.
-        new: Replacement roadmap markdown.
-
-    Raises:
-        WorkspaceError: ``INVALID_REQUEST`` if the new scope is malformed, or if it
-            changes without a new revision token and a ``Pending`` approval record.
-    """
-    # Validate the replacement grant and accept unchanged scope as-is.
-    scope = repository_scope(new)
-    if scope == legacy_scope(old):
-        return
-    # A changed grant must be re-proposed under a new revision awaiting approval.
-    revision = revision_token(new)
-    require(
-        revision is not None
-        and revision != revision_token(old)
-        and (header_value(new, "Approval record") or "").startswith("Pending")
-    )
-
-
 class SourceState(TypedDict):
     """Compare one assigned reference's recorded digest with its current source bytes."""
 
@@ -2470,10 +2320,11 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             ),
             "INTEGRITY_ERROR",
         )
-        # Changed roadmap bytes may not import a scope grant as approved; the old bytes
-        # are gone, so any nonempty scope counts as a change.
+        # Changed roadmap bytes face the same scope rule as update; the old bytes are
+        # gone, so compare with the retained record of the committed roadmap.
         if sha(observed["roadmap.md"]) != state["files"]["roadmap.md"]:
-            check_scope_change("", observed["roadmap.md"].decode(errors="replace"))
+            text = observed["roadmap.md"].decode(errors="replace")
+            state["roadmap"] = check_scope_change(state.get("roadmap"), text)
         # Explicit reconciliation imports inspected Markdown only, never arbitrary events.
         issue.state = copy.deepcopy(state)
         issue.state["files"] = manifest(observed)
@@ -2710,7 +2561,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         require(len(data) <= MAX_FILE, "SIZE_LIMIT")
         # Roadmap scope grants change only under a new revision awaiting approval.
         if path == "roadmap.md":
-            check_scope_change(files[path].decode(errors="replace"), request["content"])
+            committed = roadmap_record(files[path].decode(errors="replace"))
+            state["roadmap"] = check_scope_change(committed, request["content"])
         provenance = request["provenance"]
         require(set(provenance) == {"sources", "applicability", "status"}, "EVIDENCE_REQUIRED")
         evidence(provenance["sources"])

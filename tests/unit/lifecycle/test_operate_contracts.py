@@ -1225,9 +1225,10 @@ def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
         path: Edited Markdown payload path.
         content: Edited bytes; a roadmap scope arrives only as a pending proposal.
     """
-    # Bind the existing directory identity and edited Markdown bytes.
+    # Bind the existing directory identity, the retained template record and edited bytes.
     store, issue = MemoryStore(), MemoryIssue()
     issue.state["directory_identity"] = [4, 5]
+    issue.state["roadmap"] = core.roadmap_record("")
     observed = {**issue.payload, path: content}
 
     class Payload:
@@ -1287,29 +1288,51 @@ def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
     assert issue.payload[path] == content
     assert issue.state["reconciliation"] == {"previous": previous, "evidence": [source]}
     assert issue.commits[-1][0] == "reconciliation"
+    # An imported roadmap becomes the record later reconciliations compare against.
+    if path == "roadmap.md":
+        assert issue.state["roadmap"] == core.roadmap_record(content.decode())
+
+
+PENDING_ROADMAP = SCOPED_ROADMAP.replace("Human approved revision r2.", "Pending approval.")
 
 
 @pytest.mark.parametrize(
-    ("path", "content", "code"),
+    ("path", "content", "record", "code"),
     [
-        ("events.jsonl", b"uncommitted event\n", "INTEGRITY_ERROR"),
-        ("roadmap.md", SCOPED_ROADMAP.encode(), "INVALID_REQUEST"),
+        ("events.jsonl", b"uncommitted event\n", None, "INTEGRITY_ERROR"),
+        ("roadmap.md", SCOPED_ROADMAP.encode(), core.roadmap_record(""), "INVALID_REQUEST"),
+        # Without a retained record a reused revision cannot be detected.
+        ("roadmap.md", PENDING_ROADMAP.encode(), None, "INVALID_REQUEST"),
+        # A broader scope may not reuse the committed revision, even while pending.
+        (
+            "roadmap.md",
+            PENDING_ROADMAP.encode(),
+            {"revision": "r2", "scope": [{"root": SCOPE_ROOT, "paths": ["src/"]}]},
+            "INVALID_REQUEST",
+        ),
     ],
 )
 def test_reconcile_rejects_changed_event_bytes_before_commit(
-    monkeypatch: pytest.MonkeyPatch, path: str, content: bytes, code: str
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    content: bytes,
+    record: core.RoadmapRecord | None,
+    code: str,
 ) -> None:
-    """Forbid importing event history or an approved scope grant through reconciliation.
+    """Forbid importing event history or an unproposed scope grant through reconciliation.
 
     Args:
         monkeypatch: Pytest fixture used to replace the dependency under test.
         path: Changed payload path.
         content: Changed bytes.
+        record: Retained record of the committed roadmap, if any.
         code: Expected rejection code.
     """
-    # Bind the existing directory identity and the rejected changed bytes.
+    # Bind the existing directory identity, any retained record and the rejected bytes.
     store, issue = MemoryStore(), MemoryIssue()
     issue.state["directory_identity"] = [4, 5]
+    if record is not None:
+        issue.state["roadmap"] = record
     observed = {**issue.payload, path: content}
 
     class Payload:

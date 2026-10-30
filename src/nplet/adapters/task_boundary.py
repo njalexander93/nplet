@@ -862,6 +862,22 @@ def covered(relative: str, granted: list[str]) -> bool:
     )
 
 
+def _below(path: Path, root: Path | str) -> str | None:
+    """Spell a path relative to a root in POSIX form.
+
+    Args:
+        path: Real-directory spelling of a point.
+        root: Worktree root.
+
+    Returns:
+        The relative spelling, ``.`` for the root itself, or None outside it.
+    """
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
 def unauthorized(
     decision: Decision,
     scope: list[core.ScopeEntry],
@@ -897,6 +913,8 @@ def unauthorized(
         }:
             grants.setdefault(identity.key(), []).extend(entry["paths"])
     common = None if session is None else os.path.normpath(session.common)
+    roots = [] if session is None else [os.path.realpath(tree) for tree in session.trees]
+    own = [path for key, paths in grants.items() if key[0] == common for path in paths]
     missing = []
     for effect in decision.protected:
         # Reserved policy edits are never authorized.
@@ -904,26 +922,30 @@ def unauthorized(
         if policy_target(effect, policy):
             missing.append(effect)
             continue
-        # A workspace effect must map to the session repository through some point.
-        if effect.location.workspace and not any(
-            p.repository and os.path.normpath(p.repository.repository.common) == common
-            for p in points
-        ):
-            missing.append(effect)
-            continue
-        # Every non-exempt repository point must be granted under its own root.
         flags = repository_exemptions.exempt(effect.location, exemptions)
+        inside, granted = False, True
         for point, vault in zip(points, flags, strict=True):
-            # The workspace stays protected even if its repository is declared a vault.
-            if (vault and not effect.location.workspace) or point.repository is None:
-                continue
-            # Discovery saw the real directory, so relate its real spelling to the root.
+            # Discovery saw the real directory, so relate its real spelling to each root.
             real = Path(os.path.realpath(point.path.parent), point.path.name)
-            try:
-                relative = real.relative_to(point.repository.repository.root).as_posix()
-            except ValueError:
-                relative = None
+            family = (
+                point.repository is not None
+                and os.path.normpath(point.repository.repository.common) == common
+            )
+            # A spelling below a session worktree root is in the workspace even when a
+            # nested repository holds it, so the session grant must also cover it.
+            nested = None
+            if not family:
+                nested = next((r for t in roots if (r := _below(real, t)) is not None), None)
+            inside = inside or family or nested is not None
+            if nested is not None and not covered(nested, own):
+                granted = False
+            # Only points outside the workspace keep a vault exemption.
+            if (vault and not (family or nested is not None)) or point.repository is None:
+                continue
+            relative = _below(real, point.repository.repository.root)
             if relative is None or not covered(relative, grants.get(point.repository.key(), [])):
-                missing.append(effect)
-                break
+                granted = False
+        # A workspace effect must also reach the workspace through some point.
+        if not granted or (effect.location.workspace and not inside):
+            missing.append(effect)
     return missing
