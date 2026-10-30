@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from typing import Any
 
@@ -1180,11 +1181,13 @@ def test_restore_rejects_changed_archive_manifest_without_creating_payload(
     assert issue.commits == []
 
 
+# A drive-less root is relative on Windows.
+SCOPE_ROOT = "C:/abs/worktree" if os.name == "nt" else "/abs/worktree"
 SCOPED_ROADMAP = (
     "**Proposal status:** Approved by the user.\n"
     "**Proposal revision:** r2\n"
     "**Approval record:** Human approved revision r2.\n"
-    "**Repository scope:**\n- `/abs/worktree`: `./`\n"
+    f"**Repository scope:**\n- `{SCOPE_ROOT}`: `./`\n"
 )
 
 

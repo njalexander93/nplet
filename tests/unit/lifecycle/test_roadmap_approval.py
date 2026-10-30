@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
 
-ROOT = "/abs/worktree"
+# A drive-less root is relative on Windows.
+BASE = "C:/abs" if os.name == "nt" else "/abs"
+ROOT = f"{BASE}/worktree"
 APPROVED = (
     "**Proposal status:** Approved by the user.\n"
     "**Proposal revision:** r5 (2026-10-30)\n"
@@ -36,15 +40,15 @@ def scope(*entries: str) -> str:
         ("**Repository scope:** <none, or approved entries; see docs>\n", []),
         (scope(f"- `{ROOT}`: `src/a.py`"), [{"root": ROOT, "paths": ["src/a.py"]}]),
         (
-            scope(f"- `{ROOT}`: `src/`, `docs/x.md`", "- `/other`: `./`"),
+            scope(f"- `{ROOT}`: `src/`, `docs/x.md`", f"- `{BASE}/other`: `./`"),
             [
                 {"root": ROOT, "paths": ["src/", "docs/x.md"]},
-                {"root": "/other", "paths": ["./"]},
+                {"root": f"{BASE}/other", "paths": ["./"]},
             ],
         ),
         (
-            scope(*(f"- `/r{i}`: `a`" for i in range(32))),
-            [{"root": f"/r{i}", "paths": ["a"]} for i in range(32)],
+            scope(*(f"- `{BASE}/r{i}`: `a`" for i in range(32))),
+            [{"root": f"{BASE}/r{i}", "paths": ["a"]} for i in range(32)],
         ),
     ],
 )
@@ -85,8 +89,8 @@ def test_repository_scope_accepts_grants(text: str, expected: list[core.ScopeEnt
                 "a\x00b",
             )
         ),
-        scope(*(f"- `/r{i}`: `a`" for i in range(33))),
-        scope(*(f"- `/r{i}`: " + ", ".join(f"`p{j}`" for j in range(129)) for i in range(2))),
+        scope(*(f"- `{BASE}/r{i}`: `a`" for i in range(33))),
+        scope(*(f"- `{BASE}/r{i}`: " + ", ".join(f"`p{j}`" for j in range(129)) for i in range(2))),
         "**Repository scope:** none\n**Repository scope:** none\n",
     ],
 )

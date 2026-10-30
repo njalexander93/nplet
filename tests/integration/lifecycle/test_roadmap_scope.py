@@ -5,6 +5,8 @@ Roadmap approval text is synthetic; these tests do not prove human approval.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from nplet.lifecycle import task_workspace as w
@@ -13,7 +15,9 @@ from tests.types import JsonObject
 
 pytestmark = pytest.mark.integration
 
-GRANT = "**Repository scope:**\n- `/abs/root`: `src/`\n"
+# A drive-less root is relative on Windows.
+BASE = "C:/abs" if os.name == "nt" else "/abs"
+GRANT = f"**Repository scope:**\n- `{BASE}/root`: `src/`\n"
 HEADER = (
     "**Proposal status:** {status}\n"
     "**Proposal revision:** {revision}\n"
@@ -92,7 +96,7 @@ class RoadmapScopeTests(Fixture):
         self.require_ok(self.update(pending + GRANT))
         self.assertEqual(
             self.call("ready")["approval"],
-            {"approved": False, "scope": [{"root": "/abs/root", "paths": ["src/"]}]},
+            {"approved": False, "scope": [{"root": f"{BASE}/root", "paths": ["src/"]}]},
         )
         # Recording approval without changing the grant needs no further revision.
         self.require_ok(self.update(bumped + GRANT))
