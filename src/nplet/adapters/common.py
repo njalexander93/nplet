@@ -11,9 +11,10 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 from nplet.adapters import bootstrap as encoded_bootstrap
-from nplet.adapters import runner, task_boundary
+from nplet.adapters import repository_exemptions, repository_location, runner, task_boundary
 from nplet.adapters.session_repository import (
     carry_repository,
     project_root,
@@ -1531,6 +1532,74 @@ def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
     return event
 
 
+class EditGate(NamedTuple):
+    """Admission evidence for one structured edit with known targets.
+
+    Attributes:
+        decision: Effect classes from ``task_boundary.decide``.
+        memo: Invocation-local repository discovery results.
+        exemptions: The vault exemptions the decision used.
+        policy: The reserved exemption policy path the decision used.
+    """
+
+    decision: task_boundary.Decision
+    memo: repository_location.Memo
+    exemptions: repository_exemptions.Exemptions
+    policy: Path
+
+
+def edit_gate(event: core.JSONObject, repository: core.Repository | None) -> EditGate | None:
+    """Classify a structured edit's effects and refuse exemption policy administration.
+
+    Args:
+        event: Validated native tool and argument envelope.
+        repository: The session's carried project repository, or None.
+
+    Returns:
+        The edit's admission evidence, or None for a non-edit tool or an unknown or
+        malformed edit shape, which keeps its existing admission.
+
+    Raises:
+        core.WorkspaceError: ``POLICY_ADMINISTRATION`` if an effect targets the policy file.
+    """
+    # Unknown or malformed edit shapes and other tools have no effects to decide.
+    effects = task_boundary.edit_effects(event, repository, task_boundary.Budget())
+    if not effects:
+        return None
+    # Read the policy path at call time so a relocated policy is honored.
+    policy = repository_exemptions.POLICY
+    memo: repository_location.Memo = {}
+    exemptions = repository_exemptions.load(policy, memo)
+    decision = task_boundary.decide(effects, exemptions, policy)
+    # Agents never edit the policy that exempts their own repositories.
+    core.require(not decision.policy, "POLICY_ADMINISTRATION")
+    return EditGate(decision, memo, exemptions, policy)
+
+
+def edit_authority(
+    gate: EditGate, ready: core.JSONObject, repository: core.Repository | None
+) -> None:
+    """Require the ready roadmap's approval and scope to cover a protected edit.
+
+    Args:
+        gate: The edit's admission evidence from ``edit_gate``.
+        ready: Successful lifecycle ``ready`` result carrying ``approval``.
+        repository: The session's carried project repository, or None.
+
+    Raises:
+        core.WorkspaceError: ``APPROVAL_REQUIRED`` without recorded approval of the
+            current revision, or ``SCOPE_REQUIRED`` for an uncovered protected effect.
+    """
+    # Approval of the current proposal revision precedes any scope grant.
+    approval = ready["approval"]
+    core.require(approval["approved"] is True, "APPROVAL_REQUIRED")
+    # Every protected effect must lie inside the approved repository scope.
+    missing = task_boundary.unauthorized(
+        gate.decision, approval["scope"], repository, gate.memo, gate.exemptions, gate.policy
+    )
+    core.require(not missing, "SCOPE_REQUIRED")
+
+
 def native_pre(event: core.JSONObject, host: str) -> None:
     """Enforce readiness and record supported native tool admission.
 
@@ -1562,14 +1631,22 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         if host == "cursor" and tool.startswith("MCP:")
         else _linear_provider_tool(event, host)
     )
-    roles = task_boundary.edit_roles(event, session_repository(event))
-    # Validated parent reads, planning and external edits need no task lifecycle admission.
+    repository = session_repository(event)
+    roles = task_boundary.edit_roles(event, repository)
+    gate = edit_gate(event, repository)
+    # A structured parent edit without protected effects needs no task; a child's
+    # edit keeps its scoped admission.
+    if gate is not None:
+        free = not gate.decision.protected and event.get("child") is not True
+    else:
+        free = task_boundary.task_free(effect, host, operation, roles)
+    # Validated parent reads, planning and task-free effects need no lifecycle admission.
     if (
         host == "claude-code"
         and tool
         in CLAUDE_NO_EFFECT_TOOLS | {"mcp__ccd_turn__update_plan", "mcp__ccd_turn__wrap_up"}
         and event.get("child") is not True
-    ) or task_boundary.task_free(effect, host, operation, roles):
+    ) or free:
         return
     # Raw control-store mutation never becomes a readiness-authorized edit.
     core.require("control" not in roles, "NOT_OWNER")
@@ -1577,6 +1654,9 @@ def native_pre(event: core.JSONObject, host: str) -> None:
     request = request_for(event, "ready", host)
     result = core.execute(request)
     core.require(result["ok"], result["code"])
+    # A protected structured edit also needs the roadmap's approval and scope.
+    if gate is not None:
+        edit_authority(gate, result, repository)
     # Native permission approval remains separate from recording pending work.
     # A ready session's no-effect load, message or hand-back needs no settlement.
     if host == "claude-code" and tool in CLAUDE_NO_EFFECT_TOOLS | CLAUDE_CHILD_REPORT_TOOLS:
@@ -2079,6 +2159,26 @@ def _recovery_route(code: str, host: str) -> str:
             "submit `Task: <other-issue>` and read that ticket so startup rebinds you "
             "(the old issue is preserved), or run an explicit rebind to a target that "
             f"already assigns this session, using {command}."
+        )
+    # The exemption policy is user-administered and never agent-editable.
+    if code == "POLICY_ADMINISTRATION":
+        return (
+            "The edit targets the vault exemption policy file. Agents cannot change it; "
+            "the user edits it directly."
+        )
+    # Protected edits need the current proposal revision's recorded approval.
+    if code == "APPROVAL_REQUIRED":
+        return (
+            "The roadmap does not record approval of its current proposal revision "
+            "(Proposal status `Approved`, Approval record `approved revision <token>` "
+            "matching Proposal revision). Get explicit human approval through the "
+            "proposal lifecycle, then ready."
+        )
+    # Protected edits must lie inside the approved repository scope.
+    if code == "SCOPE_REQUIRED":
+        return (
+            "A protected path is outside the roadmap's `Repository scope`. Add it through "
+            "a new proposal revision, explicit approval and readiness."
         )
     # A working directory outside every repository has no protected checkout.
     if code == "REPOSITORY_ABSENT":

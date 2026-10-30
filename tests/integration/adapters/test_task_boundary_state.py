@@ -110,6 +110,7 @@ def test_completion_uses_recorded_admission_after_target_changes() -> None:
     try:
         case.create()
         case.ready()
+        case.approve()
         observed = carrier.carry_repository(
             {
                 "hook_event_name": "PreToolUse",
@@ -160,6 +161,7 @@ def test_same_free_input_changes_identity_before_completion(host: str) -> None:
     try:
         case.create()
         case.ready()
+        case.approve()
         source = case.root / "src/app.py"
         source.parent.mkdir()
         source.write_text("source sentinel")

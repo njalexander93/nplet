@@ -18,6 +18,7 @@ from tests.integration.adapters.task_boundary_support import (
     pre_decision,
     task_store_snapshot,
 )
+from tests.integration.adapters.test_repository_exemptions import declared, write_policy
 from tests.platform_support import link_directory
 from tests.support import Fixture
 
@@ -185,19 +186,21 @@ def test_cursor_shell_override_rejects_foreign_checkout_and_unknown_effect(
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
 def test_fresh_reads_and_external_edits_leave_no_task_while_repository_edits_are_denied(
-    checkout: Path, tmp_path: Path, host: str
+    checkout: Path, tmp_path: Path, isolated_exemption_policy: Path, host: str
 ) -> None:
     """Permit reads and edits outside the repository; deny every in-repository edit.
 
     Args:
         checkout: Real checkout with no task registration.
         tmp_path: Disposable parent for external, vault and non-Git targets.
+        isolated_exemption_policy: Relocated policy that declares the vault.
         host: Native adapter.
     """
     adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
-    # A separate Git repository stands in for a vault; it is not project code.
+    # A separate Git repository declared in the exemption policy is a vault, not project code.
     vault = tmp_path / "vault"
     subprocess.run(["git", "init", "-q", str(vault)], check=True)
+    write_policy(isolated_exemption_policy.parent, declared(vault))
     # Reads and edits outside the repository require neither binding nor lifecycle setup.
     for tool, args in [
         ("Read", {"file_path": str(checkout / "src/app.py")}),
@@ -298,10 +301,10 @@ def test_linked_worktree_missing_on_disk_keeps_its_listed_path_protected(
 def test_session_outside_any_repository_edits_without_a_gate(
     checkout: Path, tmp_path: Path, host: str
 ) -> None:
-    """Admit every edit from a non-Git cwd, including one aimed into a repository.
+    """Admit external edits from a non-Git cwd but gate text aimed into a repository.
 
-    A cwd inside no Git repository has no project roots, so this hook treats every
-    target as external; host permissions remain the only control.
+    A cwd inside no Git repository has no project roots, so only another
+    repository's text content needs a task.
 
     Args:
         checkout: Real checkout that the session does not belong to.
@@ -311,17 +314,21 @@ def test_session_outside_any_repository_edits_without_a_gate(
     adapter = {"codex": codex, "claude": claude, "cursor": cursor}[host]
     plain = tmp_path / "plain"
     plain.mkdir()
-    # Both a local file and a file in an unrelated repository are external here.
-    for target in (plain / "x.md", checkout / "src/app.py"):
-        observed = event(plain, host, "Write", {"file_path": str(target), "content": "prose"})
-        assert adapter.handle(observed) == ({"permission": "allow"} if host == "cursor" else {})
-        completed = {
-            **observed,
-            "hook_event_name": "postToolUse" if host == "cursor" else "PostToolUse",
-            "tool_response": {"isError": False},
-            "tool_output": "{}",
-        }
-        assert adapter.handle(completed) == {}
+    # Text written into an unrelated repository is protected even from here.
+    target = checkout / "src/app.py"
+    observed = event(plain, host, "Write", {"file_path": str(target), "content": "prose"})
+    assert not allowed(host, pre_decision(host, observed))
+    assert not target.exists()
+    # A local file outside every repository is external.
+    observed = event(plain, host, "Write", {"file_path": str(plain / "x.md"), "content": "prose"})
+    assert adapter.handle(observed) == ({"permission": "allow"} if host == "cursor" else {})
+    completed = {
+        **observed,
+        "hook_event_name": "postToolUse" if host == "cursor" else "PostToolUse",
+        "tool_response": {"isError": False},
+        "tool_output": "{}",
+    }
+    assert adapter.handle(completed) == {}
     assert not (plain / ".task").exists()
     assert not (checkout / ".task").exists()
 

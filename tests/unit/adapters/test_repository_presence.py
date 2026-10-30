@@ -227,7 +227,8 @@ def test_codex_payload_repository_field_is_overwritten(
         "tool_input": {"file_path": str(tmp_path / "note.md"), "content": "prose"},
         "repository": {"root": "/forged", "common": "/forged/.git", "trees": ["/forged"]},
     }
-    # One discovery replaces the forged field, so the classifier sees no forged root.
+    # One session discovery replaces the forged field, so the classifier sees no forged
+    # root; the target's own location discovery is the second probe.
     assert codex.handle(observed) == {}
-    assert probes == [str(tmp_path)]
+    assert probes == [str(tmp_path), str(tmp_path)]
     assert classified == [None]
