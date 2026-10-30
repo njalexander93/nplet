@@ -773,22 +773,27 @@ def policy_target(effect: Effect, policy: Path) -> bool:
 
     Returns:
         Whether a point spells the policy's lexical or real path, is the same file,
-        or names it case-insensitively in the same directory.
+        names it case-insensitively in the same directory, or folds to its spelling
+        while that directory is absent.
     """
     spellings = {os.path.normpath(policy), os.path.realpath(policy)}
     # File identity catches spellings a case-insensitive filesystem treats as equal.
     own, folder, name = _file_id(policy), _file_id(policy.parent), policy.name.casefold()
+    folded = {spelling.casefold() for spelling in spellings}
     for point in effect.location.points:
         # An exact spelling or the same existing file is the policy.
         found = _file_id(point.path)
         if os.path.normpath(point.path) in spellings or (found is not None and found == own):
             return True
         # A point that cannot be read may create the policy under a case variant.
-        if (
-            found is None
-            and folder is not None
-            and point.path.name.casefold() == name
-            and _file_id(point.path.parent) == folder
+        if found is None and (
+            (
+                folder is not None
+                and point.path.name.casefold() == name
+                and _file_id(point.path.parent) == folder
+            )
+            # Without the policy directory there is no identity, so compare folded spellings.
+            or (folder is None and os.path.normpath(point.path).casefold() in folded)
         ):
             return True
     return False

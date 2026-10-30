@@ -180,6 +180,20 @@ def test_policy_case_variants_are_reserved(tmp_path: Path, exists: bool) -> None
         assert decision.policy is reserved
 
 
+def test_policy_case_variant_is_reserved_before_its_directory_exists(tmp_path: Path) -> None:
+    """A case variant of a policy whose directory is absent may create that policy.
+
+    Args:
+        tmp_path: Directory that does not yet hold the policy directory.
+    """
+    policy = tmp_path / "cfg" / "repository-exemptions.json"
+    for spelling in (policy, tmp_path / "CFG" / "Repository-Exemptions.json"):
+        decision = boundary.decide([effect((spelling, None, None), before=ABSENT)], NONE, policy)
+        assert decision.policy is True
+    other = effect((tmp_path / "cfg" / "other.json", None, None), before=ABSENT)
+    assert boundary.decide([other], NONE, policy).policy is False
+
+
 def test_session_repository_declared_as_vault_still_needs_scope() -> None:
     """A vault declaration does not lift the scope requirement inside the workspace."""
     target = effect((BASE / "w" / "README.md", W, None), ws=True)

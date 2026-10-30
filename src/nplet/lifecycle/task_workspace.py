@@ -49,7 +49,7 @@ SEGMENT = re.compile(r"events-([0-9]{12})-([0-9]{12})\.jsonl", re.ASCII)
 DIGEST = re.compile(r"[0-9a-f]{64}")
 TERMINAL = {"completed", "cancelled", "failed"}
 REVISION = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", re.ASCII)
-APPROVED_REVISION = re.compile(r"approved revision (" + REVISION.pattern + ")", re.ASCII)
+APPROVED_REVISION = re.compile(r"(?<![\w-])approved revision (" + REVISION.pattern + ")", re.ASCII)
 SCOPE_ENTRY = re.compile(r"- `([^`\x00]+)`: (`[^`]*`(?:, `[^`]*`)*)")
 FAILPOINT: Callable[[str], None] | None = (
     None  # Test-only callable; never accepted in requests or environment.
