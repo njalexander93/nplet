@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from nplet.adapters import repository_location
+from nplet.adapters import repository_exemptions, repository_location
 from nplet.lifecycle import task_workspace as core
 
 LINEAR_OPERATIONS = frozenset(
@@ -731,3 +731,160 @@ def edit_effects(
         after = None if op in {"delete", "move-from"} else TEXT
         effects.append(Effect(op, location, before, after))
     return effects
+
+
+class Decision(NamedTuple):
+    """Effect classes of one call, for a workflow guard rather than containment.
+
+    Attributes:
+        protected: Effects that need task readiness and scope authority.
+        unchecked: Effects whose evidence is incomplete, neither protected nor free.
+        free: Effects that need no task.
+        policy: Whether some point targets the reserved exemption policy file.
+        diagnostic: The exemption policy's bounded error code, if it could not be used.
+    """
+
+    protected: list[Effect]
+    unchecked: list[Effect]
+    free: list[Effect]
+    policy: bool
+    diagnostic: str | None
+
+
+def policy_target(effect: Effect, policy: Path) -> bool:
+    """Report whether any point of an effect spells the reserved policy file.
+
+    Args:
+        effect: Effect to inspect.
+        policy: Policy file path.
+
+    Returns:
+        Whether a normalized point path equals the policy's lexical or real path.
+    """
+    spellings = {os.path.normpath(policy), os.path.realpath(policy)}
+    return any(os.path.normpath(point.path) in spellings for point in effect.location.points)
+
+
+def decide(
+    effects: list[Effect],
+    exemptions: repository_exemptions.Exemptions,
+    policy: Path = repository_exemptions.POLICY,
+) -> Decision:
+    """Split effects into protected, unchecked and free by their strongest point.
+
+    This is a workflow guard over the evidence the caller gathered; content and
+    location may change between inspection and the edit.
+
+    Args:
+        effects: Effects from ``edit_effects``.
+        exemptions: Loaded vault exemptions; with an error none are exempt.
+        policy: Reserved policy file path, which no effect may edit task-free.
+
+    Returns:
+        Each effect in exactly one class list, in input order.
+    """
+    decision = Decision([], [], [], False, exemptions.error)
+    for effect in effects:
+        # The policy file is reserved whatever its location evidence says.
+        reserved = policy_target(effect, policy)
+        if reserved:
+            decision = decision._replace(policy=True)
+        # Workspace effects are protected for every file type.
+        if reserved or effect.location.workspace:
+            decision.protected.append(effect)
+            continue
+        # Repository content is protected when any applicable side is text.
+        sides = [side for side in (effect.before, effect.after) if side is not None]
+        content = 2 if TEXT in sides else 0 if set(sides) <= {BINARY, ABSENT} else 1
+        # Rank every point; vault and external points are free, failed ones unchecked.
+        ranks = [
+            0 if vault else content if point.repository else 1 if point.error else 0
+            for point, vault in zip(
+                effect.location.points,
+                repository_exemptions.exempt(effect.location, exemptions),
+                strict=True,
+            )
+        ]
+        # The strongest point decides the effect's class.
+        (decision.free, decision.unchecked, decision.protected)[max(ranks, default=1)].append(
+            effect
+        )
+    return decision
+
+
+def covered(relative: str, granted: list[str]) -> bool:
+    """Match one repository-relative POSIX path against granted scope paths.
+
+    Args:
+        relative: Path relative to its worktree root.
+        granted: Granted entries; ``d/`` covers a subtree and ``./`` everything.
+
+    Returns:
+        Whether some entry covers the path, comparing bytes exactly.
+    """
+    return any(
+        entry == "./" or (relative.startswith(entry) if entry.endswith("/") else relative == entry)
+        for entry in granted
+    )
+
+
+def unauthorized(
+    decision: Decision,
+    scope: list[core.ScopeEntry],
+    session: core.Repository | None,
+    memo: repository_location.Memo,
+    exemptions: repository_exemptions.Exemptions,
+    policy: Path = repository_exemptions.POLICY,
+) -> list[Effect]:
+    """List protected effects the recorded repository scope does not cover.
+
+    Exempt points, points outside every repository and failed points need no
+    authority; every other repository point must be granted under its own repository.
+
+    Args:
+        decision: Result of ``decide``.
+        scope: Scope entries from the lifecycle ``ready`` result.
+        session: The session's carried repository; None outside every repository.
+        memo: Invocation-local discovery results.
+        exemptions: The exemptions ``decide`` used.
+        policy: The reserved policy file path ``decide`` used.
+
+    Returns:
+        Uncovered protected effects in order, always including policy targets.
+    """
+    # Group granted paths by repository identity; an unresolved root grants nothing.
+    grants: dict[tuple[str, tuple[int, int]], list[str]] = {}
+    for entry in scope:
+        identity, _ = repository_location.discover(Path(entry["root"]), memo)
+        if identity is not None:
+            grants.setdefault(identity.key(), []).extend(entry["paths"])
+    common = None if session is None else os.path.normpath(session.common)
+    missing = []
+    for effect in decision.protected:
+        # Reserved policy edits are never authorized.
+        points = effect.location.points
+        if policy_target(effect, policy):
+            missing.append(effect)
+            continue
+        # A workspace effect must map to the session repository through some point.
+        if effect.location.workspace and not any(
+            p.repository and os.path.normpath(p.repository.repository.common) == common
+            for p in points
+        ):
+            missing.append(effect)
+            continue
+        # Every non-exempt repository point must be granted under its own root.
+        flags = repository_exemptions.exempt(effect.location, exemptions)
+        for point, vault in zip(points, flags, strict=True):
+            if vault or point.repository is None:
+                continue
+            # Discovery saw the real directory, so relate its real spelling to the root.
+            real = Path(os.path.realpath(point.path.parent), point.path.name)
+            try:
+                relative = real.relative_to(point.repository.repository.root).as_posix()
+            except ValueError:
+                relative = None
+            if relative is None or not covered(relative, grants.get(point.repository.key(), [])):
+                missing.append(effect)
+                break
+    return missing
