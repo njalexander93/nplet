@@ -751,6 +751,19 @@ class Decision(NamedTuple):
     diagnostic: str | None
 
 
+def _file_id(path: Path) -> tuple[int, int] | None:
+    """Read one path's device and inode, following links.
+
+    Args:
+        path: Path to identify.
+
+    Returns:
+        The device and inode pair, or None when the path cannot be read.
+    """
+    info = _stat(path)
+    return None if info is None else (info.st_dev, info.st_ino)
+
+
 def policy_target(effect: Effect, policy: Path) -> bool:
     """Report whether any point of an effect spells the reserved policy file.
 
@@ -759,10 +772,26 @@ def policy_target(effect: Effect, policy: Path) -> bool:
         policy: Policy file path.
 
     Returns:
-        Whether a normalized point path equals the policy's lexical or real path.
+        Whether a point spells the policy's lexical or real path, is the same file,
+        or names it case-insensitively in the same directory.
     """
     spellings = {os.path.normpath(policy), os.path.realpath(policy)}
-    return any(os.path.normpath(point.path) in spellings for point in effect.location.points)
+    # File identity catches spellings a case-insensitive filesystem treats as equal.
+    own, folder, name = _file_id(policy), _file_id(policy.parent), policy.name.casefold()
+    for point in effect.location.points:
+        # An exact spelling or the same existing file is the policy.
+        found = _file_id(point.path)
+        if os.path.normpath(point.path) in spellings or (found is not None and found == own):
+            return True
+        # A point that cannot be read may create the policy under a case variant.
+        if (
+            found is None
+            and folder is not None
+            and point.path.name.casefold() == name
+            and _file_id(point.path.parent) == folder
+        ):
+            return True
+    return False
 
 
 def decide(
@@ -838,8 +867,9 @@ def unauthorized(
 ) -> list[Effect]:
     """List protected effects the recorded repository scope does not cover.
 
-    Exempt points, points outside every repository and failed points need no
-    authority; every other repository point must be granted under its own repository.
+    Exempt points outside the workspace, points outside every repository and failed
+    points need no authority; every other repository point must be granted under its
+    own repository by an entry rooted at one of its worktree roots.
 
     Args:
         decision: Result of ``decide``.
@@ -852,11 +882,14 @@ def unauthorized(
     Returns:
         Uncovered protected effects in order, always including policy targets.
     """
-    # Group granted paths by repository identity; an unresolved root grants nothing.
+    # Group granted paths by repository identity; an unresolved root or one that is
+    # not a worktree root grants nothing, since paths match from the worktree root.
     grants: dict[tuple[str, tuple[int, int]], list[str]] = {}
     for entry in scope:
         identity, _ = repository_location.discover(Path(entry["root"]), memo)
-        if identity is not None:
+        if identity is not None and os.path.realpath(entry["root"]) in {
+            os.path.realpath(tree) for tree in identity.repository.trees
+        }:
             grants.setdefault(identity.key(), []).extend(entry["paths"])
     common = None if session is None else os.path.normpath(session.common)
     missing = []
@@ -876,7 +909,8 @@ def unauthorized(
         # Every non-exempt repository point must be granted under its own root.
         flags = repository_exemptions.exempt(effect.location, exemptions)
         for point, vault in zip(points, flags, strict=True):
-            if vault or point.repository is None:
+            # The workspace stays protected even if its repository is declared a vault.
+            if (vault and not effect.location.workspace) or point.repository is None:
                 continue
             # Discovery saw the real directory, so relate its real spelling to the root.
             real = Path(os.path.realpath(point.path.parent), point.path.name)

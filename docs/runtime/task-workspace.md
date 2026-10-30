@@ -201,6 +201,9 @@ Each edit target becomes an effect: create, write, delete, or a move split into
   protected when a side of the effect is text. A binary-only effect is task-free
   and unknown content is unchecked. Every supported shape writes text, so only
   deleting or moving away a binary or missing file there is task-free.
+  Such a delete or move-away can also be unchecked, and so task-free, when the
+  per-call budget is exhausted or a heuristic misclassifies the file; for example,
+  a text file over 1 MiB framed like a PDF reads as binary.
 - **Declared vaults.** A point in a repository declared in the
   [exemption policy](#explicit-vault-exemptions) is task-free.
 - **Outside every repository.** A point outside Git is task-free.
@@ -222,7 +225,8 @@ detected; the supported edit shapes cannot create them.
 
 The [exemption policy](#explicit-vault-exemptions) file is reserved. An agent edit
 that targets it in any spelling is denied with `POLICY_ADMINISTRATION`, even
-without a task. The user edits that file directly; there is no approval flow for
+without a task. Any spelling includes the same existing file and, for a missing
+file, a case-insensitive name in the same directory. The user edits that file directly; there is no approval flow for
 it.
 
 Child identity, scope, provider and delegation restrictions apply before this
@@ -396,12 +400,14 @@ the scope is denied with `SCOPE_REQUIRED`.
 
 **Approval** holds when the roadmap has exactly one each of `**Proposal status:**`
 starting with `Approved`, `**Proposal revision:**` and `**Approval record:**`,
-no field contains `<`, the record does not start with `Pending`, and it names
+no field contains `<`, the record does not start with `Pending` in any letter
+case, and it names
 `approved revision <token>` equal to the first word of the revision. This checks
 recorded state only. It does not authenticate the human or enforce the prose
 intent of the approval.
 
-**Repository scope** grants paths under absolute worktree roots:
+**Repository scope** grants paths under absolute worktree roots. A root must be a
+worktree root itself; a subdirectory root grants nothing.
 
 ```markdown
 **Repository scope:**
@@ -415,12 +421,16 @@ At most 32 roots and 256 paths are allowed. An absent field, `none` or a templat
 placeholder grants nothing. The adapter resolves each root to its common Git
 identity, so an entry covers linked worktrees. A target matches by its
 link-resolved path relative to its own worktree root, compared byte for byte.
-Exempt, failed and non-repository points need no grant. A workspace effect must
-also reach the session repository through some point.
+Exempt points outside the workspace, failed points and non-repository points need
+no grant. A workspace effect must also reach the session repository through some
+point. A workspace target inside a nested repository cannot be granted today, so
+it is always denied.
 
 A roadmap update that changes the scope must carry a new revision token and an
 `Approval record` starting with `Pending`. Otherwise it fails with
-`INVALID_REQUEST`. A malformed committed scope grants nothing.
+`INVALID_REQUEST`. A `reconcile-files` import of changed roadmap bytes cannot
+compare with the replaced bytes, so any nonempty scope it imports needs the same
+new revision and `Pending` record. A malformed committed scope grants nothing.
 
 **Migration.** No task gets an implicit whole-workspace grant. Before protected
 work, an existing task adds its `Repository scope` through a new proposal

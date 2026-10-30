@@ -1560,7 +1560,8 @@ def roadmap_approved(text: str) -> bool:
     )
     if status is None or revision is None or record is None:
         return False
-    if any("<" in value for value in (status, revision, record)) or record.startswith("Pending"):
+    pending = record.casefold().startswith("pending")
+    if pending or any("<" in value for value in (status, revision, record)):
         return False
     # Match the approved revision named by the record against the current revision.
     approved = APPROVED_REVISION.search(record)
@@ -2469,6 +2470,10 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             ),
             "INTEGRITY_ERROR",
         )
+        # Changed roadmap bytes may not import a scope grant as approved; the old bytes
+        # are gone, so any nonempty scope counts as a change.
+        if sha(observed["roadmap.md"]) != state["files"]["roadmap.md"]:
+            check_scope_change("", observed["roadmap.md"].decode(errors="replace"))
         # Explicit reconciliation imports inspected Markdown only, never arbitrary events.
         issue.state = copy.deepcopy(state)
         issue.state["files"] = manifest(observed)
