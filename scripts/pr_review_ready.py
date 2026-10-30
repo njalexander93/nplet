@@ -7,6 +7,7 @@ head. The AI reviewer token is used solely to resolve the reviewer's login.
 """
 
 import os
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -15,6 +16,7 @@ from scripts.pr_size_gate import NUMBER, REPOSITORY, SHA, Http, finish, ref_sha,
 PAGE = 100
 CI_WORKFLOW = "pr-checks.yml"
 REQUIRED_JOBS = (
+    "PR Size Check",
     "Code Quality Check",
     "Test Quality Check",
     "Linux Tests (Unit/Integration)",
@@ -129,9 +131,63 @@ def approved_review(reviews: list[Any], publisher: str, head: str, base: str) ->
     if latest.get("state") != "APPROVED":
         raise Skip(f"the latest AI review is {latest.get('state')}, not APPROVED")
     body = latest.get("body")
-    if not isinstance(body, str) or not body.startswith(f"<!-- ai-reviewer:{head}:{base} -->"):
+    # Newer reviewer versions append a request id (uuid4 hex) after the base.
+    marker = re.compile(rf"<!-- ai-reviewer:{head}:{base}(:[0-9a-f]{{32}})? -->")
+    if not isinstance(body, str) or not marker.match(body):
         raise Skip("the latest AI approval lacks the marker for this head and base")
     return latest
+
+
+def require_ci(http: Http, api: str, token: str, number: str, head: str) -> dict[str, Any]:
+    """Require the latest PR Pre-Merge Check run for the head and its required jobs to have passed.
+
+    Args:
+        http: Request function.
+        api: Repository REST API base URL.
+        token: Bearer token with Actions read access.
+        number: Pull request number.
+        head: Head SHA the run must have tested.
+
+    Returns:
+        The successful workflow run.
+
+    Raises:
+        Skip: No run, another PR's run, an unfinished or failed run, or a required job
+            that did not succeed.
+        Failure: GitHub could not be read reliably.
+    """
+    # Require the latest CI run for the head to have completed successfully.
+    url = (
+        f"{api}/actions/workflows/{CI_WORKFLOW}/runs"
+        f"?head_sha={head}&event=pull_request&per_page={PAGE}"
+    )
+    runs = [
+        r
+        for r in collection(http, url, token, "workflow_runs")
+        if isinstance(r, dict) and r.get("head_sha") == head and isinstance(r.get("id"), int)
+    ]
+    if not runs:
+        raise Skip(f"no CI run exists for head {head}")
+    run = max(runs, key=lambda r: r["id"])
+    # A run linked to pull requests must include this one; fork runs list none.
+    linked = run.get("pull_requests")
+    numbers = [p.get("number") for p in linked or [] if isinstance(p, dict)]
+    if linked and int(number) not in numbers:
+        raise Skip(f"the latest CI run for head {head} belongs to another pull request")
+    if run.get("status") != "completed" or run.get("conclusion") != "success":
+        raise Skip(f"the CI run is {run.get('status')}/{run.get('conclusion')}")
+
+    # Require every required CI job to have succeeded in that run.
+    url = f"{api}/actions/runs/{run['id']}/jobs?filter=latest&per_page={PAGE}"
+    results = {
+        j.get("name"): j.get("conclusion")
+        for j in collection(http, url, token, "jobs")
+        if isinstance(j, dict)
+    }
+    failed = [name for name in REQUIRED_JOBS if results.get(name) != "success"]
+    if failed:
+        raise Skip(f"required CI jobs did not succeed: {', '.join(failed)}")
+    return run
 
 
 def text(value: object) -> str:
@@ -196,37 +252,8 @@ def main(env: Mapping[str, str] = os.environ, http: Http = request) -> int:
             page += 1
         review = approved_review(reviews, publisher, head, base)
 
-        # Require the latest CI run for the head to have completed successfully.
-        url = (
-            f"{api}/actions/workflows/{CI_WORKFLOW}/runs"
-            f"?head_sha={head}&event=pull_request&per_page={PAGE}"
-        )
-        runs = [
-            r
-            for r in collection(http, url, token, "workflow_runs")
-            if isinstance(r, dict) and r.get("head_sha") == head and isinstance(r.get("id"), int)
-        ]
-        if not runs:
-            raise Skip(f"no CI run exists for head {head}")
-        run = max(runs, key=lambda r: r["id"])
-        # A run linked to pull requests must include this one; fork runs list none.
-        linked = run.get("pull_requests")
-        numbers = [p.get("number") for p in linked or [] if isinstance(p, dict)]
-        if linked and int(number) not in numbers:
-            raise Skip(f"the latest CI run for head {head} belongs to another pull request")
-        if run.get("status") != "completed" or run.get("conclusion") != "success":
-            raise Skip(f"the CI run is {run.get('status')}/{run.get('conclusion')}")
-
-        # Require every required CI job to have succeeded in that run.
-        url = f"{api}/actions/runs/{run['id']}/jobs?filter=latest&per_page={PAGE}"
-        results = {
-            j.get("name"): j.get("conclusion")
-            for j in collection(http, url, token, "jobs")
-            if isinstance(j, dict)
-        }
-        failed = [name for name in REQUIRED_JOBS if results.get(name) != "success"]
-        if failed:
-            raise Skip(f"required CI jobs did not succeed: {', '.join(failed)}")
+        # Require the latest CI run and every required job for the head to have passed.
+        run = require_ci(http, api, token, number, head)
 
         # Recheck the pull request in case it moved while the evidence was read.
         check_pull(get(http, f"{api}/pulls/{number}", token, dict), head, base)

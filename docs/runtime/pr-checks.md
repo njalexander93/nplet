@@ -1,10 +1,10 @@
 # Pull-request pre-merge checks
 
-**All five checks must pass.** Open a failed check for its failing step, command
+**All six checks must pass.** Open a failed check for its failing step, command
 log and evidence artifact. The [PR Pre-Merge Check workflow](../../.github/workflows/pr-checks.yml)
 runs on pull requests targeting `main`, including documentation-only changes.
-Bugbot is an independent check, outside these five jobs. So is the `PR Size Check`
-status from the AI review workflow; see [AI review size gate](#ai-review-size-gate).
+Bugbot is an independent check, outside these six jobs. AI review starts only after
+all six pass; see [PR size check and AI review](#pr-size-check-and-ai-review).
 
 The workflow uses the interpreter in [`.python-version`](../../.python-version),
 Poetry 2.4.2 and locked dependencies. A newer run for the same pull request cancels
@@ -15,13 +15,14 @@ retention steps still attempt to preserve available diagnostic evidence.
 
 | Check | Runner | Passing result |
 | --- | --- | --- |
+| `PR Size Check` | Ubuntu 24.04 | The PR changes at most 2,000 lines (additions + deletions). |
 | `Code Quality Check` | Ubuntu 24.04 | Configuration, formatting, lint and types all pass. |
 | `Linux Tests (Unit/Integration)` | Ubuntu 24.04 | Unit and integration suites both pass. |
 | `Windows Tests (Unit/Integration)` | Windows 2025 | Unit and integration suites both pass. |
 | `MacOS Tests (Unit/Integration)` | macOS 15 | Unit and integration suites both pass. |
 | `Test Quality Check` | Ubuntu 24.04 | Required native unit, integration and tooling evidence from **Linux, Windows and macOS**, per-OS function checks, the historical **80% unrounded** aggregate, focused test lint and three assertion probes pass. |
 
-Quality and the three OS jobs can run concurrently. Quality steps run in order:
+Size, quality and the three OS jobs can run concurrently. Quality steps run in order:
 `validate-config`, `format-check`, `lint`, `type-check`, then `ticket-references`
 (no Linear issue identifiers or issue URLs in tracked files). Later steps still run
 after an earlier failure unless cancelled; the failure still fails the job.
@@ -148,7 +149,7 @@ an upstream `sysmon` repair will not fail the check.
 
 - The Test Quality job summary records the **PR head**, **PR base**, **tested merge
   commit**, run attempt and native-test/quality results. Keep the workflow-run
-  link and all five check results with those identities. A passing older run does
+  link and all six check results with those identities. A passing older run does
   not validate a newer candidate.
 - `python-quality` contains `config/`, `format/`, `lint/` and `types/` evidence.
   Each command manifest records the OS, interpreter, commit, clean/dirty status,
@@ -172,35 +173,40 @@ an upstream `sysmon` repair will not fail the check.
   artifacts from a different candidate or substitute local success for the
   current pull-request result.
 
-## AI review size gate
+## PR size check and AI review
 
-The [AI review workflow](../../.github/workflows/ai-review.yml) starts when a
-PR Pre-Merge Check run finishes. It continues only when `Code Quality Check` and
-`Test Quality Check` passed, which means every OS test job passed too. Then it
-runs the [size gate](../../scripts/pr_size_gate.py) on the run's head commit,
-and the review starts only when `PR Size Check` passes. If any of the three
-fails or does not run, the review is skipped. Fork PRs are skipped, because
-GitHub does not link their CI runs to the PR.
-
-The size gate counts GitHub's
-whole-PR additions plus deletions against the base and reports the result in the
-`PR Size Check` commit status and the run's job summary.
+`PR Size Check` runs first in parallel with the other jobs, so an oversized PR
+fails without waiting for the native tests. It runs the
+[size gate](../../scripts/pr_size_gate.py) from the PR's base commit, never PR
+code, with a read-only token and no secrets, so fork PRs run it too. The gate
+counts GitHub's whole-PR additions plus deletions against the base; the job
+result is the size result. A failing size check does not cancel the other jobs.
 
 | Changed lines | Result |
 | --- | --- |
-| ≤ 2,000 | Status passes; review runs automatically for an open, non-draft PR. |
-| > 2,000 | Review is skipped and the status fails. Split the PR. |
-| Unknown or invalid totals | Status fails with "Could not determine PR size". |
-| `head-sha` is not the PR's current head | Run fails without posting a status. |
+| ≤ 2,000 | Job passes. |
+| > 2,000 | Job fails and AI review is skipped. Split the PR. |
+| Unknown or invalid totals | Job fails with "Could not determine PR size". |
+| Head moved since the run started | Job fails; the newer push runs its own check. |
 
-Only PRs into the default branch post the status, because a status is shared by
-every PR on that commit.
+The size result used to be a `PR Size Check` commit status posted by the AI review
+workflow. It is now a job with the same name, and nothing posts that status.
+
+The [AI review workflow](../../.github/workflows/ai-review.yml) starts when a
+PR Pre-Merge Check run succeeds. Its `admit` job reads GitHub only and runs
+from the default branch. It first reruns the size gate there: a PR controls its
+own `pr-checks.yml`, so it could make its CI size job pass regardless of size.
+Then the [admission check](../../scripts/pr_review_admit.py) admits the review
+only when the run's head is still the PR's head and the latest CI run for that
+head passed with all six jobs, including `PR Size Check`.
+Otherwise the review is skipped. Fork PRs are skipped, because GitHub does not
+link their CI runs to the PR.
 
 Marking a draft ready does not rerun CI, so its review waits for the next push.
 To review it sooner, to review an authorized fork PR, or to retry a review, run
 the "AI review" workflow from the default branch with the PR number and the PR's
-current full head SHA. A manual run skips the CI condition; the same size limit
-and head/base checks apply.
+current full head SHA. A manual run passes the same admission check, so it needs
+passing CI for that head too.
 
 ```sh
 gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
@@ -208,8 +214,7 @@ gh workflow run ai-review.yml -f pr-number=<number> -f head-sha=<full-head-sha>
 
 A newly admitted review for a PR cancels that PR's older review still in progress.
 Failed, cancelled or stale CI completions are rejected before that point, so they
-never cancel a review. A CI run for a commit that is no longer the PR head fails the size gate
-without posting a status.
+never cancel a review.
 
 ## Readiness notification
 
@@ -229,7 +234,7 @@ the PR, CI run and AI review links only when:
   the head/base marker; the account is resolved from the reviewer token, so
   another user's approval never counts;
 - the latest PR Pre-Merge Check run for the head, when GitHub links it to PRs,
-  includes this PR, and that run and its five required jobs succeeded.
+  includes this PR, and that run and its six required jobs succeeded.
 
 Otherwise the run notes the reason and posts nothing. GitHub API or
 authentication failures fail the run. The post uses the existing
@@ -245,7 +250,7 @@ reviews the new head.
 These tests protect the validation machinery itself:
 
 - [test_pr_workflow.py](../../tests/integration/tooling/test_pr_workflow.py)
-  checks the five-job configuration, six downloads and continuation conditions. It exercises
+  checks the six-job configuration, the base-revision size job, six downloads and continuation conditions. It exercises
   collector arguments with injected subprocess failures and checks that later
   collectors run, failures remain recorded and suite evidence stays separate.
   It does not execute GitHub's scheduler; hosted runs provide that evidence.
@@ -264,12 +269,13 @@ These tests protect the validation machinery itself:
   Its integration counterpart checks that independent failures remain visible.
 - [test_pr_size_gate.py](../../tests/unit/tooling/test_pr_size_gate.py) and
   [test_ai_review_workflow.py](../../tests/integration/tooling/test_ai_review_workflow.py)
-  check the size limit, status and summary text, SHA binding, ready output and
-  the workflow's CI trigger and skip conditions. They do not execute GitHub's scheduler.
+  check the size limit, summary text, head binding, and the AI review workflow's
+  CI trigger, size recount, admission job and skip conditions. They do not execute GitHub's scheduler.
 - [test_pr_review_ready.py](../../tests/unit/tooling/test_pr_review_ready.py)
   checks each readiness condition with injected GitHub responses: PR state and
   commits, reviewer identity, the latest approval and its marker, CI run and job
-  results, and failure handling. `test_pr_announce_workflow.py` and
+  results, and failure handling. It also checks review admission: current head,
+  CI run state and every required job, including `PR Size Check`. `test_pr_announce_workflow.py` and
   `test_ai_review_workflow.py` check the ready route wiring and its Discord
   payload. They do not execute GitHub's scheduler.
 
@@ -283,8 +289,8 @@ required. At rollout, read the live rule again, add the new exact check source
 and name, remove an old requirement only if one actually exists, and preserve
 other requirements. Do not report enforcement until a read-back confirms it.
 
-`PR Size Check` is required only once a human adds it to the `main` rules; the AI
-review itself is not a required check.
+`PR Size Check` is required only once a human adds it to the `main` rules as a
+GitHub Actions check; the AI review itself is not a required check.
 
 At delivery, inspect the current rules for `main` and the current candidate's
 results. Record pending enforcement separately from test results. Preserve other
