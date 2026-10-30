@@ -5,8 +5,12 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import stat
+import zlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from nplet.adapters import repository_location
 from nplet.lifecycle import task_workspace as core
@@ -84,6 +88,21 @@ COMMENTS_QUERY = (
     "(first:100,after:$cursor){nodes{id body url author{login}} pageInfo{hasNextPage endCu"
     "rsor}}}}}"
 )
+# Content states of one side of an edit effect.
+TEXT, BINARY, UNKNOWN, ABSENT = "text", "binary", "unknown", "absent"
+# Largest file whose whole content can be text evidence.
+TEXT_LIMIT = 1 << 20
+# Most bytes one call inspects across every effect side.
+CALL_LIMIT = 16 << 20
+# Binary evidence reads the first 64 KiB and the last 65,557 bytes, the largest ZIP
+# end-of-central-directory span (22-byte record plus a 65,535-byte comment).
+HEAD, TAIL = 64 << 10, 65_557
+# Patch headers mapped to the operation they apply to their target.
+PATCH_OPERATIONS = {
+    "*** Add File": "create",
+    "*** Update File": "write",
+    "*** Delete File": "delete",
+}
 
 
 def _stat(path: Path) -> os.stat_result | None:
@@ -504,3 +523,211 @@ def edit_locations(
         repository_location.resolve(event["cwd"], target, repository, is_root, memo)
         for target in targets
     ]
+
+
+@dataclass
+class Budget:
+    """Bytes one call may still inspect across every effect side.
+
+    Attributes:
+        remaining: Uncharged bytes; negative once a charge exceeded the limit.
+    """
+
+    remaining: int = CALL_LIMIT
+
+
+class Effect(NamedTuple):
+    """One file effect of a deterministic native edit.
+
+    Attributes:
+        op: ``create``, ``write`` (overwrite or append), ``delete``, ``move-from`` or
+            ``move-to``.
+        location: The target's location evidence from ``edit_locations``.
+        before: Content state of the existing file; None for a workspace target, whose
+            content is never inspected.
+        after: Content state of the output; None for ``delete`` and ``move-from``.
+    """
+
+    op: str
+    location: repository_location.Location
+    before: str | None
+    after: str | None
+
+
+def text_evidence(data: bytes) -> bool:
+    """Report whether whole file content is plausibly text.
+
+    Args:
+        data: The complete content.
+
+    Returns:
+        Whether the content is empty, strict UTF-8 with an optional BOM, or strict
+        UTF-16/UTF-32 with a BOM, and decodes without NUL or C0 controls other than
+        tab, LF, CR and FF.
+    """
+    # Empty content is text; otherwise pick the codec by BOM, UTF-32LE before UTF-16LE.
+    if not data:
+        return True
+    boms = (
+        (b"\xff\xfe\x00\x00", "utf-32-le"),
+        (b"\x00\x00\xfe\xff", "utf-32-be"),
+        (b"\xff\xfe", "utf-16-le"),
+        (b"\xfe\xff", "utf-16-be"),
+        (b"\xef\xbb\xbf", "utf-8"),
+        (b"", "utf-8"),
+    )
+    bom, codec = next(pair for pair in boms if data.startswith(pair[0]))
+    # Strict decoding rejects invalid sequences and unpaired surrogates.
+    try:
+        text = data[len(bom) :].decode(codec)
+    except UnicodeDecodeError:
+        return False
+    return re.search("[\x00-\x08\x0b\x0e-\x1f]", text) is None
+
+
+def binary_evidence(head: bytes, tail: bytes, size: int) -> bool:
+    """Report whether a file's edges match one supported binary format heuristic.
+
+    Args:
+        head: The first ``HEAD`` bytes or fewer.
+        tail: The last ``TAIL`` bytes or fewer.
+        size: The file size.
+
+    Returns:
+        Whether PNG, JPEG, GIF, WOFF/WOFF2, ZIP or PDF framing is present.
+    """
+    # PNG needs its IHDR chunk with a matching CRC over type and data.
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return (
+            head[8:16] == b"\x00\x00\x00\x0dIHDR"
+            and len(head) >= 33
+            and zlib.crc32(head[12:29]) == int.from_bytes(head[29:33], "big")
+        )
+    # The other formats pair a leading signature with a trailing marker or declared size.
+    return (
+        (head.startswith(b"\xff\xd8\xff") and tail.endswith(b"\xff\xd9"))
+        or (head.startswith((b"GIF87a", b"GIF89a")) and tail.endswith(b";"))
+        or (head.startswith((b"wOFF", b"wOF2")) and int.from_bytes(head[8:12], "big") == size)
+        or (head.startswith(b"PK\x03\x04") and b"PK\x05\x06" in tail)
+        or (head.startswith((b"%PDF-1.", b"%PDF-2.")) and b"%%EOF" in tail[-1024:])
+    )
+
+
+def classify(path: Path, budget: Budget) -> str:
+    """Classify one existing path's content without opening special files.
+
+    Args:
+        path: Link-resolved path to inspect; a link found here is not followed.
+        budget: The call's inspection budget, charged before reading.
+
+    Returns:
+        ``absent`` for a missing path; ``text`` or ``binary`` when only that evidence
+        holds; ``unknown`` for both or neither, a non-regular or unreadable file, or an
+        exhausted budget.
+    """
+    # Only a regular file is ever opened; a missing path is absent.
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        return ABSENT if error.errno in repository_location.MISSING else UNKNOWN
+    if not stat.S_ISREG(info.st_mode):
+        return UNKNOWN
+    # Charge the bytes this side reads; once the call limit is passed, stop reading.
+    size = info.st_size
+    budget.remaining -= size if size <= TEXT_LIMIT else HEAD + TAIL
+    if budget.remaining < 0:
+        return UNKNOWN
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return UNKNOWN
+    with os.fdopen(fd, "rb") as file:
+        try:
+            # Recheck the opened file, then read it whole or read only its edges.
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return UNKNOWN
+            if size <= TEXT_LIMIT:
+                data = file.read(size + 1)
+                # A file that changed size since stat has no reliable evidence.
+                if len(data) != size:
+                    return UNKNOWN
+                head, tail, text = data[:HEAD], data[-TAIL:], text_evidence(data)
+            else:
+                head = file.read(HEAD)
+                file.seek(size - TAIL)
+                tail, text = file.read(TAIL), False
+        except OSError:
+            return UNKNOWN
+    # Exactly one kind of evidence decides the state.
+    binary = binary_evidence(head, tail, size)
+    return TEXT if text and not binary else BINARY if binary and not text else UNKNOWN
+
+
+def edit_operations(tool: str, args: core.JSONObject) -> list[str] | None:
+    """Name the operation of every target ``edit_targets`` returns, in the same order.
+
+    Args:
+        tool: Native file tool name.
+        args: Structured native input.
+
+    Returns:
+        One operation per target, with ``write`` for Write whatever the target's
+        existence, or None for an unknown or malformed shape, including ``Move to``
+        not directly after ``Update File``.
+    """
+    # Native file tools write their single target.
+    targets = edit_targets(tool, args)
+    if not targets:
+        return None
+    if tool != "apply_patch":
+        return ["write"]
+    # A move splits its update into the source's removal and the destination's write.
+    operations: list[str] = []
+    for line in args["command"].splitlines()[1:-1]:
+        header = line.split(": ", 1)[0]
+        if header == "*** Move to":
+            if operations[-1:] != ["write"]:
+                return None
+            operations[-1:] = ["move-from", "move-to"]
+        elif header in PATCH_OPERATIONS:
+            operations.append(PATCH_OPERATIONS[header])
+    return operations
+
+
+def edit_effects(
+    event: core.JSONObject, repository: core.Repository | None, budget: Budget
+) -> list[Effect]:
+    """Describe every deterministic native edit target as an effect with content states.
+
+    Workspace targets are never content-inspected, so their ``before`` is None. Other
+    targets are read at their resolved point; a failed resolution makes ``before``
+    unknown. Every output is text, since each supported shape writes text.
+
+    Args:
+        event: Validated native tool and argument envelope.
+        repository: The session's carried project repository; None when the session
+            lies outside every repository.
+        budget: The call's inspection budget, shared by every side.
+
+    Returns:
+        One effect per target in target order, or an empty list for an unknown or
+        malformed edit shape.
+    """
+    # Unknown or malformed edits have no effects.
+    operations = edit_operations(event["tool_name"], event["tool_input"])
+    if not operations:
+        return []
+    effects = []
+    for op, location in zip(operations, edit_locations(event, repository), strict=True):
+        # The resolved point is last; an invalid target's only point carries its error.
+        point = location.points[-1]
+        path = None if point.error else point.path
+        # Write creates a target that does not exist yet.
+        if event["tool_name"] == "Write" and path is not None and not os.path.lexists(path):
+            op = "create"
+        # Read the existing side outside the workspace only.
+        before = None if location.workspace else UNKNOWN if path is None else classify(path, budget)
+        after = None if op in {"delete", "move-from"} else TEXT
+        effects.append(Effect(op, location, before, after))
+    return effects
