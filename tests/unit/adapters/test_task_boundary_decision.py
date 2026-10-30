@@ -159,27 +159,25 @@ def test_policy_target_is_reserved(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("exists", [True, False])
 def test_policy_case_variants_are_reserved(tmp_path: Path, exists: bool) -> None:
-    """A case variant of the policy name or its directory is the policy where case folds.
+    """A case variant of the policy name is reserved; a variant directory is where case folds.
 
     Args:
         tmp_path: Directory holding the policy.
         exists: Whether the policy file exists, so a variant edits or creates it.
     """
-    # Probe the temporary filesystem; a case-sensitive one has no variant spellings.
+    # Probe the temporary filesystem; only a case-insensitive one aliases the directory.
     (tmp_path / "probe").touch()
-    if not (tmp_path / "PROBE").exists():
-        pytest.skip("case-sensitive temporary filesystem")
+    folds = (tmp_path / "PROBE").exists()
     (tmp_path / "cfg").mkdir()
     policy = tmp_path / "cfg" / "repository-exemptions.json"
     if exists:
         policy.write_text("{}")
-    # Both a variant name and a variant parent directory must be recognized.
-    for spelling in (
-        tmp_path / "cfg" / "REPOSITORY-Exemptions.json",
-        tmp_path / "CFG" / "repository-exemptions.json",
+    for spelling, reserved in (
+        (tmp_path / "cfg" / "REPOSITORY-Exemptions.json", True),
+        (tmp_path / "CFG" / "repository-exemptions.json", folds),
     ):
         decision = boundary.decide([effect((spelling, None, None), before=ABSENT)], NONE, policy)
-        assert decision.policy is True
+        assert decision.policy is reserved
 
 
 def test_session_repository_declared_as_vault_still_needs_scope() -> None:

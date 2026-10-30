@@ -47,6 +47,8 @@ def write(path: Path, data: bytes) -> Path:
         (b"wOF2\x00\x01\x00\x00" + (48).to_bytes(4, "big") + bytes(36), BINARY),
         (b"PK\x03\x04" + bytes(26) + b"PK\x05\x06" + bytes(18), BINARY),
     ],
+    # Short ids keep the oversized case out of reports.
+    ids=lambda value: value if isinstance(value, str) else f"{len(value)}-bytes",
 )
 def test_content_states_follow_exclusive_evidence(tmp_path: Path, data: bytes, state: str) -> None:
     """Text or binary evidence alone decides; both, neither or oversize stay unknown.
