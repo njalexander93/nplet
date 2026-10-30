@@ -230,13 +230,14 @@ def edit_records(tool: str, args: core.JSONObject) -> list[tuple[str, str | None
             return None
         records: list[tuple[str, str | None]] = []
         for line in lines[1:-1]:
-            header, _, target = line.partition(": ")
-            if header == "*** Move to":
+            # A header needs its ": " separator; a bare name is malformed.
+            header, colon, target = line.partition(": ")
+            if header == "*** Move to" and colon:
                 moved = records[-1:] and records[-1][1] == "write"
                 if moved:
                     records[-1] = (records[-1][0], "move-from")
                 records.append((target, "move-to" if moved else None))
-            elif header in PATCH_OPERATIONS:
+            elif header in PATCH_OPERATIONS and colon:
                 records.append((target, PATCH_OPERATIONS[header]))
             elif line.startswith("*** ") and line != "*** End of File":
                 return None
