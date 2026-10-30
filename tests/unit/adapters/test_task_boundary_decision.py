@@ -180,6 +180,26 @@ def test_policy_case_variants_are_reserved(tmp_path: Path, exists: bool) -> None
         assert decision.policy is reserved
 
 
+def test_existing_policy_case_variant_is_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing case-variant file beside the policy is reserved like an absent one.
+
+    Args:
+        tmp_path: Directory holding the policy and its variant.
+        monkeypatch: Gives the variant its own identity, as a case-sensitive
+            filesystem would.
+    """
+    policy = tmp_path / "repository-exemptions.json"
+    policy.write_text("{}")
+    variant = tmp_path / "REPOSITORY-Exemptions.json"
+    variant.write_text("{}")
+    real = boundary._file_id
+    monkeypatch.setattr(boundary, "_file_id", lambda p: (0, 0) if p == variant else real(p))
+    decision = boundary.decide([effect((variant, None, None))], NONE, policy)
+    assert decision.policy is True
+
+
 def test_policy_case_variant_is_reserved_before_its_directory_exists(tmp_path: Path) -> None:
     """A case variant of a policy whose directory is absent may create that policy.
 

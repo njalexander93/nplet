@@ -189,15 +189,19 @@ def target_role(cwd: str, value: object, is_root: Callable[[Path], bool]) -> str
     return "protected" if inside else "external"
 
 
-def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
-    """Extract every target from supported deterministic edit shapes.
+def edit_records(tool: str, args: core.JSONObject) -> list[tuple[str, str | None]] | None:
+    """Parse supported deterministic edit shapes into ordered target operations.
 
     Args:
         tool: Native file tool name.
         args: Structured native input.
 
     Returns:
-        All targets, or None for an unknown or malformed shape.
+        One ``(target, operation)`` pair per target, or None for an unknown or
+        malformed shape. Write and Edit ``write`` their target; a patch adds
+        ``create``, ``write`` or ``delete``, and a move splits its update into
+        ``move-from`` and ``move-to``. A ``Move to`` not directly after ``Update
+        File`` has no operation.
     """
     # Native file edits expose exactly one target and known editing fields.
     fields = {
@@ -217,23 +221,41 @@ def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
                 and isinstance(args.get("content"), str)
             )
         ):
-            return [args[key]]
+            return [(args[key], "write")]
         return None
     # A patch header enumerates all affected files, including both sides of moves.
     if tool == "apply_patch" and set(args) == {"command"} and isinstance(args["command"], str):
         lines = args["command"].splitlines()
         if not lines or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
             return None
-        targets = []
+        records: list[tuple[str, str | None]] = []
         for line in lines[1:-1]:
-            if line.startswith(
-                ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
-            ):
-                targets.append(line.split(": ", 1)[1])
+            header, _, target = line.partition(": ")
+            if header == "*** Move to":
+                moved = records[-1:] and records[-1][1] == "write"
+                if moved:
+                    records[-1] = (records[-1][0], "move-from")
+                records.append((target, "move-to" if moved else None))
+            elif header in PATCH_OPERATIONS:
+                records.append((target, PATCH_OPERATIONS[header]))
             elif line.startswith("*** ") and line != "*** End of File":
                 return None
-        return targets or None
+        return records or None
     return None
+
+
+def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
+    """Extract every target from supported deterministic edit shapes.
+
+    Args:
+        tool: Native file tool name.
+        args: Structured native input.
+
+    Returns:
+        All targets, or None for an unknown or malformed shape.
+    """
+    records = edit_records(tool, args)
+    return None if records is None else [target for target, _ in records]
 
 
 def github_read(tool: str, args: core.JSONObject) -> bool:
@@ -513,9 +535,22 @@ def edit_locations(
         edit shape.
     """
     # Unknown edits have no targets to locate.
-    targets = edit_targets(event["tool_name"], event["tool_input"])
-    if not targets:
-        return []
+    return _locate(event, edit_targets(event["tool_name"], event["tool_input"]) or [], repository)
+
+
+def _locate(
+    event: core.JSONObject, targets: list[str], repository: core.Repository | None
+) -> list[repository_location.Location]:
+    """Resolve the given targets of one edit, sharing a root predicate and discovery memo.
+
+    Args:
+        event: Validated native tool and argument envelope.
+        targets: Targets parsed from the event, in order.
+        repository: The session's carried project repository, if any.
+
+    Returns:
+        One location per target in order.
+    """
     # One root predicate and one discovery memo cover every target of the call.
     is_root = root_test([] if repository is None else repository.trees)
     memo: repository_location.Memo = {}
@@ -664,37 +699,6 @@ def classify(path: Path, budget: Budget) -> str:
     return TEXT if text and not binary else BINARY if binary and not text else UNKNOWN
 
 
-def edit_operations(tool: str, args: core.JSONObject) -> list[str] | None:
-    """Name the operation of every target ``edit_targets`` returns, in the same order.
-
-    Args:
-        tool: Native file tool name.
-        args: Structured native input.
-
-    Returns:
-        One operation per target, with ``write`` for Write whatever the target's
-        existence, or None for an unknown or malformed shape, including ``Move to``
-        not directly after ``Update File``.
-    """
-    # Native file tools write their single target.
-    targets = edit_targets(tool, args)
-    if not targets:
-        return None
-    if tool != "apply_patch":
-        return ["write"]
-    # A move splits its update into the source's removal and the destination's write.
-    operations: list[str] = []
-    for line in args["command"].splitlines()[1:-1]:
-        header = line.split(": ", 1)[0]
-        if header == "*** Move to":
-            if operations[-1:] != ["write"]:
-                return None
-            operations[-1:] = ["move-from", "move-to"]
-        elif header in PATCH_OPERATIONS:
-            operations.append(PATCH_OPERATIONS[header])
-    return operations
-
-
 def edit_effects(
     event: core.JSONObject, repository: core.Repository | None, budget: Budget
 ) -> list[Effect]:
@@ -714,12 +718,14 @@ def edit_effects(
         One effect per target in target order, or an empty list for an unknown or
         malformed edit shape.
     """
-    # Unknown or malformed edits have no effects.
-    operations = edit_operations(event["tool_name"], event["tool_input"])
-    if not operations:
+    # Unknown or malformed edits, including a misplaced move, have no effects.
+    records = edit_records(event["tool_name"], event["tool_input"]) or []
+    operations = [op for _, op in records if op]
+    if not records or len(operations) != len(records):
         return []
+    targets = [target for target, _ in records]
     effects = []
-    for op, location in zip(operations, edit_locations(event, repository), strict=True):
+    for op, location in zip(operations, _locate(event, targets, repository), strict=True):
         # The resolved point is last; an invalid target's only point carries its error.
         point = location.points[-1]
         path = None if point.error else point.path
@@ -773,8 +779,8 @@ def policy_target(effect: Effect, policy: Path) -> bool:
 
     Returns:
         Whether a point spells the policy's lexical or real path, is the same file,
-        names it case-insensitively in the same directory, or folds to its spelling
-        while that directory is absent.
+        names it case-insensitively in the same directory whether or not that name
+        exists, or folds to its spelling while that directory is absent.
     """
     spellings = {os.path.normpath(policy), os.path.realpath(policy)}
     # File identity catches spellings a case-insensitive filesystem treats as equal.
@@ -785,15 +791,14 @@ def policy_target(effect: Effect, policy: Path) -> bool:
         found = _file_id(point.path)
         if os.path.normpath(point.path) in spellings or (found is not None and found == own):
             return True
-        # A point that cannot be read may create the policy under a case variant.
-        if found is None and (
-            (
-                folder is not None
-                and point.path.name.casefold() == name
-                and _file_id(point.path.parent) == folder
-            )
+        # A case-variant name of the policy is reserved whether or not that variant exists.
+        if (
+            folder is not None
+            and point.path.name.casefold() == name
+            and _file_id(point.path.parent) == folder
+        ) or (
             # Without the policy directory there is no identity, so compare folded spellings.
-            or (folder is None and os.path.normpath(point.path).casefold() in folded)
+            folder is None and os.path.normpath(point.path).casefold() in folded
         ):
             return True
     return False

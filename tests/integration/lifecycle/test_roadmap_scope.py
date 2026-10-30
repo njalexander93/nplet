@@ -92,8 +92,11 @@ class RoadmapScopeTests(Fixture):
             bumped + GRANT,
         ):
             self.assertEqual(self.update(content)["code"], "INVALID_REQUEST")
-        # Accept the grant under a new revision awaiting approval; ready reports it.
+        # Accept the grant under a new revision awaiting approval. The changed scope
+        # clears readiness even for a packet without the roadmap.
         self.require_ok(self.update(pending + GRANT))
+        self.assertEqual(w.execute(self.req("ready"))["code"], "NOT_READY")
+        self.call("acknowledge", packet_digest=w.sha(w.canonical([])))
         self.assertEqual(
             self.call("ready")["approval"],
             {"approved": False, "scope": [{"root": f"{BASE}/root", "paths": ["src/"]}]},

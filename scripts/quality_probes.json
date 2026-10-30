@@ -14,7 +14,7 @@
   },
   {
     "source_path": "src/nplet/lifecycle/task_workspace.py",
-    "source_sha256": "a9a4dc45c27cdad28fa2468553bae4110d7da56b3200196f529de096d970f8c5",
+    "source_sha256": "03986f7f45e6410720401667d4cd670d80e866309788a05d47dc9b3cf4719ea2",
     "timeout_seconds": 20,
     "kind": "missing_exception",
     "old": "require(isinstance(value, str) and ISSUE.fullmatch(value), \"INVALID_ISSUE\")",
@@ -27,7 +27,7 @@
   },
   {
     "source_path": "src/nplet/lifecycle/task_workspace.py",
-    "source_sha256": "a9a4dc45c27cdad28fa2468553bae4110d7da56b3200196f529de096d970f8c5",
+    "source_sha256": "03986f7f45e6410720401667d4cd670d80e866309788a05d47dc9b3cf4719ea2",
     "timeout_seconds": 20,
     "kind": "omitted_effect",
     "old": "        FAILPOINT(point)",

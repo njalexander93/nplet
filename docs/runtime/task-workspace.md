@@ -123,7 +123,9 @@ Edit admission does not yet act on it.
 **Scope changes.** A roadmap `update` or `reconcile-files` import that changes the
 scope must also carry a new revision token and an `Approval record` starting with
 `Pending`; a later update records the approval of that revision. Otherwise, or for
-malformed scope, the operation fails with `INVALID_REQUEST`. The lifecycle keeps
+malformed scope, the operation fails with `INVALID_REQUEST`. An accepted scope change
+clears every live participant's readiness, whatever its packet holds, so each needs
+a new `read`, `acknowledge` and `ready`. The lifecycle keeps
 the revision and scope of the last committed roadmap so that reconciliation, which
 no longer has the replaced bytes, can apply the same rule. A workspace without that
 record cannot import a scope by reconciliation; propose it with `update` instead.

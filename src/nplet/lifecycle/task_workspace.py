@@ -1490,6 +1490,22 @@ def refresh_roadmap_reference(state: WorkspaceState, key: str, digest: str) -> N
         participant["status"] = "attached"
 
 
+def reset_readiness(state: WorkspaceState) -> None:
+    """Require every live participant to read, acknowledge and ready again.
+
+    A repository scope change alters what readiness authorizes, whether or not a
+    participant's packet names the roadmap.
+
+    Args:
+        state: Staged issue control state.
+    """
+    # Clear acknowledgment without reviving a detached participant generation.
+    for participant in state["participants"].values():
+        participant["ack"] = None
+        if participant["status"] != "detached":
+            participant["status"] = "attached"
+
+
 def roadmap_refreshed(packet: list[SourceRef], digest: str) -> list[SourceRef]:
     """Copy a packet with every ``roadmap.md`` reference set to one digest.
 
@@ -2324,7 +2340,10 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         # gone, so compare with the retained record of the committed roadmap.
         if sha(observed["roadmap.md"]) != state["files"]["roadmap.md"]:
             text = observed["roadmap.md"].decode(errors="replace")
-            state["roadmap"] = check_scope_change(state.get("roadmap"), text)
+            retained = state.get("roadmap")
+            state["roadmap"] = check_scope_change(retained, text)
+            if retained is not None and retained["scope"] != state["roadmap"]["scope"]:
+                reset_readiness(state)
         # Explicit reconciliation imports inspected Markdown only, never arbitrary events.
         issue.state = copy.deepcopy(state)
         issue.state["files"] = manifest(observed)
@@ -2563,6 +2582,8 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         if path == "roadmap.md":
             committed = roadmap_record(files[path].decode(errors="replace"))
             state["roadmap"] = check_scope_change(committed, request["content"])
+            if state["roadmap"]["scope"] != committed["scope"]:
+                reset_readiness(state)
         provenance = request["provenance"]
         require(set(provenance) == {"sources", "applicability", "status"}, "EVIDENCE_REQUIRED")
         evidence(provenance["sources"])

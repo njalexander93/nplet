@@ -1205,18 +1205,55 @@ def test_ready_reports_recorded_approval_and_scope() -> None:
     }
 
 
+PENDING_ROADMAP = SCOPED_ROADMAP.replace("Human approved revision r2.", "Pending approval.")
+
+
+def test_reset_readiness_keeps_detached_participants_detached() -> None:
+    """Clear every acknowledgment without reviving a detached participant."""
+    state = MemoryIssue().state
+    live = next(iter(state["participants"].values()))
+    state["participants"]["gone"] = {**live, "status": "detached"}
+    core.reset_readiness(state)
+    assert [(m["status"], m["ack"]) for m in state["participants"].values()] == [
+        ("attached", None),
+        ("detached", None),
+    ]
+
+
+def test_scope_change_clears_readiness_for_a_packet_without_the_roadmap() -> None:
+    """A changed scope needs a fresh acknowledgment even when no packet names the roadmap."""
+    store, issue = MemoryStore(), MemoryIssue()
+    member = next(iter(issue.state["participants"].values()))
+    member["packet"] = [
+        {"id": "note", "locator": "context/note.md", "sha256": core.sha(b"old note")}
+    ]
+    request = base_request(
+        "update",
+        expected_revision=7,
+        path="roadmap.md",
+        old_digest=core.sha(b"approved roadmap"),
+        content=PENDING_ROADMAP,
+        provenance={
+            "sources": [member["packet"][0]],
+            "applicability": "TEST-30",
+            "status": "draft",
+        },
+    )
+    assert core.operate(store, issue, request)["ok"] is True  # type: ignore[arg-type]
+    member = next(iter(issue.state["participants"].values()))
+    assert (member["status"], member["ack"]) == ("attached", None)
+
+
 @pytest.mark.parametrize(
-    ("path", "content"),
+    ("path", "content", "status"),
     [
-        ("context/note.md", b"edited markdown"),
-        (
-            "roadmap.md",
-            SCOPED_ROADMAP.replace("Human approved revision r2.", "Pending approval.").encode(),
-        ),
+        ("context/note.md", b"edited markdown", "ready"),
+        ("roadmap.md", b"edited roadmap without scope", "ready"),
+        ("roadmap.md", PENDING_ROADMAP.encode(), "attached"),
     ],
 )
 def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
-    monkeypatch: pytest.MonkeyPatch, path: str, content: bytes
+    monkeypatch: pytest.MonkeyPatch, path: str, content: bytes, status: str
 ) -> None:
     """Commit explicit Markdown reconciliation after checking directory identity and events.
 
@@ -1224,6 +1261,7 @@ def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
         monkeypatch: Pytest fixture used to replace the dependency under test.
         path: Edited Markdown payload path.
         content: Edited bytes; a roadmap scope arrives only as a pending proposal.
+        status: Participant status afterwards; only a changed scope clears readiness.
     """
     # Bind the existing directory identity, the retained template record and edited bytes.
     store, issue = MemoryStore(), MemoryIssue()
@@ -1291,9 +1329,7 @@ def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
     # An imported roadmap becomes the record later reconciliations compare against.
     if path == "roadmap.md":
         assert issue.state["roadmap"] == core.roadmap_record(content.decode())
-
-
-PENDING_ROADMAP = SCOPED_ROADMAP.replace("Human approved revision r2.", "Pending approval.")
+    assert next(iter(issue.state["participants"].values()))["status"] == status
 
 
 @pytest.mark.parametrize(
