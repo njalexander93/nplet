@@ -107,6 +107,7 @@ def test_repository_scope_rejects_malformed_grants(text: str) -> None:
         (APPROVED, True),
         (APPROVED.replace("Approved by", "Proposed by"), False),
         (APPROVED.replace("Human approved", "Pending; approved"), False),
+        (APPROVED.replace("Human approved", "pending; approved"), False),
         (APPROVED.replace("revision r5. Authorizes", "revision r4. Authorizes"), False),
         (APPROVED.replace("r5 (2026", "<r5> (2026"), False),
         (APPROVED.replace("r5 (2026", "r5. (2026"), False),

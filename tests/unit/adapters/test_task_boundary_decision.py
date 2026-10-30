@@ -157,6 +157,49 @@ def test_policy_target_is_reserved(tmp_path: Path) -> None:
         assert boundary.unauthorized(decision, scope, W.repository, memo, NONE, policy) == [target]
 
 
+@pytest.mark.parametrize("exists", [True, False])
+def test_policy_case_variants_are_reserved(tmp_path: Path, exists: bool) -> None:
+    """A case variant of the policy name or its directory is the policy where case folds.
+
+    Args:
+        tmp_path: Directory holding the policy.
+        exists: Whether the policy file exists, so a variant edits or creates it.
+    """
+    # Probe the temporary filesystem; a case-sensitive one has no variant spellings.
+    (tmp_path / "probe").touch()
+    if not (tmp_path / "PROBE").exists():
+        pytest.skip("case-sensitive temporary filesystem")
+    (tmp_path / "cfg").mkdir()
+    policy = tmp_path / "cfg" / "repository-exemptions.json"
+    if exists:
+        policy.write_text("{}")
+    # Both a variant name and a variant parent directory must be recognized.
+    for spelling in (
+        tmp_path / "cfg" / "REPOSITORY-Exemptions.json",
+        tmp_path / "CFG" / "repository-exemptions.json",
+    ):
+        decision = boundary.decide([effect((spelling, None, None), before=ABSENT)], NONE, policy)
+        assert decision.policy is True
+
+
+def test_session_repository_declared_as_vault_still_needs_scope() -> None:
+    """A vault declaration does not lift the scope requirement inside the workspace."""
+    target = effect((BASE / "w" / "README.md", W, None), ws=True)
+    vault = exemptions.Exemptions(frozenset({W.key()}), None)
+    decision = boundary.decide([target], vault)
+    memo = {str(BASE / "w"): (W, None)}
+    assert boundary.unauthorized(decision, [], W.repository, memo, vault) == [target]
+
+
+def test_subdirectory_scope_root_grants_nothing() -> None:
+    """A root below the worktree root would otherwise grant the whole repository."""
+    target = effect((BASE / "w" / "README.md", W, None), ws=True)
+    decision = boundary.decide([target], NONE)
+    scope = [{"root": str(BASE / "w" / "docs"), "paths": ["./"]}]
+    memo = {str(BASE / "w" / "docs"): (W, None)}
+    assert boundary.unauthorized(decision, scope, W.repository, memo, NONE) == [target]
+
+
 def test_scope_covers_only_granted_paths_of_each_repository() -> None:
     """Grants match per repository identity and relative to each point's own root."""
     memo: location.Memo = {

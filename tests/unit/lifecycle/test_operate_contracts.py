@@ -1180,18 +1180,38 @@ def test_restore_rejects_changed_archive_manifest_without_creating_payload(
     assert issue.commits == []
 
 
+SCOPED_ROADMAP = (
+    "**Proposal status:** Approved by the user.\n"
+    "**Proposal revision:** r2\n"
+    "**Approval record:** Human approved revision r2.\n"
+    "**Repository scope:**\n- `/abs/worktree`: `./`\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("path", "content"),
+    [
+        ("context/note.md", b"edited markdown"),
+        (
+            "roadmap.md",
+            SCOPED_ROADMAP.replace("Human approved revision r2.", "Pending approval.").encode(),
+        ),
+    ],
+)
 def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, path: str, content: bytes
 ) -> None:
     """Commit explicit Markdown reconciliation after checking directory identity and events.
 
     Args:
         monkeypatch: Pytest fixture used to replace the dependency under test.
+        path: Edited Markdown payload path.
+        content: Edited bytes; a roadmap scope arrives only as a pending proposal.
     """
     # Bind the existing directory identity and edited Markdown bytes.
     store, issue = MemoryStore(), MemoryIssue()
     issue.state["directory_identity"] = [4, 5]
-    observed = {**issue.payload, "context/note.md": b"edited markdown"}
+    observed = {**issue.payload, path: content}
 
     class Payload:
         """Expose an exact opened payload-directory identity."""
@@ -1247,23 +1267,33 @@ def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
         ),
     )  # type: ignore[arg-type]
     assert result["ok"] is True
-    assert issue.payload["context/note.md"] == b"edited markdown"
+    assert issue.payload[path] == content
     assert issue.state["reconciliation"] == {"previous": previous, "evidence": [source]}
     assert issue.commits[-1][0] == "reconciliation"
 
 
+@pytest.mark.parametrize(
+    ("path", "content", "code"),
+    [
+        ("events.jsonl", b"uncommitted event\n", "INTEGRITY_ERROR"),
+        ("roadmap.md", SCOPED_ROADMAP.encode(), "INVALID_REQUEST"),
+    ],
+)
 def test_reconcile_rejects_changed_event_bytes_before_commit(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, path: str, content: bytes, code: str
 ) -> None:
-    """Forbid importing uncommitted event history through Markdown reconciliation.
+    """Forbid importing event history or an approved scope grant through reconciliation.
 
     Args:
         monkeypatch: Pytest fixture used to replace the dependency under test.
+        path: Changed payload path.
+        content: Changed bytes.
+        code: Expected rejection code.
     """
-    # Bind the existing directory identity and uncommitted event bytes.
+    # Bind the existing directory identity and the rejected changed bytes.
     store, issue = MemoryStore(), MemoryIssue()
     issue.state["directory_identity"] = [4, 5]
-    observed = {**issue.payload, "events.jsonl": b"uncommitted event\n"}
+    observed = {**issue.payload, path: content}
 
     class Payload:
         """Expose an identity-matching payload directory."""
@@ -1317,8 +1347,8 @@ def test_reconcile_rejects_changed_event_bytes_before_commit(
                 inventory=core.manifest(observed),
             ),
         )  # type: ignore[arg-type]
-    # Confirm the rejected operation reports INTEGRITY_ERROR.
-    assert captured.value.code == "INTEGRITY_ERROR"
+    # Confirm the rejected operation reports its code before any commit.
+    assert captured.value.code == code
     assert issue.commits == []
 
 
