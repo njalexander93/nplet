@@ -189,6 +189,10 @@ def target_role(cwd: str, value: object, is_root: Callable[[Path], bool]) -> str
     return "protected" if inside else "external"
 
 
+# Every call to these tools must have a known edit shape; an unknown one is denied.
+EDIT_TOOLS = frozenset({"Write", "Edit", "NotebookEdit", "apply_patch"})
+
+
 def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
     """Extract every target from supported deterministic edit shapes.
 
@@ -199,23 +203,17 @@ def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
     Returns:
         All targets, or None for an unknown or malformed shape.
     """
-    # Native file edits expose exactly one target and known editing fields.
-    fields = {
-        "Write": {"file_path", "content"},
-        "Edit": {"file_path", "old_string", "new_string", "replace_all"},
+    # Native file edits expose exactly one target, required text fields and optional fields.
+    shapes = {
+        "Write": ("file_path", {"content"}, set()),
+        "Edit": ("file_path", {"old_string", "new_string"}, {"replace_all"}),
+        "NotebookEdit": ("notebook_path", {"new_source"}, {"cell_id", "cell_type", "edit_mode"}),
     }
-    if tool in fields:
-        key = "file_path"
-        if (
-            set(args) <= fields[tool]
-            and isinstance(args.get(key), str)
-            and (
-                tool == "Edit"
-                and isinstance(args.get("old_string"), str)
-                and isinstance(args.get("new_string"), str)
-                or tool != "Edit"
-                and isinstance(args.get("content"), str)
-            )
+    if tool in shapes:
+        key, required, optional = shapes[tool]
+        strings = {key, *required}
+        if strings <= set(args) <= strings | optional and all(
+            isinstance(args[field], str) for field in strings
         ):
             return [args[key]]
         return None
@@ -489,7 +487,7 @@ def edit_roles(event: core.JSONObject, repository: core.Repository | None) -> li
     Returns:
         Every target role, or an empty list for an unknown edit shape.
     """
-    # Unknown edits remain readiness-gated without guessing their targets.
+    # Unknown edits have no roles; the edit gate denies them.
     targets = edit_targets(event["tool_name"], event["tool_input"])
     if not targets:
         return []
@@ -672,7 +670,7 @@ def edit_operations(tool: str, args: core.JSONObject) -> list[str] | None:
         args: Structured native input.
 
     Returns:
-        One operation per target, with ``write`` for Write whatever the target's
+        One operation per target, with ``write`` for Write and NotebookEdit whatever the target's
         existence, or None for an unknown or malformed shape, including ``Move to``
         not directly after ``Update File``.
     """
@@ -723,8 +721,12 @@ def edit_effects(
         # The resolved point is last; an invalid target's only point carries its error.
         point = location.points[-1]
         path = None if point.error else point.path
-        # Write creates a target that does not exist yet.
-        if event["tool_name"] == "Write" and path is not None and not os.path.lexists(path):
+        # Write and NotebookEdit create a target that does not exist yet.
+        if (
+            event["tool_name"] in {"Write", "NotebookEdit"}
+            and path is not None
+            and not os.path.lexists(path)
+        ):
             op = "create"
         # Read the existing side outside the workspace only.
         before = None if location.workspace else UNKNOWN if path is None else classify(path, budget)

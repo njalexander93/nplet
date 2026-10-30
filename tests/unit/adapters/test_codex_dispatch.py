@@ -555,10 +555,10 @@ def test_codex_pretool_preserves_failed_core_readiness_code(
         {
             "session_id": "unit-session",
             "tool_use_id": "unit-tool",
-            "tool_input": {},
+            "tool_input": {"command": "touch x"},
             "hook_event_name": "PreToolUse",
             "cwd": str(Path.cwd()),
-            "tool_name": "apply_patch",
+            "tool_name": "Bash",
         }
     )
     assert response == codex.denial("SOURCE_STALE")
@@ -646,10 +646,10 @@ def test_codex_pretool_requires_recorded_ticket_lookup_before_other_tools(
         {
             "session_id": "unit-session",
             "tool_use_id": "unit-tool",
-            "tool_input": {},
+            "tool_input": {"command": "touch x"},
             "hook_event_name": "PreToolUse",
             "cwd": str(Path.cwd()),
-            "tool_name": "apply_patch",
+            "tool_name": "Bash",
         }
     ) == codex.denial("TICKET_READ_REQUIRED")
     assert (
@@ -801,10 +801,10 @@ def test_codex_pretool_records_ready_tool_or_exact_core_denial(
     response = codex.handle(
         {
             "session_id": "unit-session",
-            "tool_input": {},
+            "tool_input": {"command": "touch x"},
             "hook_event_name": "PreToolUse",
             "cwd": str(Path.cwd()),
-            "tool_name": "apply_patch",
+            "tool_name": "Bash",
             "tool_use_id": "read-1",
         }
     )

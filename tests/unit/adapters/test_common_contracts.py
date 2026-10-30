@@ -728,7 +728,7 @@ def test_native_pre_records_supported_tool_after_ready(monkeypatch: pytest.Monke
         return {"ok": True, "code": "OK"}
 
     monkeypatch.setattr(common.core, "execute", execute)
-    assert common.native_pre(native_event("Write"), "cursor") is None
+    assert common.native_pre(native_event("Delete"), "cursor") is None
     assert [item["operation"] for item in calls] == ["ready", "tool-start"]
     assert calls[-1]["tool_id"] == "tool-1"
 

@@ -1556,15 +1556,17 @@ def edit_gate(event: core.JSONObject, repository: core.Repository | None) -> Edi
         repository: The session's carried project repository, or None.
 
     Returns:
-        The edit's admission evidence, or None for a non-edit tool or an unknown or
-        malformed edit shape, which keeps its existing admission.
+        The edit's admission evidence, or None for a non-edit tool, which keeps its
+        existing admission.
 
     Raises:
-        core.WorkspaceError: ``POLICY_ADMINISTRATION`` if an effect targets the policy file.
+        core.WorkspaceError: ``INVALID_REQUEST`` for an unknown or malformed edit
+            shape, or ``POLICY_ADMINISTRATION`` if an effect targets the policy file.
     """
-    # Unknown or malformed edit shapes and other tools have no effects to decide.
     effects = task_boundary.edit_effects(event, repository, task_boundary.Budget())
     if not effects:
+        # An edit whose targets cannot be read must not fall back to readiness alone.
+        core.require(event["tool_name"] not in task_boundary.EDIT_TOOLS, "INVALID_REQUEST")
         return None
     # Read the policy path at call time so a relocated policy is honored.
     policy = repository_exemptions.POLICY

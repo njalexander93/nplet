@@ -263,3 +263,124 @@ def test_task_free_edit_preserves_pending_ticket_read(checkout: Path, repos: Rep
     # The pending ticket read still fences protected work.
     response = write(checkout, "claude", checkout / "src/a.py", "protected")
     assert "TICKET_READ_REQUIRED" in str(response)
+
+
+def run(cwd: Path, host: str, tool: str, args: dict, call: str, bound: bool = False) -> dict:
+    """Run one prehook for any native tool and return the native decision.
+
+    Args:
+        cwd: Session working directory.
+        host: Adapter name.
+        tool: Native tool name.
+        args: Native tool input.
+        call: Native call identifier.
+        bound: Whether the call comes from the fixture coordinator session.
+
+    Returns:
+        The adapter's native response.
+    """
+    observed = event(cwd, host, tool, args, call=call)
+    if bound:
+        observed.update(session_id="coordinator", conversation_id="coordinator")
+    return pre_decision(host, observed)
+
+
+def malformed(host: str, target: Path) -> list[tuple[str, dict]]:
+    """List unrecognized edit shapes for one host's edit tools.
+
+    Args:
+        host: Adapter name.
+        target: Edit target named by each shape.
+
+    Returns:
+        Tool and input pairs that no edit contract accepts.
+    """
+    shapes = [
+        ("Write", {"file_path": str(target), "content": "x", "exempt": True}),
+        ("Edit", {"file_path": str(target), "old_string": "x"}),
+    ]
+    if host == "codex":
+        shapes.append(("apply_patch", {"command": f"*** Add File: {target}\n+x"}))
+    if host == "claude":
+        shapes.append(("NotebookEdit", {"notebook_path": str(target), "source": "x"}))
+    return shapes
+
+
+@pytest.mark.parametrize("host", list(HOSTS))
+def test_unbound_malformed_edit_is_invalid_even_outside_repositories(
+    checkout: Path, repos: Repos, host: str
+) -> None:
+    """Deny an unrecognized edit shape even where a well-formed edit is task-free.
+
+    Args:
+        checkout: Unregistered session workspace.
+        repos: Other repositories and the vault policy.
+        host: Native adapter.
+    """
+    for index, (tool, args) in enumerate(malformed(host, repos.plain / "x.md")):
+        response = run(checkout, host, tool, args, f"malformed-{index}")
+        assert "INVALID_REQUEST" in str(response)
+    assert not (checkout / ".task").exists()
+
+
+def test_ready_malformed_edit_is_invalid_under_whole_scope(ready: tuple[str, Fixture]) -> None:
+    """Deny an unrecognized edit shape before readiness, approval or scope admit it.
+
+    Args:
+        ready: Adapter name and its ready coordinator fixture.
+    """
+    host, case = ready
+    root = case.root
+    case.approve({root: ["./"]})
+    before = task_store_snapshot(root)
+    for index, (tool, args) in enumerate(malformed(host, root / "src/x.py")):
+        response = run(root, host, tool, args, f"malformed-{index}", bound=True)
+        assert "INVALID_REQUEST" in str(response)
+    assert task_store_snapshot(root) == before
+
+
+def notebook(target: Path) -> tuple[str, dict]:
+    """Build one Claude NotebookEdit call that replaces a cell.
+
+    Args:
+        target: Notebook path.
+
+    Returns:
+        The tool name and its native input.
+    """
+    args = {
+        "notebook_path": str(target),
+        "new_source": "x",
+        "cell_id": "c1",
+        "edit_mode": "replace",
+    }
+    return "NotebookEdit", args
+
+
+def test_unbound_notebook_edit_follows_its_effect_class(checkout: Path, repos: Repos) -> None:
+    """Free a notebook edit outside every repository; deny one in the workspace.
+
+    Args:
+        checkout: Unregistered session workspace.
+        repos: Other repositories and the vault policy.
+    """
+    assert allowed("claude", run(checkout, "claude", *notebook(repos.plain / "n.ipynb"), "free"))
+    assert not allowed("claude", run(checkout, "claude", *notebook(checkout / "n.ipynb"), "own"))
+    assert not (checkout / ".task").exists()
+
+
+@pytest.mark.parametrize("ready", ["claude"], indirect=True)
+def test_ready_notebook_edit_needs_scope(ready: tuple[str, Fixture], repos: Repos) -> None:
+    """Admit a granted notebook edit and deny one in an undeclared repository.
+
+    Args:
+        ready: Claude ready coordinator fixture.
+        repos: Other repositories and the vault policy.
+    """
+    _, case = ready
+    root = case.root
+    case.approve({root: ["src/"]})
+    granted = run(root, "claude", *notebook(root / "src/n.ipynb"), "granted", bound=True)
+    assert allowed("claude", granted)
+    other = run(root, "claude", *notebook(repos.c / "src/n.ipynb"), "undeclared", bound=True)
+    assert "SCOPE_REQUIRED" in str(other)

@@ -263,7 +263,7 @@ def test_native_missing_error_flag_does_not_validate_bad_issue_payload(
     assert "TASK_WORKSPACE_NOT_READY" in result["systemMessage"]
     assert not (root / ".task" / "TEST-1").exists()
     assert "TICKET_READ_REQUIRED" in str(
-        codex.handle(event(root, "PreToolUse", tool_name="apply_patch"))
+        codex.handle(event(root, "PreToolUse", tool_name="Bash", tool_input={"command": "touch x"}))
     )
 
 
@@ -314,7 +314,7 @@ def test_pending_ticket_allows_only_scoped_read_only_diagnosis(tmp_path: Path) -
     assert {path.name: path.read_bytes() for path in bindings.glob("*.json")} == before
     assert not (root / ".task" / "TEST-1").exists()
     assert "TICKET_READ_REQUIRED" in str(
-        codex.handle(event(root, "PreToolUse", tool_name="apply_patch"))
+        codex.handle(event(root, "PreToolUse", tool_name="Bash", tool_input={"command": "touch x"}))
     )
 
 
@@ -746,7 +746,13 @@ def test_new_lookup_after_partial_setup_failure_preserves_ticket_gate(
     assert not (root / ".task/.bindings" / (other_key + ".json")).exists()
 
     blocked = codex.handle(
-        event(root, "PreToolUse", tool_name="apply_patch", tool_input={}, tool_use_id="ordinary")
+        event(
+            root,
+            "PreToolUse",
+            tool_name="Bash",
+            tool_input={"command": "touch x"},
+            tool_use_id="ordinary",
+        )
     )
     assert "TICKET_READ_REQUIRED" in str(blocked)
     second = {**first, "tool_use_id": "lookup-2"}
@@ -942,7 +948,13 @@ def test_new_task_line_fences_previous_ready_session_until_ticket_read(tmp_path:
         )
         assert denied == {}
     blocked = codex.handle(
-        event(root, "PreToolUse", tool_name="apply_patch", tool_input={}, tool_use_id="protected")
+        event(
+            root,
+            "PreToolUse",
+            tool_name="Bash",
+            tool_input={"command": "touch x"},
+            tool_use_id="protected",
+        )
     )
     assert "TICKET_READ_REQUIRED" in str(blocked)
     assert "TASK_WORKSPACE_READY" in lookup(root, "master", ticket_response())["systemMessage"]

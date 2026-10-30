@@ -546,14 +546,15 @@ finite implemented contracts, not prefix-based permission grants.
 | Codex GitHub review | `fetch_pr`, `get_pr_info`, `get_pr_diff`, `fetch_pr_patch`, `list_pr_changed_filenames`, `fetch_pr_file_patch`, `fetch_pr_comments`, `list_pull_request_reviews`, `list_pull_request_review_threads`. Native Codex connector names accept the verified single-underscore and double-underscore operation separators. Each requires `link_id`, a repository field and positive numeric `pr_number`. `get_pr_info` uses `repository_full_name`; the others use `repo_full_name`. File patch also requires `path`. Only `get_pr_diff` has an optional `format`, either `diff` or `patch` |
 | Planning and research | Codex `webrun`, `update_plan`, `request_user_input`, `request_user_input_async`. Claude parent `ToolSearch`, `Skill`, `SendMessage`, `AskUserQuestion`, plus exact `mcp__ccd_turn__update_plan` and `mcp__ccd_turn__wrap_up` with server `{name: ccd_turn, source: sdk}`. Planning helpers grant no implementation approval |
 | Local inspection | Supported native `Read`, `Glob`, `Grep`, and the finite shell reads below. Read access can include protected files |
-| Edits without protected effects | Known `Write`, `Edit` or `apply_patch` shapes with no [protected effect](task-workspace.md#task-free-and-protected-work): no workspace target, no text into another Git repository and no exemption policy target. Declared vault and non-repository targets qualify. Host permissions still apply |
+| Edits without protected effects | Known `Write`, `Edit`, `apply_patch` or Claude `NotebookEdit` shapes with no [protected effect](task-workspace.md#task-free-and-protected-work): no workspace target, no text into another Git repository and no exemption policy target. Declared vault and non-repository targets qualify. Host permissions still apply |
 
 Structured edits use the
 [target repository evidence](task-workspace.md#target-repository-identity-and-location-evidence),
 [vault exemptions](task-workspace.md#explicit-vault-exemptions) and
 [content classification](task-workspace.md#edit-content-classification). A
 protected edit also needs [recorded approval and scope](task-workspace.md#recorded-approval-and-repository-scope).
-Unknown edit shapes and other tools keep the existing edit roles.
+An unknown or malformed shape of an edit tool is denied with `INVALID_REQUEST`;
+other tools keep the existing edit roles.
 
 The five operations `delete_comment`, `delete_customer`, `delete_customer_need`,
 `delete_diff_comment` and `delete_status_update` remain outside this task-free

@@ -186,10 +186,14 @@ record. Independent task-free work also preserves an existing pending ticket rea
 stale packet and unresolved task work.
 
 Protected implementation covers file edits by their effects, plus package commands
-and other mutation-capable shell commands. Only structured edits (`Write`, `Edit`
-and `apply_patch`) use the effect decision below. Shell commands, other tool
-admission and Codex Desktop keep their current routes; later work covers them.
-An unknown or malformed edit shape keeps its earlier role-based admission.
+and other mutation-capable shell commands. Only structured edits (`Write`, `Edit`,
+`apply_patch` and Claude `NotebookEdit`) use the effect decision below. Shell
+commands, other tool admission and Codex Desktop keep their current routes; later
+work covers them. A call to one of these edit tools with an unknown or malformed
+input shape, including an extra field, is denied with `INVALID_REQUEST` before any
+lifecycle check, whether or not the session is ready. A `NotebookEdit` names its
+single target in `notebook_path`, requires `new_source` and accepts only
+`cell_id`, `cell_type` and `edit_mode` besides.
 
 Each edit target becomes an effect: create, write, delete, or a move split into
 `move-from` and `move-to`. Each effect is decided as follows:

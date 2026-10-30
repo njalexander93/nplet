@@ -401,7 +401,7 @@ def test_native_pre_stops_on_failed_readiness_without_tool_start(
         return {"ok": False, "code": "SOURCE_STALE"}
 
     monkeypatch.setattr(common.core, "execute", execute)
-    native = {**event(), "tool_name": "Write", "tool_input": {}}
+    native = {**event(), "tool_name": "Delete", "tool_input": {}}
     # The native boundary must reject a mismatched lifecycle command.
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_pre(native, "cursor")
@@ -893,7 +893,7 @@ def test_native_pre_does_not_record_ready_bootstrap_as_external_tool(
         common, "request_for", lambda _event, operation, _host: {"operation": operation}
     )
     monkeypatch.setattr(common.core, "execute", lambda _request: {"ok": True, "code": "READY"})
-    monkeypatch.setattr(common, "native_tool", lambda *_args: "Write")
+    monkeypatch.setattr(common, "native_tool", lambda *_args: "Delete")
     assert common.native_pre(event(), "cursor") is None
     assert states == [False, True]
 
@@ -1031,7 +1031,7 @@ def test_native_pre_records_only_eligible_tool_after_readiness(
     """
     monkeypatch.setattr(common, "lookup_required", lambda *_args: False)
     monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(common, "native_tool", lambda *_args: "Write")
+    monkeypatch.setattr(common, "native_tool", lambda *_args: "Delete")
     monkeypatch.setattr(
         common, "request_for", lambda _event, operation, _host: {"operation": operation}
     )
@@ -1039,7 +1039,7 @@ def test_native_pre_records_only_eligible_tool_after_readiness(
     monkeypatch.setattr(
         common.core, "execute", lambda request: calls.append(request) or {"ok": True, "code": "OK"}
     )
-    assert common.native_pre({**event(), "tool_name": "Write", "tool_input": {}}, "cursor") is None
+    assert common.native_pre({**event(), "tool_name": "Delete", "tool_input": {}}, "cursor") is None
     assert [call["operation"] for call in calls] == ["ready", "tool-start"]
     assert calls[-1]["request_id"] == "pre:tool-1"
 
