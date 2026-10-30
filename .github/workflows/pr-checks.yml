@@ -27,6 +27,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # Temporary: the pre-NPLET-99 base gate still posts a status; remove once main has the new gate.
+      statuses: write
     steps:
       # Run the gate from the trusted base revision; PR code is never executed here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

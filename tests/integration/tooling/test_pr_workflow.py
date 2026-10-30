@@ -36,10 +36,14 @@ def test_workflow_exposes_six_checks_without_masking_failed_steps() -> None:
         "MacOS",
     }
     assert "needs" not in jobs["quality"] and "needs" not in tests
-    # The size check starts at once, reads only, and runs the base revision's gate.
+    # The size check starts at once, reads the repository only, and runs the base gate.
     size = jobs["size"]
     assert size["name"] == "PR Size Check" and "needs" not in size
-    assert size["permissions"] == {"contents": "read", "pull-requests": "read"}
+    assert size["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+        "statuses": "write",
+    }
     checkout, gate = size["steps"]
     assert checkout["with"] == {
         "ref": "${{ github.event.pull_request.base.sha }}",
