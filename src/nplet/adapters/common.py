@@ -1380,7 +1380,77 @@ CLAUDE_NO_EFFECT_TOOLS = frozenset({"ToolSearch", "Skill", "SendMessage", "AskUs
 # A subagent's report to its parent changes nothing either; only a child identity may
 # use it, so a parent cannot impersonate a hand-back.
 CLAUDE_CHILD_REPORT_TOOLS = frozenset({"SubagentHandback"})
+# Delegation tools start or steer other agents; only a parent's foreground Agent call
+# has a verified child route. Workflow runs a script that spawns agents.
+CLAUDE_DELEGATION_TOOLS = frozenset(
+    {"Agent", "Task", "TaskOutput", "TaskStop", "SpawnAgent", "Workflow"}
+)
+# Moving the session into or out of a worktree changes its checkout, so a parent
+# needs readiness and records it as ordinary pending work.
+CLAUDE_PARENT_GATED_TOOLS = frozenset({"EnterWorktree", "ExitWorktree"})
+# These run shell commands outside the Bash policy, so they stay closed until shell
+# admission covers them.
+CLAUDE_CLOSED_TOOLS = frozenset({"Monitor", "PowerShell"})
+# Deletes on the configured Linear server stay denied (these five are documented; any
+# other delete_ operation is closed as well); other unlisted operations are unchecked
+# external work that grants no ticket or lifecycle evidence.
+LINEAR_DENIED_OPERATIONS = frozenset(
+    {
+        "delete_comment",
+        "delete_customer",
+        "delete_customer_need",
+        "delete_diff_comment",
+        "delete_status_update",
+    }
+)
+# Desktop app servers that keep their own route or stay denied: PR delivery, session
+# management, settings and the turn plan.
+APP_CLOSED_SERVERS = ("ccd_pr", "ccd_session_mgmt", "ccd_settings", "ccd_turn")
 CURSOR_SYNC_TOOLS = frozenset({"Read", "Write", "Edit", "Grep", "Delete"})
+
+
+def unchecked(event: core.JSONObject, host: str) -> bool:
+    """Decide whether a Claude parent call is unchecked external work.
+
+    An unchecked call is admitted with no lifecycle work: no readiness, ticket-read,
+    tool-start or settlement. Every tool with its own route, every edit and shell
+    tool, the delegation tools and closed provider operations stay outside it, as
+    does every child call and every other host.
+
+    Args:
+        event: Native envelope carrying the host's tool name and child flag.
+        host: Explicit adapter identity; only Claude Code has unchecked calls.
+
+    Returns:
+        True only for a parent tool that no existing route names.
+    """
+    # Children, other hosts and every tool with its own route keep their admission.
+    tool = event.get("tool_name")
+    if host != "claude-code" or event.get("child") is True or not isinstance(tool, str):
+        return False
+    known = (
+        CLAUDE_SYNC_TOOLS
+        | CLAUDE_NO_EFFECT_TOOLS
+        | CLAUDE_CHILD_REPORT_TOOLS
+        | CLAUDE_DELEGATION_TOOLS
+        | CLAUDE_PARENT_GATED_TOOLS
+        | CLAUDE_CLOSED_TOOLS
+        | task_boundary.EDIT_TOOLS
+        | {"Bash"}
+    )
+    if tool in known or tool.startswith(tuple(f"mcp__{s}__" for s in APP_CLOSED_SERVERS)):
+        return False
+    # A Linear-named server keeps its inventory route and denied deletes whatever its
+    # provenance; that route checks provenance before granting Linear authority.
+    for provider in _claude_linear_providers():
+        prefix = f"mcp__{provider}__"
+        if tool.startswith(prefix):
+            operation = tool[len(prefix) :]
+            # Any other delete_ operation stays closed too, not only the named five.
+            return operation not in LINEAR_PROVIDER_OPERATIONS and not operation.startswith(
+                "delete_"
+            )
+    return True
 
 
 def native_tool(event: core.JSONObject, host: str) -> str:
@@ -1403,6 +1473,9 @@ def native_tool(event: core.JSONObject, host: str) -> str:
     # Require a structured native tool input for supported synchronous work.
     if not isinstance(args, dict):
         raise core.WorkspaceError("INVALID_REQUEST")
+    # A parent tool that no route names is unchecked external work.
+    if unchecked(event, host):
+        return tool
     # Validate configured provider provenance and exact named parent operations before effects.
     # Existing child restrictions remain narrower than the parent's task-free contracts.
     if tool.startswith(("mcp__", "MCP:")) or event.get("mcp_server") is not None:
@@ -1442,7 +1515,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         return tool
     # Child and delegation tools require their own verified identity. Only a Claude
     # parent's foreground Agent call has one: SubagentStart joins its child.
-    if tool in {"Agent", "Task", "TaskOutput", "TaskStop", "SpawnAgent"}:
+    if tool in CLAUDE_DELEGATION_TOOLS:
         core.require(
             host == "claude-code" and tool == "Agent" and event.get("child") is not True,
             "HOST_UNSUPPORTED_CHILD_IDENTITY",
@@ -1486,11 +1559,12 @@ def native_tool(event: core.JSONObject, host: str) -> str:
                 "REPOSITORY_MISMATCH",
             )
         return tool
-    # A child may also hand its report back; every other host keeps its own set.
+    # A child may also hand its report back and only a parent moves worktrees; every
+    # other host keeps its own set.
     supported = (
         CLAUDE_SYNC_TOOLS
         | CLAUDE_NO_EFFECT_TOOLS
-        | (CLAUDE_CHILD_REPORT_TOOLS if event.get("child") is True else frozenset())
+        | (CLAUDE_CHILD_REPORT_TOOLS if event.get("child") is True else CLAUDE_PARENT_GATED_TOOLS)
         if host == "claude-code"
         else CURSOR_SYNC_TOOLS
     )
@@ -1625,6 +1699,9 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         core.require(result["ok"], result["code"])
         return
     effect = native_effect(event, host)
+    # An unchecked parent call does no lifecycle work, not even a readiness check.
+    if unchecked(event, host):
+        return
     tool = event["tool_name"]
     # Select the provider operation and classify edit targets against the carried
     # session repository's worktrees.
@@ -1695,6 +1772,9 @@ def native_post(event: core.JSONObject, host: str, failed: bool) -> None:
     if native_bootstrap(event, host, ready=True):
         return
     tool = native_tool(event, host)
+    # An unchecked parent call was never admitted, so it has nothing to settle.
+    if unchecked(event, host):
+        return
     request = existing_admission(event, host)
     if request is None:
         return
@@ -2266,7 +2346,8 @@ def _recovery_route(code: str, host: str) -> str:
             )
         tools = (
             "Read, Write, Edit, Glob, Grep, NotebookEdit, foreground Bash, ToolSearch, Skill, "
-            "SendMessage or AskUserQuestion (a subagent also has SubagentHandback)"
+            "SendMessage or AskUserQuestion (a parent also has EnterWorktree and ExitWorktree, "
+            "a subagent SubagentHandback)"
             if host == "claude-code"
             else "Read, Write, Edit, Grep, Delete or foreground Shell"
         )
@@ -2288,8 +2369,8 @@ def _recovery_route(code: str, host: str) -> str:
                 "Child or delegation work cannot reuse the parent binding. Only a foreground "
                 "Agent call without isolation from a ready parent session is admitted; its "
                 "subagent receives its own reader binding at SubagentStart. Nested Agent "
-                "calls, Task, TaskOutput, TaskStop, SpawnAgent and children of an unready "
-                "parent stay unsupported; perform that step in the parent session."
+                "calls, Task, TaskOutput, TaskStop, SpawnAgent, Workflow and children of an "
+                "unready parent stay unsupported; perform that step in the parent session."
             )
         return (
             "Child or delegation work has no verified child identity on this host and cannot "

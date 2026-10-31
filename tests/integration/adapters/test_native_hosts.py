@@ -815,14 +815,17 @@ def test_native_synchronous_completion_settles_only_admitted_work(native: Native
 
 @pytest.mark.parametrize("tool", ["mcp__fixture__read", "Task", "Agent"])
 def test_native_unsupported_provider_or_child_tool_denies(native: NativeCase, tool: str) -> None:
-    """Keep provider and child execution outside this adapter's claimed synchronous scope.
+    """Keep child execution and Cursor providers outside this adapter's synchronous scope.
+
+    A Claude parent's unknown MCP tool is unchecked instead: allowed with no lifecycle work.
 
     Args:
         native: Host-specific disposable repository fixture.
-        tool: Unsupported provider or child-launch tool name.
+        tool: Unknown provider or child-launch tool name.
 
     Raises:
-        AssertionError: Unsupported work inherits root permissions or creates pending state.
+        AssertionError: Unsupported work inherits root permissions or any call creates
+            pending state.
     """
     # Make the coordinator ready before changing only the tool being requested.
     host, case = native
@@ -840,7 +843,7 @@ def test_native_unsupported_provider_or_child_tool_denies(native: NativeCase, to
     result = dispatch(
         host, native_event(host, case, "PreToolUse", tool_name=tool, tool_input=inputs)
     )
-    assert_decision(host, result, False)
+    assert_decision(host, result, host == "claude" and tool.startswith("mcp__"))
     assert case.state() == before
 
 
