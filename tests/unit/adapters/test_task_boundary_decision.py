@@ -12,6 +12,7 @@ from nplet.adapters import repository_exemptions as exemptions
 from nplet.adapters import repository_location as location
 from nplet.adapters import task_boundary as boundary
 from nplet.lifecycle import task_workspace as core
+from tests.platform_support import link_directory
 
 pytestmark = pytest.mark.unit
 
@@ -146,7 +147,7 @@ def test_policy_target_is_reserved(tmp_path: Path) -> None:
     """
     real = tmp_path / "real"
     real.mkdir()
-    (tmp_path / "alias").symlink_to(real)
+    link_directory(tmp_path / "alias", real)
     policy = tmp_path / "alias" / "policy.json"
     for spelling in (policy, real / "policy.json"):
         target = effect((spelling, None, None), before=ABSENT)
@@ -290,7 +291,7 @@ def test_alias_spelling_is_related_through_its_real_directory(tmp_path: Path) ->
     """
     root = tmp_path.resolve() / "r"
     (root / "src").mkdir(parents=True)
-    (tmp_path / "alias").symlink_to(root)
+    link_directory(tmp_path / "alias", root)
     repo = location.Identity(core.Repository(root, root / ".git", [root]), (1, 9))
     target = effect((tmp_path / "alias" / "src" / "x.py", repo, None))
     decision = boundary.decide([target], NONE)

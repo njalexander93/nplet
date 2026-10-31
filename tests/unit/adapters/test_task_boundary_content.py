@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from nplet.adapters import file_content as content
 from nplet.adapters import repository_location as location
 from nplet.adapters import task_boundary as boundary
 from nplet.lifecycle import task_workspace as core
@@ -40,12 +41,16 @@ def write(path: Path, data: bytes) -> Path:
         (b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n", UNKNOWN),
         (PNG, BINARY),
         (PNG[:8], UNKNOWN),
-        (b"a" * (boundary.TEXT_LIMIT + 1), UNKNOWN),
+        (b"a" * (content.TEXT_LIMIT + 1), UNKNOWN),
         (b"", TEXT),
         (b"\xff\xd8\xff\xe0" + bytes(12) + b"\xff\xd9", BINARY),
         (b"GIF89a\x01\x00\x01\x00\x80\x00\x00;", BINARY),
         (b"wOF2\x00\x01\x00\x00" + (48).to_bytes(4, "big") + bytes(36), BINARY),
         (b"PK\x03\x04" + bytes(26) + b"PK\x05\x06" + bytes(18), BINARY),
+        (b"PK\x03\x04" + bytes(26) + b"PK\x05\x06" + bytes(16) + b"\x03\x00abc", BINARY),
+        # A truncated record or a comment overrunning the file is not a ZIP.
+        (b"PK\x03\x04PK\x05\x06", UNKNOWN),
+        (b"PK\x03\x04" + bytes(26) + b"PK\x05\x06" + bytes(16) + b"\x05\x00", UNKNOWN),
     ],
     # Short ids keep the oversized case out of reports.
     ids=lambda value: value if isinstance(value, str) else f"{len(value)}-bytes",
@@ -58,7 +63,7 @@ def test_content_states_follow_exclusive_evidence(tmp_path: Path, data: bytes, s
         data: Generated file content.
         state: Expected content state.
     """
-    assert boundary.classify(write(tmp_path / "f.bin", data), boundary.Budget()) == state
+    assert content.classify(write(tmp_path / "f.bin", data), content.Budget()) == state
 
 
 def test_special_files_and_missing_paths_are_never_opened(
@@ -74,11 +79,11 @@ def test_special_files_and_missing_paths_are_never_opened(
     fifo = hasattr(os, "mkfifo")
     if fifo:
         os.mkfifo(tmp_path / "pipe")
-    monkeypatch.setattr(boundary.os, "open", pytest.fail)
+    monkeypatch.setattr(content.os, "open", pytest.fail)
     if fifo:
-        assert boundary.classify(tmp_path / "pipe", boundary.Budget()) == UNKNOWN
-    assert boundary.classify(tmp_path, boundary.Budget()) == UNKNOWN
-    assert boundary.classify(tmp_path / "missing", boundary.Budget()) == ABSENT
+        assert content.classify(tmp_path / "pipe", content.Budget()) == UNKNOWN
+    assert content.classify(tmp_path, content.Budget()) == UNKNOWN
+    assert content.classify(tmp_path / "missing", content.Budget()) == ABSENT
 
 
 @pytest.mark.parametrize("fault", ["open", "fstat-type", "fstat-error", "resized"])
@@ -99,11 +104,11 @@ def test_classify_reports_unknown_when_the_file_changes_or_fails(
         raise OSError("injected")
 
     if fault == "open":
-        monkeypatch.setattr(boundary.os, "open", fail)
+        monkeypatch.setattr(content.os, "open", fail)
     elif fault == "fstat-type":
-        monkeypatch.setattr(boundary.os, "fstat", lambda fd: os.stat(tmp_path))
+        monkeypatch.setattr(content.os, "fstat", lambda fd: os.stat(tmp_path))
     elif fault == "fstat-error":
-        monkeypatch.setattr(boundary.os, "fstat", fail)
+        monkeypatch.setattr(content.os, "fstat", fail)
     else:
         # Report a smaller size than the file holds, as if it grew after lstat.
         def shrunk(target: Path) -> os.stat_result:
@@ -111,8 +116,8 @@ def test_classify_reports_unknown_when_the_file_changes_or_fails(
             info[6] -= 1
             return os.stat_result(info)
 
-        monkeypatch.setattr(boundary.os, "lstat", shrunk)
-    assert boundary.classify(path, boundary.Budget()) == UNKNOWN
+        monkeypatch.setattr(content.os, "lstat", shrunk)
+    assert content.classify(path, content.Budget()) == UNKNOWN
 
 
 def test_call_limit_makes_later_sides_unknown(tmp_path: Path) -> None:
@@ -121,12 +126,12 @@ def test_call_limit_makes_later_sides_unknown(tmp_path: Path) -> None:
     Args:
         tmp_path: Directory holding the text files.
     """
-    assert boundary.Budget().remaining == 16 * 1024 * 1024
-    budget = boundary.Budget(remaining=10)
+    assert content.Budget().remaining == 16 * 1024 * 1024
+    budget = content.Budget(remaining=10)
     small = write(tmp_path / "small.md", b"tiny\n")
-    assert boundary.classify(small, budget) == TEXT
-    assert boundary.classify(write(tmp_path / "big.md", b"x" * 20), budget) == UNKNOWN
-    assert boundary.classify(small, budget) == UNKNOWN
+    assert content.classify(small, budget) == TEXT
+    assert content.classify(write(tmp_path / "big.md", b"x" * 20), budget) == UNKNOWN
+    assert content.classify(small, budget) == UNKNOWN
 
 
 def effects(
@@ -144,7 +149,7 @@ def effects(
         Target, operation, before state and after state per effect.
     """
     event = {"cwd": str(cwd), "tool_name": tool, "tool_input": args}
-    found = boundary.edit_effects(event, repository, boundary.Budget())
+    found = boundary.edit_effects(event, repository, content.Budget())
     return [(e.location.target, e.op, e.before, e.after) for e in found]
 
 
