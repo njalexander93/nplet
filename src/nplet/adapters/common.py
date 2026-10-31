@@ -1299,18 +1299,22 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
     return normalized
 
 
-def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> None:
+def cursor_shell_directory(args: core.JSONObject) -> str | None:
     """Validate native Shell metadata without authorizing the command.
 
     This validates transport fields only; timeout can background execution and
-    supplies no synchronous completion evidence.
+    supplies no synchronous completion evidence. The directory is not compared with
+    the session's repository; lifecycle callers use ``cursor_lifecycle_shell``.
 
     Args:
-        event: Identity-validated Cursor event with its observed repository.
         args: Native Shell input whose command authority the caller checks separately.
 
+    Returns:
+        The supplied ``cwd`` or ``working_directory`` text, or None when neither is
+        supplied or ``cwd`` is empty, so Shell runs in the event's own directory.
+
     Raises:
-        core.WorkspaceError: Fields, aliases, timeout or repository override are invalid.
+        core.WorkspaceError: Fields, aliases, timeout or directory type are invalid.
     """
     # Metadata alone grants neither command authority nor lifecycle settlement.
     core.require(
@@ -1322,14 +1326,32 @@ def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> Non
     if "timeout" in args:
         timeout = args["timeout"]
         core.require(type(timeout) is int and 1 <= timeout <= 2147483647, "HOST_UNSUPPORTED_TOOL")
-    # Empty native cwd supplies no override; a supplied directory must share the session's
-    # repository, or both must lie outside every repository.
+    # At most one directory field is present; empty native cwd supplies no override.
     key = "cwd" if "cwd" in args else "working_directory"
-    if key in args:
-        directory = args[key]
-        core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
-        if key == "cwd" and directory == "":
-            return
+    if key not in args:
+        return None
+    directory = args[key]
+    core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
+    return None if key == "cwd" and directory == "" else directory
+
+
+def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> None:
+    """Validate Shell metadata for a lifecycle, reconciliation or child command.
+
+    These commands act on the session's own store, so a directory override must not
+    move them into another repository.
+
+    Args:
+        event: Identity-validated Cursor event with its observed repository.
+        args: Native Shell input whose command authority the caller checks separately.
+
+    Raises:
+        core.WorkspaceError: Fields, aliases, timeout or repository override are invalid.
+    """
+    # A supplied directory must share the session's repository, or both must lie
+    # outside every repository.
+    directory = cursor_shell_directory(args)
+    if directory is not None:
         core.require(project_root(directory) == session_project_root(event), "REPOSITORY_MISMATCH")
 
 
@@ -1343,6 +1365,10 @@ def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> 
 
     Returns:
         Whether this exact native tool call is a scoped lifecycle invocation.
+
+    Raises:
+        core.WorkspaceError: ``REPOSITORY_MISMATCH`` when a Cursor lifecycle command's
+            directory override lies in another repository.
     """
     # Native shells do not expose Codex's login/shell fields; accept only documented inputs.
     shell = "Bash" if host == "claude-code" else "Shell"
@@ -1361,15 +1387,19 @@ def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> 
     # Disallow background bootstrap commands.
     if args.get("run_in_background", False) is not False:
         return False
-    # A native working-directory override cannot redirect the bootstrap to another repository.
-    try:
-        # Reject working-directory redirects to another repository.
-        if host == "cursor":
-            cursor_lifecycle_shell(event, args)
-        return canonical_bootstrap(event, args.get("command"), host, ready)
     # Unverifiable shell details cannot establish canonical bootstrap.
+    try:
+        if host == "cursor":
+            cursor_shell_directory(args)
+        if not canonical_bootstrap(event, args.get("command"), host, ready):
+            return False
     except (core.WorkspaceError, OSError, ValueError, KeyError, TypeError):
         return False
+    # A lifecycle command cannot be redirected to another repository; it is denied
+    # rather than falling through to ordinary Shell admission.
+    if host == "cursor":
+        cursor_lifecycle_shell(event, args)
+    return True
 
 
 CLAUDE_SYNC_TOOLS = frozenset({"Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit"})
@@ -1410,23 +1440,30 @@ CURSOR_SYNC_TOOLS = frozenset({"Read", "Write", "Edit", "Grep", "Delete"})
 
 
 def unchecked(event: core.JSONObject, host: str) -> bool:
-    """Decide whether a Claude parent call is unchecked external work.
+    """Decide whether a Claude or Cursor parent call is unchecked external work.
 
     An unchecked call is admitted with no lifecycle work: no readiness, ticket-read,
     tool-start or settlement. Every tool with its own route, every edit and shell
     tool, the delegation tools and closed provider operations stay outside it, as
-    does every child call and every other host.
+    does every child call and every Codex call. In Cursor only a generic ``MCP:``
+    call that names no Linear operation is unchecked.
 
     Args:
         event: Native envelope carrying the host's tool name and child flag.
-        host: Explicit adapter identity; only Claude Code has unchecked calls.
+        host: Explicit adapter identity; Claude Code and Cursor have unchecked calls.
 
     Returns:
         True only for a parent tool that no existing route names.
     """
-    # Children, other hosts and every tool with its own route keep their admission.
+    # Children, Codex and every tool with its own route keep their admission.
     tool = event.get("tool_name")
-    if host != "claude-code" or event.get("child") is True or not isinstance(tool, str):
+    if event.get("child") is True or not isinstance(tool, str):
+        return False
+    # Cursor's generic callback carries no server, so a Linear operation keeps its route
+    # and the blocking beforeMCPExecution hook checks the server of every other call.
+    if host == "cursor":
+        return tool.startswith("MCP:") and tool[4:] not in LINEAR_PROVIDER_OPERATIONS
+    if host != "claude-code":
         return False
     known = (
         CLAUDE_SYNC_TOOLS
@@ -1544,7 +1581,8 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             and set(args) <= {"command", "working_directory", "cwd", "timeout"}
             and isinstance(args.get("command"), str)
         ):
-            cursor_lifecycle_shell(event, args)
+            # An ordinary command may run in any directory; shell-effect recognition checks it.
+            cursor_shell_directory(args)
             return tool
         # Children and unsupported inputs retain their existing narrower contract.
         core.require(
@@ -1587,7 +1625,12 @@ def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
 
     Returns:
         A copied canonical Bash effect for validated Claude Bash or Cursor Shell;
-        otherwise the original event, including all Codex input metadata.
+        otherwise the original event, including all Codex input metadata. The effect
+        carries a top-level ``command_cwd``: advisory input for shell-effect
+        recognition, never a replacement for the event's ``cwd``
+        or repository. It is the event's ``cwd`` when the command runs there, a
+        Cursor directory override that names an existing absolute directory, or None
+        for a relative or nonexistent override, whose relative operands are unchecked.
 
     Raises:
         core.WorkspaceError: If Claude or Cursor native tool validation fails.
@@ -1598,11 +1641,18 @@ def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
     tool = native_tool(event, host)
     # Normalize validated shell effects; read metadata does not prove foreground completion.
     if (host, tool) in {("claude-code", "Bash"), ("cursor", "Shell")}:
-        return {
+        effect = {
             **event,
             "tool_name": "Bash",
             "tool_input": {"command": event["tool_input"]["command"]},
+            "command_cwd": event.get("cwd"),
         }
+        # Only an existing absolute Cursor override says where relative operands resolve.
+        directory = cursor_shell_directory(event["tool_input"]) if host == "cursor" else None
+        if directory is not None:
+            known = os.path.isabs(directory) and os.path.isdir(directory)
+            effect["command_cwd"] = directory if known else None
+        return effect
     return event
 
 

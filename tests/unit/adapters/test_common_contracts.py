@@ -147,7 +147,7 @@ def test_native_tool_accepts_synchronous_file_tool(host: str, tool: str) -> None
 @pytest.mark.parametrize(
     ("event", "code"),
     [
-        (native_event("MCP:external"), "HOST_UNSUPPORTED_PROVIDER"),
+        ({**native_event("MCP:external"), "child": True}, "HOST_UNSUPPORTED_PROVIDER"),
         (native_event("Task"), "HOST_UNSUPPORTED_CHILD_IDENTITY"),
         (native_event("Unknown"), "HOST_UNSUPPORTED_TOOL"),
         (native_event("Read", {"async": True}), "HOST_UNSUPPORTED_ASYNC"),
@@ -163,7 +163,7 @@ def test_native_tool_rejects_uncorrelated_or_async_work(
         event: Hook event supplied to the adapter under test.
         code: Expected boundary diagnostic.
     """
-    # Unsupported provider, child, unknown, async, and uncorrelated calls all fail admission.
+    # Child provider, delegation, unknown, async, and uncorrelated calls all fail admission.
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_tool(event, "cursor")
     assert captured.value.code == code
