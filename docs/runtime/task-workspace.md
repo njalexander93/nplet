@@ -234,11 +234,12 @@ without a task. They create no task, participant, binding, approval or pending-t
 record. Independent task-free work also preserves an existing pending ticket read,
 stale packet and unresolved task work.
 
-Protected implementation covers file edits by their effects, plus package commands
-and other mutation-capable shell commands. Only structured edits (`Write`, `Edit`,
-`apply_patch` and Claude `NotebookEdit`) use the effect decision below. Shell
-commands, other tool admission and Codex Desktop keep their current routes; later
-work covers them. A call to one of these edit tools with an unknown or malformed
+Protected implementation covers file edits and shell commands by their effects.
+Structured edits (`Write`, `Edit`, `apply_patch` and Claude `NotebookEdit`) and the
+[recognized shell mutations](host-hooks.md#recognized-shell-mutations) of Claude
+`Bash` and Cursor parent `Shell` use the effect decision below. Unrecognized shell
+work is unchecked rather than protected. Other tool admission and Codex Desktop keep
+their current routes; later work covers them. A call to one of these edit tools with an unknown or malformed
 input shape, including an extra field, is denied with `INVALID_REQUEST` before any
 lifecycle check, whether or not the session is ready. A `NotebookEdit` names its
 single target in `notebook_path`, requires `new_source` and accepts only

@@ -575,9 +575,10 @@ Cursor parent `Shell` accepts a string `command` plus native `cwd`,
 Supply at most one directory field. Empty `cwd` means no override; a nonempty
 directory must remain in the same repository. Other fields remain unsupported.
 Metadata validation grants no readiness or synchronous completion guarantee.
-Only the finite reads below are task-free and create no pending lifecycle work.
-Other commands require current readiness and are recorded as pending before
-execution. Timeout can background execution. Every admitted parent Shell call
+The finite reads below and commands without a protected
+[recognized shell mutation](#recognized-shell-mutations) are task-free and create
+no pending lifecycle work. A command with a protected effect requires current
+readiness and is recorded as pending before execution. Timeout can background execution. Every admitted parent Shell call
 remains pending after native success or failure callbacks, including callbacks
 with integer `exitCode` and no async markers. Settlement requires independent
 verification of the original process termination followed by explicit lifecycle
@@ -604,8 +605,59 @@ described below.
 | `git --no-pager -c core.fsmonitor=false show` or `log` | Requires `--no-ext-diff --no-textconv`; optional `--stat`, `--name-only`, `--oneline` and literal operands |
 
 The Git forms also admit `--` before operands. They disable pager, filesystem
-monitor, external diff and text conversion behavior where applicable. General
-shell commands and package install/remove/update commands remain protected.
+monitor, external diff and text conversion behavior where applicable. On Codex,
+other commands remain readiness-gated. On Claude `Bash` and Cursor parent `Shell`,
+other commands follow the recognized shell mutations below.
+
+#### Recognized shell mutations
+
+Claude `Bash` and Cursor parent `Shell` commands other than the finite reads are
+gated by the file effects the adapter can identify in the command text. The command
+is tokenized, never run or expanded. The adapter assumes `cp`, `mv`, `rm` and `echo`
+are the standard system programs; aliases, functions and `PATH` shadowing are not
+analyzed. Each identified target becomes an [effect](task-workspace.md#task-free-and-protected-work)
+and receives the same decision, approval and scope checks as a structured edit.
+
+| Recognized | Effect |
+| --- | --- |
+| `>`, `>>`, `>\|`, `N>`, `N>>`, `N>\|`, `&>`, `&>>` with a literal target, in any segment | `create` or `write`. Output is text only for `echo` with literal operands, no leading `-` and no backslash; otherwise unknown |
+| `rm` with `-f`, `-i`, `--` | `delete` |
+| `cp` with `-f`, `-i`, `-p`, `-n`, `--` | `create` or `write` at the destination, carrying the source's actual content state |
+| `mv` with `-f`, `-i`, `-n`, `--` | `move-from` the source and `move-to` the destination, carrying the source's state |
+| `cp`, `mv` and `rm` as `/bin/` paths | As above |
+
+Segments split on unquoted `;`, `&&`, `||`, `|` and `&`; each is analyzed even when
+it may not run. An existing directory destination receives `destination/basename`;
+several sources need one. Descriptor duplication (`>&N`, `>&-`) and `/dev/null` are
+not mutations. A workspace target is never content-inspected, so a workspace
+redirection or copy is protected. Outside the workspace a binary copy is not text,
+while a text copy or `echo` redirection into another repository is protected.
+
+Everything else is **unchecked**: it yields no effect and never gates on its own.
+This includes other programs (Git, package managers, `sed -i`, `touch`, `ln`,
+`printf` output), combined or other flags, recursive operations, globbed or
+expanded words, directory operands outside the workspace, and a missing
+trailing-slash destination. Known effects beside an unchecked command still apply:
+`python build.py && rm /other/README.md` still decides the delete. Line breaks,
+unquoted backslashes, backticks, `$(`, parentheses, brace groups, comments,
+here-documents, `<>` and malformed quoting make segmentation untrustworthy, so the
+whole command is unchecked.
+
+Relative operands resolve from the command's **execution directory**, not the chat
+or session directory: Cursor's validated nonempty `working_directory` or `cwd`,
+otherwise the hook's `cwd`. It must be an absolute existing directory; otherwise
+relative operands are unchecked. After a `cd` or `pushd` segment, later relative
+operands are unchecked while absolute ones stay identified. The session repository
+still comes from the hook's working directory.
+
+An effect on the exemption policy file is denied with `POLICY_ADMINISTRATION`, and
+one on a `.task` or `.git` control store with `NOT_OWNER`. A command naming the
+lifecycle entry points keeps its lifecycle-control route instead of running free.
+A child's shell keeps its scoped admission unless it has a protected effect. One
+inspection budget covers every content read of a command. Task-free shell work
+leaves stale readiness, a pending ticket read and unrelated pending records
+untouched. These routes are covered by protocol tests against recorded hook
+envelopes; no native observation of the execution-directory mapping is recorded.
 
 #### Claude GitHub review fallback
 
