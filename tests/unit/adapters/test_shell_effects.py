@@ -316,3 +316,46 @@ def test_directory_changes_and_missing_cwd_leave_relative_operands_unchecked(
         [("delete", f"{other}/README.md", TEXT, None)],
         False,
     )
+
+
+@pytest.mark.parametrize(
+    "prefix", ["builtin cd dir; ", "command cd dir; ", "X=1 cd dir; ", "if cd dir; then :; fi; "]
+)
+def test_possible_directory_changes_leave_relative_operands_unchecked(
+    repos: tuple, prefix: str
+) -> None:
+    """Any program that may change directory, not only a bare cd, unanchors relative operands.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        prefix: Segments that may change the directory.
+    """
+    _, other, session = repos
+    assert run(prefix + "rm README.md", other, session) == ([], True)
+
+
+@pytest.mark.parametrize("operator", [">!", ">>!", "&>!", "&>>!", ">&!"])
+def test_zsh_forced_overwrite_names_its_target(repos: tuple, operator: str) -> None:
+    """The zsh ``!`` redirection forms write to the following word.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        operator: Forced-overwrite redirection.
+    """
+    ws, other, session = repos
+    assert run(f"echo hi {operator} {other}/README.md", ws, session) == (
+        [("write", f"{other}/README.md", TEXT, TEXT)],
+        False,
+    )
+
+
+@pytest.mark.parametrize("command", ["rm {other}/README<1-1>.md", "rm <1-1>", "echo x > =python3"])
+def test_zsh_globs_and_command_paths_are_unchecked(repos: tuple, command: str) -> None:
+    """The zsh numeric globs and ``=`` command paths are never read as literal targets.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        command: Command template.
+    """
+    ws, other, session = repos
+    assert run(command.format(other=other), ws, session) == ([], True)

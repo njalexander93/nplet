@@ -1,6 +1,7 @@
 """Recognize the literal file mutations of one shell command as edit effects.
 
-The command is tokenized here, quote-aware and character by character; it is never run
+The grammar is the subset that bash and zsh share, plus zsh's ``>!`` redirections. The
+command is tokenized here, quote-aware and character by character; it is never run
 or expanded. ``cp``, ``mv``, ``rm`` and ``echo`` are assumed to be the standard system
 programs: aliases, functions and ``PATH`` shadowing are not analyzed. Recognized
 mutations are output redirections in any segment and the literal operands of ``cp``,
@@ -12,6 +13,7 @@ yields no effects at all. The recognizer never decides admission.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -124,6 +126,8 @@ def _tokens(command: str) -> list[Word | str] | None:
                 return None
             if c == "&" and following == ">":
                 raw, token = ("&>>" if command.startswith("&>>", i) else "&>"), ">"
+                # zsh's forced-overwrite form ends with ``!``.
+                raw += "!" if command.startswith("!", i + len(raw)) else ""
             else:
                 raw = c * 2 if c in "&|" and following == c else c
                 token = raw
@@ -132,6 +136,12 @@ def _tokens(command: str) -> list[Word | str] | None:
             continue
         # Digits right before a redirection name its descriptor rather than an operand.
         elif c in "<>":
+            # A ``<`` within a word or before ``N-M>`` can be a zsh numeric glob.
+            if c == "<" and (
+                (text is not None and not text.isdigit())
+                or re.match(r"<[0-9]*-[0-9]*>", command[i:])
+            ):
+                return None
             if text is not None and text.isdigit() and not quoted:
                 text = None
             elif not end():
@@ -142,12 +152,16 @@ def _tokens(command: str) -> list[Word | str] | None:
             operator = {">>": ">", ">|": ">", ">&": ">&", "<&": "<"}.get(raw)
             if operator is None:
                 raw, operator = c, c
+            # zsh's forced-overwrite forms ``>!``, ``>>!`` and ``>&!`` name a file.
+            if c == ">" and command.startswith("!", i + len(raw)):
+                raw += "!"
             tokens.append(operator)
             i += len(raw)
             continue
         # Any other character extends the word, recording expansion or globbing.
         else:
-            if c == "$":
+            # zsh expands a leading ``=`` to a command's path.
+            if c == "$" or (c == "=" and text is None):
                 kind = EXPANDED
             elif c in "*?[~{" and kind != EXPANDED:
                 kind = GLOBBED
@@ -325,8 +339,9 @@ def shell_effects(
                 location, path = locate(base, word.text)
                 add(written(path), location, path, output)
         name = PROGRAMS.get(program or "")
-        # A directory change makes later relative operands unchecked.
-        if program in ("cd", "pushd"):
+        # A program that may change directory (cd, a wrapper, a keyword or an unknown
+        # program) makes later relative operands unchecked.
+        if words and name is None and program not in ("echo", "pwd", "cat"):
             base = None
         # Other programs' arguments are unchecked unless known to have no file effect.
         if name is None:

@@ -1691,8 +1691,9 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         # A lifecycle invocation keeps its lifecycle-control route instead of running free.
         # shortcut: an indirect invocation through another script is not detected, upgrade
         # if lifecycle commands gain a dedicated host route.
+        unquoted = command.replace("'", "").replace('"', "")
         lifecycle = any(
-            name in command for name in (LIFECYCLE.name, WINDOWS_BOOTSTRAP.name, "nplet.lifecycle")
+            name in unquoted for name in (LIFECYCLE.name, WINDOWS_BOOTSTRAP.name, "nplet.lifecycle")
         )
         # A child's shell keeps its existing admission unless it has protected effects.
         if shell_gate.decision.protected or (event.get("child") is not True and not lifecycle):

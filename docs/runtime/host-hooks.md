@@ -613,14 +613,15 @@ other commands follow the recognized shell mutations below.
 
 Claude `Bash` and Cursor parent `Shell` commands other than the finite reads are
 gated by the file effects the adapter can identify in the command text. The command
-is tokenized, never run or expanded. The adapter assumes `cp`, `mv`, `rm` and `echo`
+is tokenized, never run or expanded, using the grammar bash and zsh share plus
+zsh's `>!` forms. The adapter assumes `cp`, `mv`, `rm` and `echo`
 are the standard system programs; aliases, functions and `PATH` shadowing are not
 analyzed. Each identified target becomes an [effect](task-workspace.md#task-free-and-protected-work)
 and receives the same decision, approval and scope checks as a structured edit.
 
 | Recognized | Effect |
 | --- | --- |
-| `>`, `>>`, `>\|`, `N>`, `N>>`, `N>\|`, `&>`, `&>>` with a literal target, in any segment | `create` or `write`. Output is text only for `echo` with literal operands, no leading `-` and no backslash; otherwise unknown |
+| `>`, `>>`, `>\|`, `>!`, `>>!`, their `N` and `&` forms, and `>&!`, with a literal target, in any segment | `create` or `write`. Output is text only for `echo` with literal operands, no leading `-` and no backslash; otherwise unknown |
 | `rm` with `-f`, `-i`, `--` | `delete` |
 | `cp` with `-f`, `-i`, `-p`, `-n`, `--` | `create` or `write` at the destination, carrying the source's actual content state |
 | `mv` with `-f`, `-i`, `-n`, `--` | `move-from` the source and `move-to` the destination, carrying the source's state |
@@ -636,18 +637,20 @@ while a text copy or `echo` redirection into another repository is protected.
 Everything else is **unchecked**: it yields no effect and never gates on its own.
 This includes other programs (Git, package managers, `sed -i`, `touch`, `ln`,
 `printf` output), combined or other flags, recursive operations, globbed or
-expanded words, directory operands outside the workspace, and a missing
-trailing-slash destination. Known effects beside an unchecked command still apply:
+expanded words (including zsh `=cmd`), directory operands outside the workspace,
+and a missing trailing-slash destination. Known effects beside an unchecked command still apply:
 `python build.py && rm /other/README.md` still decides the delete. Line breaks,
 unquoted backslashes, backticks, `$(`, parentheses, brace groups, comments,
-here-documents, `<>` and malformed quoting make segmentation untrustworthy, so the
+here-documents, `<>`, a `<` inside a word or before `N-M>` (a zsh numeric glob)
+and malformed quoting make segmentation untrustworthy, so the
 whole command is unchecked.
 
 Relative operands resolve from the command's **execution directory**, not the chat
 or session directory: Cursor's validated nonempty `working_directory` or `cwd`,
 otherwise the hook's `cwd`. It must be an absolute existing directory; otherwise
-relative operands are unchecked. After a `cd` or `pushd` segment, later relative
-operands are unchecked while absolute ones stay identified. The session repository
+relative operands are unchecked. After any segment other than `cp`, `mv`, `rm`,
+`echo`, `pwd` or `cat`, which may change directory, later relative operands are
+unchecked while absolute ones stay identified. The session repository
 still comes from the hook's working directory.
 
 An effect on the exemption policy file is denied with `POLICY_ADMINISTRATION`, and

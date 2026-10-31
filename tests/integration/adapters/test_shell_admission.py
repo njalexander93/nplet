@@ -233,6 +233,8 @@ def test_altered_lifecycle_command_stays_behind_the_ticket_read(checkout: Path) 
     request = {"operation": "read", "session_id": "fresh", "issue_id": "TEST-1"}
     command = common.bootstrap_command(request, "claude-code") + "; true"
     assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", command, "lifecycle"))
+    quoted = "python -m nplet.life''cycle.task_workspace"
+    assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", quoted, "quoted"))
     assert allowed("claude", shell(checkout, "claude", "python build.py", "free"))
 
 
