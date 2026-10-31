@@ -1,0 +1,318 @@
+"""Verify literal shell mutation recognition against real files and Git repositories."""
+
+import zlib
+from pathlib import Path
+
+import pytest
+
+from nplet.adapters.file_content import Budget
+from nplet.adapters.shell_effects import shell_effects
+from nplet.lifecycle import task_workspace as core
+from tests.integration.adapters.task_boundary_support import init_repo
+
+pytestmark = pytest.mark.unit
+
+TEXT, BINARY, UNKNOWN, ABSENT = "text", "binary", "unknown", "absent"
+IHDR = b"IHDR" + bytes(13)
+PNG = b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + IHDR + zlib.crc32(IHDR).to_bytes(4, "big")
+
+
+@pytest.fixture
+def repos(tmp_path: Path) -> tuple[Path, Path, core.Repository]:
+    """Create a workspace repository and another repository with text and binary files.
+
+    Args:
+        tmp_path: Disposable parent directory.
+
+    Returns:
+        The workspace root, the other root and the workspace's session repository.
+    """
+    ws, other = init_repo(tmp_path / "ws"), init_repo(tmp_path / "other")
+    # Each repository holds a text file, a binary file and a directory.
+    for root in (ws, other):
+        (root / "README.md").write_text("readme\n")
+        (root / "logo.png").write_bytes(PNG)
+        (root / "a b.md").write_text("spaced\n")
+        (root / "-dash.md").write_text("dash\n")
+        (root / "dir").mkdir()
+    session = core.project_repository(ws)
+    assert session is not None
+    return ws, other, session
+
+
+def run(
+    command: str, cwd: Path | None, session: core.Repository
+) -> tuple[list[tuple[str, str, str | None, str | None]], bool]:
+    """Recognize one command and flatten its effects into comparable tuples.
+
+    Args:
+        command: Shell command text.
+        cwd: Execution directory, or None.
+        session: Session repository.
+
+    Returns:
+        Operation, target spelling, before and after per effect, and the opaque flag.
+    """
+    shell = shell_effects(command, None if cwd is None else str(cwd), session, Budget())
+    flat = [(e.op, str(e.location.points[0].path), e.before, e.after) for e in shell.effects]
+    # Every effect's target spelling is reported for the caller's control check.
+    assert shell.targets == [target for _, target, _, _ in flat]
+    return flat, shell.opaque
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm README.md; echo $(date)",
+        "rm README.md; echo `date`",
+        'rm README.md; echo "$(date)"',
+        "(rm README.md)",
+        "{ rm README.md; }",
+        "rm README.md; cat <<EOF",
+        "rm README.md\nrm logo.png",
+        "rm README.md\rrm logo.png",
+        "rm 'README.md",
+        'rm "README.md',
+        "rm README\\.md",
+        "# rm README.md",
+        "rm README.md <>f",
+        "rm README.md >",
+    ],
+)
+def test_untrusted_syntax_yields_no_effects(repos: tuple, command: str) -> None:
+    """Substitution, grouping, here-documents, line breaks and bad quoting hide everything.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        command: Command whose segmentation cannot be trusted.
+    """
+    _, other, session = repos
+    assert run(command, other, session) == ([], True)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf README.md",
+        "rm -fi README.md",
+        "rm -r README.md",
+        "rm --force README.md",
+        "rm -dash.md",
+        'rm "$HOME"',
+        'rm "READ$X.md"',
+        "rm *.md",
+        "rm ~/README.md",
+        "rm REA{D,X}ME.md",
+        "rm ''",
+        "cp -v README.md copy.md",
+        "cp -r dir copy",
+        "mv -p README.md moved.md",
+        "cp README.md",
+        "cp README.md logo.png dir/missing",
+        "cp README.md nowhere/",
+        "rm dir",
+        "cp dir copy",
+        "mv dir moved",
+        "printf '%s' 'rm README.md'",
+        "git rm README.md",
+    ],
+)
+def test_unrecognized_arguments_are_unchecked(repos: tuple, command: str) -> None:
+    """Unsupported flags, ambiguous operands and unsure destinations yield no effect.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        command: Command with unchecked arguments.
+    """
+    _, other, session = repos
+    assert run(command, other, session) == ([], True)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("rm README.md", [("delete", "README.md", TEXT, None)]),
+        ("rm -f README.md", [("delete", "README.md", TEXT, None)]),
+        ("rm -i -f logo.png", [("delete", "logo.png", BINARY, None)]),
+        ("/bin/rm -- -dash.md", [("delete", "-dash.md", TEXT, None)]),
+        ("rm 'a b.md'", [("delete", "a b.md", TEXT, None)]),
+        (
+            'rm "a b.md" missing',
+            [("delete", "a b.md", TEXT, None), ("delete", "missing", ABSENT, None)],
+        ),
+        ("rm '$X.md'", [("delete", "$X.md", ABSENT, None)]),
+        *[
+            (f"cp {flag} README.md copy.md", [("create", "copy.md", ABSENT, TEXT)])
+            for flag in ("-f", "-i", "-p", "-n", "--")
+        ],
+        ("/bin/cp logo.png README.md", [("write", "README.md", TEXT, BINARY)]),
+        (
+            "cp README.md logo.png dir",
+            [
+                ("create", "dir/README.md", ABSENT, TEXT),
+                ("create", "dir/logo.png", ABSENT, BINARY),
+            ],
+        ),
+        ("cp logo.png dir/", [("create", "dir/logo.png", ABSENT, BINARY)]),
+        *[
+            (
+                f"mv {flag} README.md logo.png",
+                [
+                    ("move-from", "README.md", TEXT, None),
+                    ("move-to", "logo.png", BINARY, TEXT),
+                ],
+            )
+            for flag in ("-f", "-i", "-n", "--")
+        ],
+        (
+            "/bin/mv logo.png dir",
+            [
+                ("move-from", "logo.png", BINARY, None),
+                ("move-to", "dir/logo.png", ABSENT, BINARY),
+            ],
+        ),
+    ],
+)
+def test_literal_operands_yield_effects(
+    repos: tuple, command: str, expected: list[tuple[str, str, str | None, str | None]]
+) -> None:
+    """Supported flags and literal operands describe each target and its content states.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        command: Recognized command run in the other repository.
+        expected: Operation, relative target, before and after per effect.
+    """
+    _, other, session = repos
+    want = [(op, str(other / target), before, after) for op, target, before, after in expected]
+    assert run(command, other, session) == (want, False)
+
+
+def test_cross_repository_states_and_workspace_targets(repos: tuple) -> None:
+    """Binary stays binary across repositories; workspace targets are never inspected.
+
+    Args:
+        repos: Workspace, other root and session repository.
+    """
+    ws, other, session = repos
+    # A binary copy into another repository and a text replacement there.
+    assert run(f"cp {ws}/logo.png {other}/new.png", None, session) == (
+        [("create", f"{other}/new.png", ABSENT, BINARY)],
+        False,
+    )
+    assert run(f"cp {ws}/README.md {other}/README.md", None, session) == (
+        [("write", f"{other}/README.md", TEXT, TEXT)],
+        False,
+    )
+    # Workspace targets have no before state, but a copied source is still classified.
+    assert run(f"rm {ws}/README.md {ws}/dir", None, session) == (
+        [("delete", f"{ws}/README.md", None, None), ("delete", f"{ws}/dir", None, None)],
+        False,
+    )
+    assert run(f"cp {other}/logo.png {ws}/x.png", None, session) == (
+        [("create", f"{ws}/x.png", None, BINARY)],
+        False,
+    )
+    # A directory moves only within the workspace.
+    assert run(f"mv {ws}/dir {ws}/moved", None, session) == (
+        [("move-from", f"{ws}/dir", None, None), ("move-to", f"{ws}/moved", None, UNKNOWN)],
+        False,
+    )
+    assert run(f"mv {ws}/dir {other}/moved", None, session) == ([], True)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected", "opaque"),
+    [
+        ("echo hi > out", [("create", "out", ABSENT, TEXT)], False),
+        ("echo hi >out", [("create", "out", ABSENT, TEXT)], False),
+        ("echo hi >> README.md", [("write", "README.md", TEXT, TEXT)], False),
+        ("echo hi >| README.md", [("write", "README.md", TEXT, TEXT)], False),
+        ("echo hi 2> out", [("create", "out", ABSENT, TEXT)], False),
+        ("echo hi 2>>out", [("create", "out", ABSENT, TEXT)], False),
+        ("echo hi &> out", [("create", "out", ABSENT, TEXT)], False),
+        ("echo hi &>> logo.png", [("write", "logo.png", BINARY, TEXT)], False),
+        ("echo -n hi > out", [("create", "out", ABSENT, UNKNOWN)], False),
+        ("echo 'a\\b' > out", [("create", "out", ABSENT, UNKNOWN)], False),
+        ('echo "$X" > out', [("create", "out", ABSENT, UNKNOWN)], False),
+        ("printf x > out", [("create", "out", ABSENT, UNKNOWN)], True),
+        ("> out", [("create", "out", ABSENT, UNKNOWN)], False),
+        ("cat < README.md > out", [("create", "out", ABSENT, UNKNOWN)], False),
+        ("echo hi 2>&1", [], False),
+        ("echo hi >&-", [], False),
+        ("echo hi 3>&-", [], False),
+        ("echo hi > /dev/null", [], False),
+        ("echo hi < README.md", [], False),
+        ('echo hi > "$OUT"', [], True),
+        ("echo hi > *.md", [], True),
+        ("echo '>' README.md", [], False),
+    ],
+)
+def test_redirections_write_their_literal_targets(
+    repos: tuple, command: str, expected: list, opaque: bool
+) -> None:
+    """File redirections write; duplication, input and /dev/null do not.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        command: Command with redirections run in the other repository.
+        expected: Operation, relative target, before and after per effect.
+        opaque: Whether part of the command is unchecked.
+    """
+    _, other, session = repos
+    want = [(op, str(other / target), before, after) for op, target, before, after in expected]
+    assert run(command, other, session) == (want, opaque)
+
+
+@pytest.mark.parametrize("separator", [";", "&&", "||", "|", "&"])
+def test_every_segment_is_analyzed(repos: tuple, separator: str) -> None:
+    """Each segment yields its effects whether or not it runs conditionally.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        separator: Segment separator.
+    """
+    _, other, session = repos
+    command = f"rm README.md {separator} rm logo.png"
+    assert run(command, other, session) == (
+        [
+            ("delete", f"{other}/README.md", TEXT, None),
+            ("delete", f"{other}/logo.png", BINARY, None),
+        ],
+        False,
+    )
+
+
+def test_unknown_programs_keep_later_effects(repos: tuple) -> None:
+    """An unknown program is opaque but does not hide a later literal removal.
+
+    Args:
+        repos: Workspace, other root and session repository.
+    """
+    ws, other, session = repos
+    assert run(f"python build.py && rm {other}/README.md", ws, session) == (
+        [("delete", f"{other}/README.md", TEXT, None)],
+        True,
+    )
+
+
+def test_directory_changes_and_missing_cwd_leave_relative_operands_unchecked(
+    repos: tuple,
+) -> None:
+    """After cd or pushd, or without a directory, only absolute operands are identified.
+
+    Args:
+        repos: Workspace, other root and session repository.
+    """
+    _, other, session = repos
+    assert run("cd dir && rm README.md", other, session) == ([], True)
+    assert run("pushd dir; echo x > out", other, session) == ([], True)
+    assert run(f"cd dir && rm {other}/README.md", other, session) == (
+        [("delete", f"{other}/README.md", TEXT, None)],
+        False,
+    )
+    assert run("rm README.md", None, session) == ([], True)
+    assert run(f"rm {other}/README.md", None, session) == (
+        [("delete", f"{other}/README.md", TEXT, None)],
+        False,
+    )
