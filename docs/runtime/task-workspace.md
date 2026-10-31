@@ -86,6 +86,55 @@ Keep three dimensions separate:
 
 Terminal recording for a completed issue requires references to exact human acceptance, actual required merge and completion of issue obligations. The utility validates supplied identities/evidence and provider status; it cannot manufacture or independently grant human acceptance. Terminal state still forbids ordinary task edits until explicit reopen, which invalidates cleanup eligibility. Cancellation preserves its recorded disposition/history.
 
+### Roadmap approval and repository scope
+
+The roadmap records the approved proposal and the repository paths it grants. The
+lifecycle checks this recorded text only. It does not authenticate the human
+approver or enforce the prose intent of the approval. `ready` reports the result as
+`approval: {"approved": <bool>, "scope": [{"root": <path>, "paths": [...]}]}`.
+Edit admission does not yet act on it.
+
+**Approval** holds when the roadmap has exactly one each of `**Proposal status:**`,
+`**Proposal revision:**` and `**Approval record:**`, and all of these are true:
+
+- the status starts with `Approved`;
+- no field contains `<`;
+- the record does not start with `Pending` in any letter case;
+- the record contains `approved revision <token>`, where `approved` starts a word
+  and `<token>` equals the first word of the revision.
+
+**Repository scope** grants paths under absolute worktree roots:
+
+```markdown
+**Repository scope:**
+- `/Users/me/project`: `src/nplet/adapters/`, `docs/runtime/task-workspace.md`
+- `/Users/me/vault`: `./`
+```
+
+- A root must be absolute and must be a worktree root itself; a subdirectory root
+  grants nothing. Each root appears once.
+- A path ending in `/` covers a subtree, a path without it names one file, and
+  exactly `./` covers the whole repository. Paths are relative to the root and
+  compared byte for byte.
+- Absolute paths, globs (`*`, `?`, `[`), backslashes, NUL, and empty, `.` or `..`
+  segments are rejected. At most 32 roots and 256 paths are allowed.
+- An absent field, `none` or a template placeholder grants nothing.
+
+**Scope changes.** A roadmap `update` or `reconcile-files` import that changes the
+scope must also carry a new revision token and an `Approval record` starting with
+`Pending`; a later update records the approval of that revision. Otherwise, or for
+malformed scope, the operation fails with `INVALID_REQUEST`. An accepted scope change
+clears every live participant's readiness, whatever its packet holds, so each needs
+a new `read`, `acknowledge` and `ready`. The lifecycle keeps
+the revision and scope of the last committed roadmap so that reconciliation, which
+no longer has the replaced bytes, can apply the same rule. A workspace without that
+record cannot import a scope by reconciliation; propose it with `update` instead.
+A malformed scope already committed grants nothing.
+
+**Migration.** No task gets an implicit whole-workspace grant. An existing task adds
+its `Repository scope` through a new proposal revision, explicit approval and
+readiness.
+
 ## Ownership, context and participant lifetime
 
 One coordinator owns `roadmap.md`, shared summary and packet assignment. Participants own distinct named notes, recorded in control state, for example `context/implementation.md`. Every note/update carries author/participant, source references and digests, applicability, status, and superseded revision when relevant. No private reasoning is required. Ownership transfers are explicit, revision-checked and recorded.

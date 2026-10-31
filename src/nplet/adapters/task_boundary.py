@@ -7,8 +7,15 @@ import re
 import shlex
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
-from nplet.adapters import repository_location
+from nplet.adapters import repository_exemptions, repository_location
+from nplet.adapters.file_content import ABSENT as ABSENT
+from nplet.adapters.file_content import BINARY as BINARY
+from nplet.adapters.file_content import TEXT as TEXT
+from nplet.adapters.file_content import UNKNOWN as UNKNOWN
+from nplet.adapters.file_content import Budget as Budget
+from nplet.adapters.file_content import classify as classify
 from nplet.lifecycle import task_workspace as core
 
 LINEAR_OPERATIONS = frozenset(
@@ -84,6 +91,12 @@ COMMENTS_QUERY = (
     "(first:100,after:$cursor){nodes{id body url author{login}} pageInfo{hasNextPage endCu"
     "rsor}}}}}"
 )
+# Patch headers mapped to the operation they apply to their target.
+PATCH_OPERATIONS = {
+    "*** Add File": "create",
+    "*** Update File": "write",
+    "*** Delete File": "delete",
+}
 
 
 def _stat(path: Path) -> os.stat_result | None:
@@ -170,15 +183,19 @@ def target_role(cwd: str, value: object, is_root: Callable[[Path], bool]) -> str
     return "protected" if inside else "external"
 
 
-def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
-    """Extract every target from supported deterministic edit shapes.
+def edit_records(tool: str, args: core.JSONObject) -> list[tuple[str, str | None]] | None:
+    """Parse supported deterministic edit shapes into ordered target operations.
 
     Args:
         tool: Native file tool name.
         args: Structured native input.
 
     Returns:
-        All targets, or None for an unknown or malformed shape.
+        One ``(target, operation)`` pair per target, or None for an unknown or
+        malformed shape. Write and Edit ``write`` their target; a patch adds
+        ``create``, ``write`` or ``delete``, and a move splits its update into
+        ``move-from`` and ``move-to``. A ``Move to`` not directly after ``Update
+        File`` has no operation.
     """
     # Native file edits expose exactly one target and known editing fields.
     fields = {
@@ -198,23 +215,42 @@ def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
                 and isinstance(args.get("content"), str)
             )
         ):
-            return [args[key]]
+            return [(args[key], "write")]
         return None
     # A patch header enumerates all affected files, including both sides of moves.
     if tool == "apply_patch" and set(args) == {"command"} and isinstance(args["command"], str):
         lines = args["command"].splitlines()
         if not lines or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
             return None
-        targets = []
+        records: list[tuple[str, str | None]] = []
         for line in lines[1:-1]:
-            if line.startswith(
-                ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
-            ):
-                targets.append(line.split(": ", 1)[1])
+            # A header needs its ": " separator; a bare name is malformed.
+            header, colon, target = line.partition(": ")
+            if header == "*** Move to" and colon:
+                moved = records[-1:] and records[-1][1] == "write"
+                if moved:
+                    records[-1] = (records[-1][0], "move-from")
+                records.append((target, "move-to" if moved else None))
+            elif header in PATCH_OPERATIONS and colon:
+                records.append((target, PATCH_OPERATIONS[header]))
             elif line.startswith("*** ") and line != "*** End of File":
                 return None
-        return targets or None
+        return records or None
     return None
+
+
+def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
+    """Extract every target from supported deterministic edit shapes.
+
+    Args:
+        tool: Native file tool name.
+        args: Structured native input.
+
+    Returns:
+        All targets, or None for an unknown or malformed shape.
+    """
+    records = edit_records(tool, args)
+    return None if records is None else [target for target, _ in records]
 
 
 def github_read(tool: str, args: core.JSONObject) -> bool:
@@ -494,9 +530,22 @@ def edit_locations(
         edit shape.
     """
     # Unknown edits have no targets to locate.
-    targets = edit_targets(event["tool_name"], event["tool_input"])
-    if not targets:
-        return []
+    return _locate(event, edit_targets(event["tool_name"], event["tool_input"]) or [], repository)
+
+
+def _locate(
+    event: core.JSONObject, targets: list[str], repository: core.Repository | None
+) -> list[repository_location.Location]:
+    """Resolve the given targets of one edit, sharing a root predicate and discovery memo.
+
+    Args:
+        event: Validated native tool and argument envelope.
+        targets: Targets parsed from the event, in order.
+        repository: The session's carried project repository, if any.
+
+    Returns:
+        One location per target in order.
+    """
     # One root predicate and one discovery memo cover every target of the call.
     is_root = root_test([] if repository is None else repository.trees)
     memo: repository_location.Memo = {}
@@ -504,3 +553,278 @@ def edit_locations(
         repository_location.resolve(event["cwd"], target, repository, is_root, memo)
         for target in targets
     ]
+
+
+class Effect(NamedTuple):
+    """One file effect of a deterministic native edit.
+
+    Attributes:
+        op: ``create``, ``write`` (overwrite or append), ``delete``, ``move-from`` or
+            ``move-to``.
+        location: The target's location evidence from ``edit_locations``.
+        before: Content state of the existing file; None for a workspace target, whose
+            content is never inspected.
+        after: Content state of the output; None for ``delete`` and ``move-from``.
+    """
+
+    op: str
+    location: repository_location.Location
+    before: str | None
+    after: str | None
+
+
+def edit_effects(
+    event: core.JSONObject, repository: core.Repository | None, budget: Budget
+) -> list[Effect]:
+    """Describe every deterministic native edit target as an effect with content states.
+
+    Workspace targets are never content-inspected, so their ``before`` is None. Other
+    targets are read at their resolved point; a failed resolution makes ``before``
+    unknown. Every output is text, since each supported shape writes text.
+
+    Args:
+        event: Validated native tool and argument envelope.
+        repository: The session's carried project repository; None when the session
+            lies outside every repository.
+        budget: The call's inspection budget, shared by every side.
+
+    Returns:
+        One effect per target in target order, or an empty list for an unknown or
+        malformed edit shape.
+    """
+    # Unknown or malformed edits, including a misplaced move, have no effects.
+    records = edit_records(event["tool_name"], event["tool_input"]) or []
+    operations = [op for _, op in records if op]
+    if not records or len(operations) != len(records):
+        return []
+    targets = [target for target, _ in records]
+    effects = []
+    for op, location in zip(operations, _locate(event, targets, repository), strict=True):
+        # The resolved point is last; an invalid target's only point carries its error.
+        point = location.points[-1]
+        path = None if point.error else point.path
+        # Write creates a target that does not exist yet.
+        if event["tool_name"] == "Write" and path is not None and not os.path.lexists(path):
+            op = "create"
+        # Read the existing side outside the workspace only.
+        before = None if location.workspace else UNKNOWN if path is None else classify(path, budget)
+        after = None if op in {"delete", "move-from"} else TEXT
+        effects.append(Effect(op, location, before, after))
+    return effects
+
+
+class Decision(NamedTuple):
+    """Effect classes of one call, for a workflow guard rather than containment.
+
+    Attributes:
+        protected: Effects that need task readiness and scope authority.
+        unchecked: Effects whose evidence is incomplete, neither protected nor free.
+        free: Effects that need no task.
+        policy: Whether some point targets the reserved exemption policy file.
+        diagnostic: The exemption policy's bounded error code, if it could not be used.
+    """
+
+    protected: list[Effect]
+    unchecked: list[Effect]
+    free: list[Effect]
+    policy: bool
+    diagnostic: str | None
+
+
+def _file_id(path: Path) -> tuple[int, int] | None:
+    """Read one path's device and inode, following links.
+
+    Args:
+        path: Path to identify.
+
+    Returns:
+        The device and inode pair, or None when the path cannot be read.
+    """
+    info = _stat(path)
+    return None if info is None else (info.st_dev, info.st_ino)
+
+
+def policy_target(effect: Effect, policy: Path) -> bool:
+    """Report whether any point of an effect spells the reserved policy file.
+
+    Args:
+        effect: Effect to inspect.
+        policy: Policy file path.
+
+    Returns:
+        Whether a point spells the policy's lexical or real path, is the same file,
+        names it case-insensitively in the same directory whether or not that name
+        exists, or folds to its spelling while that directory is absent.
+    """
+    spellings = {os.path.normpath(policy), os.path.realpath(policy)}
+    # File identity catches spellings a case-insensitive filesystem treats as equal.
+    own, folder, name = _file_id(policy), _file_id(policy.parent), policy.name.casefold()
+    folded = {spelling.casefold() for spelling in spellings}
+    for point in effect.location.points:
+        # An exact spelling or the same existing file is the policy.
+        found = _file_id(point.path)
+        if os.path.normpath(point.path) in spellings or (found is not None and found == own):
+            return True
+        # A case-variant name of the policy is reserved whether or not that variant exists.
+        if (
+            folder is not None
+            and point.path.name.casefold() == name
+            and _file_id(point.path.parent) == folder
+        ) or (
+            # Without the policy directory there is no identity, so compare folded spellings.
+            folder is None and os.path.normpath(point.path).casefold() in folded
+        ):
+            return True
+    return False
+
+
+def decide(
+    effects: list[Effect],
+    exemptions: repository_exemptions.Exemptions,
+    policy: Path = repository_exemptions.POLICY,
+) -> Decision:
+    """Split effects into protected, unchecked and free by their strongest point.
+
+    This is a workflow guard over the evidence the caller gathered; content and
+    location may change between inspection and the edit.
+
+    Args:
+        effects: Effects from ``edit_effects``.
+        exemptions: Loaded vault exemptions; with an error none are exempt.
+        policy: Reserved policy file path, which no effect may edit task-free.
+
+    Returns:
+        Each effect in exactly one class list, in input order.
+    """
+    decision = Decision([], [], [], False, exemptions.error)
+    for effect in effects:
+        # The policy file is reserved whatever its location evidence says.
+        reserved = policy_target(effect, policy)
+        if reserved:
+            decision = decision._replace(policy=True)
+        # Workspace effects are protected for every file type.
+        if reserved or effect.location.workspace:
+            decision.protected.append(effect)
+            continue
+        # Repository content is protected when any applicable side is text.
+        sides = [side for side in (effect.before, effect.after) if side is not None]
+        content = 2 if TEXT in sides else 0 if set(sides) <= {BINARY, ABSENT} else 1
+        # Rank every point; vault and external points are free, failed ones unchecked.
+        ranks = [
+            0 if vault else content if point.repository else 1 if point.error else 0
+            for point, vault in zip(
+                effect.location.points,
+                repository_exemptions.exempt(effect.location, exemptions),
+                strict=True,
+            )
+        ]
+        # The strongest point decides the effect's class.
+        (decision.free, decision.unchecked, decision.protected)[max(ranks, default=1)].append(
+            effect
+        )
+    return decision
+
+
+def covered(relative: str, granted: list[str]) -> bool:
+    """Match one repository-relative POSIX path against granted scope paths.
+
+    Args:
+        relative: Path relative to its worktree root.
+        granted: Granted entries; ``d/`` covers a subtree and ``./`` everything.
+
+    Returns:
+        Whether some entry covers the path, comparing bytes exactly.
+    """
+    return any(
+        entry == "./" or (relative.startswith(entry) if entry.endswith("/") else relative == entry)
+        for entry in granted
+    )
+
+
+def _below(path: Path, root: Path | str) -> str | None:
+    """Spell a path relative to a root in POSIX form.
+
+    Args:
+        path: Real-directory spelling of a point.
+        root: Worktree root.
+
+    Returns:
+        The relative spelling, ``.`` for the root itself, or None outside it.
+    """
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
+def unauthorized(
+    decision: Decision,
+    scope: list[core.ScopeEntry],
+    session: core.Repository | None,
+    memo: repository_location.Memo,
+    exemptions: repository_exemptions.Exemptions,
+    policy: Path = repository_exemptions.POLICY,
+) -> list[Effect]:
+    """List protected effects the recorded repository scope does not cover.
+
+    Exempt points outside the workspace, points outside every repository and failed
+    points need no authority; every other repository point must be granted under its
+    own repository by an entry rooted at one of its worktree roots.
+
+    Args:
+        decision: Result of ``decide``.
+        scope: Scope entries from the lifecycle ``ready`` result.
+        session: The session's carried repository; None outside every repository.
+        memo: Invocation-local discovery results.
+        exemptions: The exemptions ``decide`` used.
+        policy: The reserved policy file path ``decide`` used.
+
+    Returns:
+        Uncovered protected effects in order, always including policy targets.
+    """
+    # Group granted paths by repository identity; an unresolved root or one that is
+    # not a worktree root grants nothing, since paths match from the worktree root.
+    grants: dict[tuple[str, tuple[int, int]], list[str]] = {}
+    for entry in scope:
+        identity, _ = repository_location.discover(Path(entry["root"]), memo)
+        if identity is not None and os.path.realpath(entry["root"]) in {
+            os.path.realpath(tree) for tree in identity.repository.trees
+        }:
+            grants.setdefault(identity.key(), []).extend(entry["paths"])
+    common = None if session is None else os.path.normpath(session.common)
+    roots = [] if session is None else [os.path.realpath(tree) for tree in session.trees]
+    own = [path for key, paths in grants.items() if key[0] == common for path in paths]
+    missing = []
+    for effect in decision.protected:
+        # Reserved policy edits are never authorized.
+        points = effect.location.points
+        if policy_target(effect, policy):
+            missing.append(effect)
+            continue
+        flags = repository_exemptions.exempt(effect.location, exemptions)
+        inside, granted = False, True
+        for point, vault in zip(points, flags, strict=True):
+            # Discovery saw the real directory, so relate its real spelling to each root.
+            real = Path(os.path.realpath(point.path.parent), point.path.name)
+            family = (
+                point.repository is not None
+                and os.path.normpath(point.repository.repository.common) == common
+            )
+            # A spelling below a session worktree root is in the workspace even when a
+            # nested repository holds it, so the session grant must also cover it.
+            nested = None
+            if not family:
+                nested = next((r for t in roots if (r := _below(real, t)) is not None), None)
+            inside = inside or family or nested is not None
+            if nested is not None and not covered(nested, own):
+                granted = False
+            # Only points outside the workspace keep a vault exemption.
+            if (vault and not (family or nested is not None)) or point.repository is None:
+                continue
+            relative = _below(real, point.repository.repository.root)
+            if relative is None or not covered(relative, grants.get(point.repository.key(), [])):
+                granted = False
+        # A workspace effect must also reach the workspace through some point.
+        if not granted or (effect.location.workspace and not inside):
+            missing.append(effect)
+    return missing

@@ -36,6 +36,15 @@ from nplet.lifecycle._primitives import expected as expected
 from nplet.lifecycle._primitives import participant_key as participant_key
 from nplet.lifecycle._primitives import sha as sha
 from nplet.lifecycle._primitives import token as token
+from nplet.lifecycle._roadmap import RoadmapRecord as RoadmapRecord
+from nplet.lifecycle._roadmap import ScopeEntry as ScopeEntry
+from nplet.lifecycle._roadmap import check_scope_change as check_scope_change
+from nplet.lifecycle._roadmap import header_value as header_value
+from nplet.lifecycle._roadmap import legacy_scope as legacy_scope
+from nplet.lifecycle._roadmap import repository_scope as repository_scope
+from nplet.lifecycle._roadmap import revision_token as revision_token
+from nplet.lifecycle._roadmap import roadmap_approved as roadmap_approved
+from nplet.lifecycle._roadmap import roadmap_record as roadmap_record
 
 MAX_REQUEST = 96 * 1024 * 1024
 MAX_FILE = 16 * 1024 * 1024
@@ -155,6 +164,7 @@ class WorkspaceState(TypedDict):
     tombstone: NotRequired[JSONObject]
     history: NotRequired[list[JSONObject]]
     reconciliation: NotRequired[JSONObject]
+    roadmap: NotRequired[RoadmapRecord]
     submitted_pr: NotRequired[str]
     provider_completion: NotRequired[JSONObject]
     cursor_plans: NotRequired[dict[str, invocation_records.InvocationPlan]]
@@ -1480,6 +1490,22 @@ def refresh_roadmap_reference(state: WorkspaceState, key: str, digest: str) -> N
         participant["status"] = "attached"
 
 
+def reset_readiness(state: WorkspaceState) -> None:
+    """Require every live participant to read, acknowledge and ready again.
+
+    A repository scope change alters what readiness authorizes, whether or not a
+    participant's packet names the roadmap.
+
+    Args:
+        state: Staged issue control state.
+    """
+    # Clear acknowledgment without reviving a detached participant generation.
+    for participant in state["participants"].values():
+        participant["ack"] = None
+        if participant["status"] != "detached":
+            participant["status"] = "attached"
+
+
 def roadmap_refreshed(packet: list[SourceRef], digest: str) -> list[SourceRef]:
     """Copy a packet with every ``roadmap.md`` reference set to one digest.
 
@@ -2310,6 +2336,14 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             ),
             "INTEGRITY_ERROR",
         )
+        # Changed roadmap bytes face the same scope rule as update; the old bytes are
+        # gone, so compare with the retained record of the committed roadmap.
+        if sha(observed["roadmap.md"]) != state["files"]["roadmap.md"]:
+            text = observed["roadmap.md"].decode(errors="replace")
+            retained = state.get("roadmap")
+            state["roadmap"] = check_scope_change(retained, text)
+            if retained is not None and retained["scope"] != state["roadmap"]["scope"]:
+                reset_readiness(state)
         # Explicit reconciliation imports inspected Markdown only, never arbitrary events.
         issue.state = copy.deepcopy(state)
         issue.state["files"] = manifest(observed)
@@ -2517,7 +2551,7 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
             )
         # Return read-only packet evidence without creating a lifecycle event.
         if operation != "acknowledge":
-            return {
+            response = {
                 "ok": True,
                 "code": "OK",
                 "revision": state["revision"],
@@ -2525,6 +2559,15 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
                 "packet_digest": digest,
                 "binding_generation": participant["generation"],
             }
+            # Report recorded approval and syntax-checked scope; malformed legacy
+            # scope grants nothing.
+            if operation == "ready":
+                text = files["roadmap.md"].decode(errors="replace")
+                response["approval"] = {
+                    "approved": roadmap_approved(text),
+                    "scope": legacy_scope(text) or [],
+                }
+            return response
         result.update(references=refs, packet_digest=digest)
     # Require file ownership, the current content digest, and attributable replacement content.
     elif operation == "update":
@@ -2535,6 +2578,12 @@ def operate(store: Store, issue: Issue, request: JSONObject) -> JSONObject:
         require(request.get("old_digest") == state["files"].get(path), "REVISION_CONFLICT")
         data = request["content"].encode("utf-8")
         require(len(data) <= MAX_FILE, "SIZE_LIMIT")
+        # Roadmap scope grants change only under a new revision awaiting approval.
+        if path == "roadmap.md":
+            committed = roadmap_record(files[path].decode(errors="replace"))
+            state["roadmap"] = check_scope_change(committed, request["content"])
+            if state["roadmap"]["scope"] != committed["scope"]:
+                reset_readiness(state)
         provenance = request["provenance"]
         require(set(provenance) == {"sources", "applicability", "status"}, "EVIDENCE_REQUIRED")
         evidence(provenance["sources"])

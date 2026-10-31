@@ -3,6 +3,7 @@
 **Proposal status:** Proposed / awaiting explicit approval.
 **Proposal revision:** <Exact revision presented for approval>
 **Approval record:** <Pending; then attributable human approval, approved revision and evidence>
+**Repository scope:** <none, or approved entries; see docs/runtime/task-workspace.md#roadmap-approval-and-repository-scope>
 **Lifecycle disposition:** <Observed value; `active` is not human approval>
 **Storage state:** <Observed value; workspace presence is not approval>
 **Master:** <Verified host/session identity; explicit lifecycle coordinator>
