@@ -507,15 +507,15 @@ The first table compares Claude Code and Cursor; the second records Codex bounda
 | Boundary | Claude Code | Cursor Agent |
 | --- | --- | --- |
 | Identity | Exact native session ID. A hook carrying `agent_id` with a valid `session_id` is a subagent keyed `<session_id>/agent/<agent_id>`; `subagent_id`, `parent_conversation_id`, background markers and `agent_id` without `session_id` are rejected | Exact conversation ID; require any session ID to match; one workspace root |
-| Ordinary tools | Read, Write, Edit, Glob, Grep, NotebookEdit; foreground Bash under the setting above. `ToolSearch`, `Skill`, `SendMessage` and `AskUserQuestion` are task-free parent no-effect operations with no pending entry; a tool they surface is evaluated on its own call. Their availability does not authorize sending messages. A subagent's `SubagentHandback` is a readiness-checked no-effect operation admitted only under a child identity | Read, Write, Edit, Grep, Delete; Shell with supported foreground arguments; finite task-free parent reads also accept validated native metadata as described below |
+| Ordinary tools | Read, Write, Edit, Glob, Grep, NotebookEdit; foreground Bash under the setting above. `ToolSearch`, `Skill`, `SendMessage` and `AskUserQuestion` are task-free parent no-effect operations with no pending entry; a tool they surface is evaluated on its own call. Their availability does not authorize sending messages. A subagent's `SubagentHandback` is a readiness-checked no-effect operation admitted only under a child identity. Any other valid parent tool that no route names is an [unchecked call](#unchecked-parent-calls), except the kept-closed set | Read, Write, Edit, Grep, Delete; Shell with supported foreground arguments; finite task-free parent reads also accept validated native metadata as described below. A parent MCP call outside the Linear inventory is an [unchecked call](#unchecked-parent-calls) |
 | Linear parent provider | The named inspection and administration operations below are task-free through the configured connector, with the same server/provenance checks as startup. Children retain only the original five read operations and require readiness | The same named parent operations are task-free. Generic `preToolUse` validates native identity and structured operation; `beforeMCPExecution` independently checks the exact operation, serialized object arguments, configured server name and URL. Both blocking hooks must pass; ordinary calls create no cross-callback ledger. Startup alone retains its paired lookup reservation |
 | Desktop PR monitor after readiness | The desktop app's built-in `ccd_pr` server only: `get_status` and `set_monitor`, for a parent session (a subagent child gets neither). The tool name must be exactly `mcp__ccd_pr__get_status` or `mcp__ccd_pr__set_monitor`; the hook's `mcp_server` object must be present with `name` `ccd_pr` and `source` `sdk`, the provenance the desktop app reports for its built-in server; a call without that object, or with any other name or source, is denied. `set_auto_merge`, `bind_pr`, `unbind_pr` and every other `ccd_pr` operation stay denied. Each call is pending work under its native `tool_use_id`, settled by `PostToolUse` or `PostToolUseFailure`. Live capture (2026-10-11, macOS Desktop, hooks enabled): a ready parent session called `get_status` and then `set_monitor` (`auto_fix` on the open PR); both were admitted, recorded as pending work and settled by their completion events, and the app returned the PR state and confirmed the monitor. The server identity was captured separately the same day with a throwaway project whose `PreToolUse` hook appended the raw event: `tool_name` `mcp__ccd_pr__get_status`, `mcp_server` `{"name": "ccd_pr", "source": "sdk"}`, `agent_id` null, alongside `session_id`, `tool_use_id`, `cwd`, `permission_mode` and `transcript_path`. The check is pinned to that name and source | No native provider admission |
 | Ticket-first startup | Exact configured Linear issue read before readiness; matching native completion runs shared startup | Exact Linear issue read with generic call-ID and MCP server checks before shared startup |
-| Admission | Validate native identity, provider provenance and child restrictions first. Named task-free parents need no readiness; other supported effects require readiness. Preserve native permissions | Validate the same boundary in Cursor's native shape; allow only that particular task-free, bootstrap or ready supported call |
-| File-tool completion | A supported success/failure event with required payload settles only existing admitted work. A task-free completion creates no state | Same; native failure type is checked for existing work |
+| Admission | Validate native identity, provider provenance and child restrictions first. Named task-free parents and unchecked parent calls need no readiness; other supported effects require readiness. Preserve native permissions | Validate the same boundary in Cursor's native shape; allow only that particular task-free, bootstrap, unchecked or ready supported call |
+| File-tool completion | A supported success/failure event with required payload settles only existing admitted work. A task-free or unchecked completion creates no state | Same; native failure type is checked for existing work |
 | Shell completion | Successful Bash result with string stdout/stderr, `interrupted: false`, and no async markers | Every admitted parent Shell call remains pending until independently verified termination and explicit lifecycle recovery; native callbacks cannot settle it |
 | Ambiguous shell result/failure | Retain pending operation and report recovery | Same; booleans are not exit codes |
-| Child/provider/background tools | Deny unsupported tool names, unconfigured servers, other provider operations (including document/archive operations) and background identities. A ready parent's foreground `Agent` call (no `run_in_background: true`, no `isolation`) is pending work under its `tool_use_id`; `Task`, `TaskOutput`, `TaskStop`, `SpawnAgent` and `Agent` from a child are denied. `SubagentStart` joins the child (restricted, below); `SubagentStop` is an observation | Only the experimental [scoped foreground Task route](#cursor-scoped-foreground-tasks) below; unsupported child tools and remote sessions denied |
+| Child/provider/background tools | Deny a child's unsupported tools and providers, background identities and the parent's [kept-closed set](#unchecked-parent-calls). A ready parent's foreground `Agent` call (no `run_in_background: true`, no `isolation`) is pending work under its `tool_use_id`; `Task`, `TaskOutput`, `TaskStop`, `SpawnAgent`, `Workflow` and `Agent` from a child are denied. `SubagentStart` joins the child (restricted, below); `SubagentStop` is an observation | Only the experimental [scoped foreground Task route](#cursor-scoped-foreground-tasks) below; unsupported child tools, child MCP calls and remote sessions denied |
 | Session start | Advisory recovery/readiness context; no readiness grant | Advisory context only |
 | Compaction | PreCompact/PostCompact observations only; no context or decision output | Advisory context only |
 | Stop/session end | Optional observation only | Optional observation only; no automatic follow-up |
@@ -528,8 +528,9 @@ The first table compares Claude Code and Cursor; the second records Codex bounda
 | Child tools and providers | A verified child has its own binding and scope. Only command-only Bash for its own canonical lifecycle commands and exact packet-source reads is admitted; generic provider tools are denied. |
 | Native child control | Exact supported spawn/control tools use parent-bound receipts and correlated completion. Unsupported delegation names remain denied. See the [restricted Codex child route](#codex-native-child-route-restricted) for supported shapes and evidence limits. |
 
-Codex's generic provider admission is broader than Claude Code's fixed allowlist.
-It does not enforce the contributor procedure's permitted provider operations.
+Codex admits generic provider calls as readiness-gated pending work, while Claude Code
+and Cursor admit unlisted parent calls as [unchecked](#unchecked-parent-calls) work with
+no lifecycle record. Neither route enforces the contributor procedure's permitted provider operations.
 Provider success is not lifecycle authority, and this table does not establish
 installed-host delivery for every provider or operating system.
 
@@ -558,9 +559,57 @@ other tools keep the existing edit roles.
 
 The five operations `delete_comment`, `delete_customer`, `delete_customer_need`,
 `delete_diff_comment` and `delete_status_update` remain outside this task-free
-inventory. Claude and Cursor deny them; Codex retains its readiness fallback.
-Other unknown operations retain their existing gated or unsupported route.
+inventory. Claude denies them and every other `delete_` operation on a Linear-named
+server; Cursor denies them on the configured Linear server. Codex retains its
+readiness fallback. In Claude and Cursor, other parent operations that no route
+names are [unchecked calls](#unchecked-parent-calls); in Codex they retain their
+existing gated or unsupported route.
 Task-free access grants no merge, publication or review-submission authority.
+
+#### Unchecked parent calls
+
+Claude Code and Cursor admit a valid parent call that no existing route names as
+unchecked external work. Its pre and post hooks allow it with no readiness check,
+ticket-read check, pending entry or settlement, and record no state. An existing
+pending ticket read, stale packet or pending work is unchanged. Native permission
+prompts and provider authentication still apply. Unchecked is not a safety
+certification and grants no ticket, lifecycle, approval, merge or publication authority.
+
+In Claude Code, these stay closed or keep their own route:
+
+- Subagent children keep their existing restrictions and get no unchecked calls.
+- Delegation: `Agent` outside the ready parent's foreground route, `Task`,
+  `TaskOutput`, `TaskStop`, `SpawnAgent` and `Workflow`; a parent's `SubagentHandback`.
+- `Monitor` and `PowerShell`, which run shell commands outside the Bash policy.
+- Every `delete_` operation on a Linear-named server. Other operations on a
+  Linear-named server outside the named inventory are unchecked and grant no
+  Linear authority; inventory operations keep their server and provenance checks.
+- Desktop app servers: `ccd_pr` beyond `get_status` and `set_monitor`, all of
+  `ccd_session_mgmt` and `ccd_settings`. `ccd_turn` keeps its exact planning route.
+- `EnterWorktree` and `ExitWorktree` are parent-only, readiness-gated pending work
+  settled by their completion events.
+- Structured edits keep the edit decision and `INVALID_REQUEST` for malformed
+  shapes; Bash keeps the finite reads below and readiness for everything else.
+
+In Cursor, a generic `MCP:<operation>` call whose operation is outside the Linear
+inventory is unchecked through `preToolUse`, `beforeMCPExecution`,
+`afterMCPExecution`, `postToolUse` and `postToolUseFailure`, after
+`beforeMCPExecution` checks that its input serializes an object. A call that names
+a Linear inventory operation, a Linear server name or a Linear URL must match the
+configured server name, URL and inventory. Limitation: another server's operation
+that shares a Linear operation name is therefore denied. Non-MCP Cursor tools
+outside the supported set stay denied, and children get no MCP calls.
+
+The routes below record observed coverage; this inventory is not an allowlist.
+Installed-host evidence for unchecked routes is pending.
+
+| Host | Route | Adapter tests | Installed host |
+| --- | --- | --- | --- |
+| Claude Code | Browser (`mcp__claude-in-chrome__*`), computer use (`mcp__computer-use__*`), PDF/document MCP servers, other desktop app servers such as `ccd_sidebar`, and built-in tools such as `WebFetch`: unchecked by exact native `tool_name` | Covered, including unbound and unready parents | Pending |
+| Claude Code | `EnterWorktree`, `ExitWorktree`: readiness-gated pending work | Covered | Pending |
+| Claude Code | Kept-closed set above: denied for a ready parent | Covered | Pending |
+| Cursor | App/MCP servers other than Linear through the generic and MCP-specific callbacks | Covered | Pending |
+| Cursor | Browser, computer use and PDF/document routes: unchecked only when delivered as MCP calls; a non-MCP route stays denied | Covered through the generic MCP route | Pending |
 
 #### Finite shell reads
 
@@ -572,8 +621,20 @@ process handle. Its existing `write_stdin` correlation checks remain in force.
 Claude requires foreground Bash and inherited background-disable configuration.
 Cursor parent `Shell` accepts a string `command` plus native `cwd`,
 `working_directory` and integer `timeout` metadata from 1 through 2147483647.
-Supply at most one directory field. Empty `cwd` means no override; a nonempty
-directory must remain in the same repository. Other fields remain unsupported.
+Supply at most one directory field. Empty `cwd` means no override. An ordinary
+command's directory may lie in another repository or in none. Canonical lifecycle,
+bootstrap, reconciliation and child Shell commands still require the same repository
+and report `REPOSITORY_MISMATCH`; a redirected lifecycle command is denied rather
+than admitted as ordinary Shell. Other fields remain unsupported.
+
+The canonical shell effect carries a top-level advisory `command_cwd` for
+shell-effect recognition: the event `cwd` when the command runs there (Claude Bash,
+or Cursor with no override or empty `cwd`), an existing absolute Cursor override, or
+null for a relative or nonexistent override, whose relative operands are then
+unchecked. It never replaces the event `cwd` or the session's recorded repository.
+Whether Claude Bash reports `cwd` after an in-shell `cd` is not yet verified on an
+installed host.
+
 Metadata validation grants no readiness or synchronous completion guarantee.
 Only the finite reads below are task-free and create no pending lifecycle work.
 Other commands require current readiness and are recorded as pending before
@@ -704,7 +765,7 @@ transaction identities, never substitutes for missing session or tool IDs. Exact
 are idempotent. Missing or malformed identity fails admission. No native adapter substitutes
 `codex` for another host, invokes provider writes, settles ambiguous work, or runs cleanup on stop.
 
-The Claude provider allowlist checks the server, provenance and operation name only.
+The Claude Linear inventory checks the server, provenance and operation name only.
 Field-level rules, such as an assignee equal to the initiating human or the target state
 name, remain in the contributor procedure's read-back rule; provider success is not
 lifecycle authority. Denials name the admitted next operation for their code; see
