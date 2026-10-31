@@ -209,6 +209,54 @@ class Fixture(unittest.TestCase):
         # Acknowledge that exact packet digest for subsequent readiness checks.
         self.call("acknowledge", packet_digest=w.sha(w.canonical([])))
 
+    def approve(
+        self,
+        scope: dict[Path, list[str]] | None = None,
+        approved: bool = True,
+        refresh: bool = True,
+    ) -> None:
+        """Record a synthetic roadmap proposal with repository scope and its approval.
+
+        The approval text is a fixture, not human approval.
+
+        Args:
+            scope: Granted paths by absolute worktree root; both fixture worktrees get
+                ``./`` when None.
+            approved: Whether to record approval after proposing the scope.
+            refresh: Whether the coordinator then reads and acknowledges its packet
+                again, since a scope change clears readiness.
+
+        Raises:
+            AssertionError: A roadmap update, read or acknowledgment is rejected.
+        """
+        # Render the grant under the repository scope header.
+        grants = scope if scope is not None else {self.root: ["./"], self.other: ["./"]}
+        lines = "".join(
+            f"- `{root}`: " + ", ".join(f"`{path}`" for path in paths) + "\n"
+            for root, paths in grants.items()
+        )
+        # A changed grant is first proposed under a new pending revision, then approved.
+        revision = f"r{self.serial}"
+        records = [("Proposed", "Pending")]
+        if approved:
+            records.append(("Approved", f"Human approved revision {revision}."))
+        for status, record in records:
+            state = self.state()
+            content = (
+                f"**Proposal status:** {status}\n**Proposal revision:** {revision}\n"
+                f"**Approval record:** {record}\n**Repository scope:**\n{lines}"
+            )
+            self.call(
+                "update",
+                path="roadmap.md",
+                content=content,
+                expected_revision=state["revision"],
+                old_digest=state["files"]["roadmap.md"],
+                provenance={"sources": self.evidence(), "status": "draft", "applicability": "test"},
+            )
+        if refresh:
+            self.call("acknowledge", packet_digest=self.call("read")["packet_digest"])
+
     def observations(self, export: JsonObject) -> list[JsonObject]:
         """Construct synthetic provider read-back for the exported parts.
 

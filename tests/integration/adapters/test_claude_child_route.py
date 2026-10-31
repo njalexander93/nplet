@@ -189,8 +189,10 @@ def start_child(case: Fixture) -> JsonObject:
     Raises:
         AssertionError: The parent Agent call is not admitted.
     """
-    # A ready parent's foreground Agent call becomes ordinary pending work.
+    # A ready parent with an approved whole-repository scope may also edit.
     case.ready()
+    case.approve()
+    # Its foreground Agent call becomes ordinary pending work.
     assert not denied(claude.handle(agent_call(case, "PreToolUse")))
     return claude.handle(event(case, "SubagentStart", child=True))
 
@@ -823,3 +825,39 @@ def test_sequential_children_each_end_ready_under_their_own_keys(case: Fixture) 
         done = read_call(case, "PostToolUse", tool_id, agent_id=agent, tool_response={"ok": 1})
         claude.handle(done)
         assert case.state()["participants"][key(session)]["pending"] == {}
+
+
+def test_child_structured_edits_need_parent_roadmap_scope(case: Fixture) -> None:
+    """Apply roadmap scope to a child's edits without making its free edits task-free.
+
+    Args:
+        case: Disposable repository fixture.
+    """
+    # Approve a narrow scope before the child joins on the roadmap.
+    case.ready()
+    case.approve({case.root: ["src/"]})
+    assert not denied(claude.handle(agent_call(case, "PreToolUse")))
+    claude.handle(event(case, "SubagentStart", child=True))
+
+    def write(target: Path, call: str) -> JsonObject:
+        """Run one child Write prehook.
+
+        Args:
+            target: Absolute edit target.
+            call: Native call identifier.
+
+        Returns:
+            The adapter response.
+        """
+        inputs: JsonObject = {"file_path": str(target), "content": "x"}
+        observed = event(case, "PreToolUse", child=True, tool_name="Write", tool_input=inputs)
+        return claude.handle({**observed, "tool_use_id": call})
+
+    # A granted path is admitted and an ungranted one is denied for scope.
+    assert not denied(write(case.root / "src/x.py", "granted"))
+    response = write(case.root / "README.md", "ungranted")
+    assert denied(response) and "SCOPE_REQUIRED" in str(response)
+    # An external edit stays recorded child work rather than becoming task-free.
+    assert not denied(write(case.root.parent / "free.md", "external"))
+    pending = case.state()["participants"][key(CHILD)]["pending"]
+    assert {"granted", "external"} <= set(pending)
