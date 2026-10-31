@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from typing import Any
 
@@ -1180,26 +1181,79 @@ def test_restore_rejects_changed_archive_manifest_without_creating_payload(
     assert issue.commits == []
 
 
+# A drive-less root is relative on Windows.
+SCOPE_ROOT = "C:/abs/worktree" if os.name == "nt" else "/abs/worktree"
 SCOPED_ROADMAP = (
     "**Proposal status:** Approved by the user.\n"
     "**Proposal revision:** r2\n"
     "**Approval record:** Human approved revision r2.\n"
-    "**Repository scope:**\n- `/abs/worktree`: `./`\n"
+    f"**Repository scope:**\n- `{SCOPE_ROOT}`: `./`\n"
 )
+
+
+def test_ready_reports_recorded_approval_and_scope() -> None:
+    """Ready returns the roadmap's recorded approval and syntax-checked scope."""
+    issue = MemoryIssue()
+    issue.payload["roadmap.md"] = SCOPED_ROADMAP.encode()
+    member = next(iter(issue.state["participants"].values()))
+    member["packet"][0]["sha256"] = core.sha(issue.payload["roadmap.md"])
+    member["ack"] = core.sha(core.canonical(member["packet"]))
+    result = core.operate(MemoryStore(), issue, base_request("ready"))  # type: ignore[arg-type]
+    assert result["approval"] == {
+        "approved": True,
+        "scope": [{"root": SCOPE_ROOT, "paths": ["./"]}],
+    }
+
+
+PENDING_ROADMAP = SCOPED_ROADMAP.replace("Human approved revision r2.", "Pending approval.")
+
+
+def test_reset_readiness_keeps_detached_participants_detached() -> None:
+    """Clear every acknowledgment without reviving a detached participant."""
+    state = MemoryIssue().state
+    live = next(iter(state["participants"].values()))
+    state["participants"]["gone"] = {**live, "status": "detached"}
+    core.reset_readiness(state)
+    assert [(m["status"], m["ack"]) for m in state["participants"].values()] == [
+        ("attached", None),
+        ("detached", None),
+    ]
+
+
+def test_scope_change_clears_readiness_for_a_packet_without_the_roadmap() -> None:
+    """A changed scope needs a fresh acknowledgment even when no packet names the roadmap."""
+    store, issue = MemoryStore(), MemoryIssue()
+    member = next(iter(issue.state["participants"].values()))
+    member["packet"] = [
+        {"id": "note", "locator": "context/note.md", "sha256": core.sha(b"old note")}
+    ]
+    request = base_request(
+        "update",
+        expected_revision=7,
+        path="roadmap.md",
+        old_digest=core.sha(b"approved roadmap"),
+        content=PENDING_ROADMAP,
+        provenance={
+            "sources": [member["packet"][0]],
+            "applicability": "TEST-30",
+            "status": "draft",
+        },
+    )
+    assert core.operate(store, issue, request)["ok"] is True  # type: ignore[arg-type]
+    member = next(iter(issue.state["participants"].values()))
+    assert (member["status"], member["ack"]) == ("attached", None)
 
 
 @pytest.mark.parametrize(
-    ("path", "content"),
+    ("path", "content", "status"),
     [
-        ("context/note.md", b"edited markdown"),
-        (
-            "roadmap.md",
-            SCOPED_ROADMAP.replace("Human approved revision r2.", "Pending approval.").encode(),
-        ),
+        ("context/note.md", b"edited markdown", "ready"),
+        ("roadmap.md", b"edited roadmap without scope", "ready"),
+        ("roadmap.md", PENDING_ROADMAP.encode(), "attached"),
     ],
 )
 def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
-    monkeypatch: pytest.MonkeyPatch, path: str, content: bytes
+    monkeypatch: pytest.MonkeyPatch, path: str, content: bytes, status: str
 ) -> None:
     """Commit explicit Markdown reconciliation after checking directory identity and events.
 
@@ -1207,10 +1261,12 @@ def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
         monkeypatch: Pytest fixture used to replace the dependency under test.
         path: Edited Markdown payload path.
         content: Edited bytes; a roadmap scope arrives only as a pending proposal.
+        status: Participant status afterwards; only a changed scope clears readiness.
     """
-    # Bind the existing directory identity and edited Markdown bytes.
+    # Bind the existing directory identity, the retained template record and edited bytes.
     store, issue = MemoryStore(), MemoryIssue()
     issue.state["directory_identity"] = [4, 5]
+    issue.state["roadmap"] = core.roadmap_record("")
     observed = {**issue.payload, path: content}
 
     class Payload:
@@ -1270,29 +1326,49 @@ def test_reconcile_imports_only_inspected_markdown_with_unchanged_event_history(
     assert issue.payload[path] == content
     assert issue.state["reconciliation"] == {"previous": previous, "evidence": [source]}
     assert issue.commits[-1][0] == "reconciliation"
+    # An imported roadmap becomes the record later reconciliations compare against.
+    if path == "roadmap.md":
+        assert issue.state["roadmap"] == core.roadmap_record(content.decode())
+    assert next(iter(issue.state["participants"].values()))["status"] == status
 
 
 @pytest.mark.parametrize(
-    ("path", "content", "code"),
+    ("path", "content", "record", "code"),
     [
-        ("events.jsonl", b"uncommitted event\n", "INTEGRITY_ERROR"),
-        ("roadmap.md", SCOPED_ROADMAP.encode(), "INVALID_REQUEST"),
+        ("events.jsonl", b"uncommitted event\n", None, "INTEGRITY_ERROR"),
+        ("roadmap.md", SCOPED_ROADMAP.encode(), core.roadmap_record(""), "INVALID_REQUEST"),
+        # Without a retained record a reused revision cannot be detected.
+        ("roadmap.md", PENDING_ROADMAP.encode(), None, "INVALID_REQUEST"),
+        # A broader scope may not reuse the committed revision, even while pending.
+        (
+            "roadmap.md",
+            PENDING_ROADMAP.encode(),
+            {"revision": "r2", "scope": [{"root": SCOPE_ROOT, "paths": ["src/"]}]},
+            "INVALID_REQUEST",
+        ),
     ],
 )
 def test_reconcile_rejects_changed_event_bytes_before_commit(
-    monkeypatch: pytest.MonkeyPatch, path: str, content: bytes, code: str
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    content: bytes,
+    record: core.RoadmapRecord | None,
+    code: str,
 ) -> None:
-    """Forbid importing event history or an approved scope grant through reconciliation.
+    """Forbid importing event history or an unproposed scope grant through reconciliation.
 
     Args:
         monkeypatch: Pytest fixture used to replace the dependency under test.
         path: Changed payload path.
         content: Changed bytes.
+        record: Retained record of the committed roadmap, if any.
         code: Expected rejection code.
     """
-    # Bind the existing directory identity and the rejected changed bytes.
+    # Bind the existing directory identity, any retained record and the rejected bytes.
     store, issue = MemoryStore(), MemoryIssue()
     issue.state["directory_identity"] = [4, 5]
+    if record is not None:
+        issue.state["roadmap"] = record
     observed = {**issue.payload, path: content}
 
     class Payload:

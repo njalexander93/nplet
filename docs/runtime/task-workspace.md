@@ -86,6 +86,55 @@ Keep three dimensions separate:
 
 Terminal recording for a completed issue requires references to exact human acceptance, actual required merge and completion of issue obligations. The utility validates supplied identities/evidence and provider status; it cannot manufacture or independently grant human acceptance. Terminal state still forbids ordinary task edits until explicit reopen, which invalidates cleanup eligibility. Cancellation preserves its recorded disposition/history.
 
+### Roadmap approval and repository scope
+
+The roadmap records the approved proposal and the repository paths it grants. The
+lifecycle checks this recorded text only. It does not authenticate the human
+approver or enforce the prose intent of the approval. `ready` reports the result as
+`approval: {"approved": <bool>, "scope": [{"root": <path>, "paths": [...]}]}`.
+Structured edit admission [acts on it](#recorded-approval-and-repository-scope).
+
+**Approval** holds when the roadmap has exactly one each of `**Proposal status:**`,
+`**Proposal revision:**` and `**Approval record:**`, and all of these are true:
+
+- the status starts with `Approved`;
+- no field contains `<`;
+- the record does not start with `Pending` in any letter case;
+- the record contains `approved revision <token>`, where `approved` starts a word
+  and `<token>` equals the first word of the revision.
+
+**Repository scope** grants paths under absolute worktree roots:
+
+```markdown
+**Repository scope:**
+- `/Users/me/project`: `src/nplet/adapters/`, `docs/runtime/task-workspace.md`
+- `/Users/me/vault`: `./`
+```
+
+- A root must be absolute and must be a worktree root itself; a subdirectory root
+  grants nothing. Each root appears once.
+- A path ending in `/` covers a subtree, a path without it names one file, and
+  exactly `./` covers the whole repository. Paths are relative to the root and
+  compared byte for byte.
+- Absolute paths, globs (`*`, `?`, `[`), backslashes, NUL, and empty, `.` or `..`
+  segments are rejected. At most 32 roots and 256 paths are allowed.
+- An absent field, `none` or a template placeholder grants nothing.
+
+**Scope changes.** A roadmap `update` or `reconcile-files` import that changes the
+scope must also carry a new revision token and an `Approval record` starting with
+`Pending`; a later update records the approval of that revision. Otherwise, or for
+malformed scope, the operation fails with `INVALID_REQUEST`. An accepted scope change
+clears every live participant's readiness, whatever its packet holds, so each needs
+a new `read`, `acknowledge` and `ready`. The lifecycle keeps
+the revision and scope of the last committed roadmap so that reconciliation, which
+no longer has the replaced bytes, can apply the same rule. A workspace without that
+record cannot import a scope by reconciliation; propose it with `update` instead.
+A malformed scope already committed grants nothing.
+
+**Migration.** No task gets an implicit whole-workspace grant. An existing task adds
+its `Repository scope` through a new proposal revision, explicit approval and
+readiness.
+
 ## Ownership, context and participant lifetime
 
 One coordinator owns `roadmap.md`, shared summary and packet assignment. Participants own distinct named notes, recorded in control state, for example `context/implementation.md`. Every note/update carries author/participant, source references and digests, applicability, status, and superseded revision when relevant. No private reasoning is required. Ownership transfers are explicit, revision-checked and recorded.
@@ -388,57 +437,27 @@ link at the resolved path is not followed.
   other than tab, LF, CR and FF.
 - **Binary evidence:** heuristics on the first 64 KiB and the last 65,557 bytes:
   PNG signature with a valid IHDR CRC, JPEG start and end markers, GIF header and
-  trailer, WOFF/WOFF2 declared length equal to the file size, a ZIP local header
-  with an end record in the tail, or a PDF header with `%%EOF` near the end. These
-  are heuristics, not format validators.
+  trailer, WOFF/WOFF2 declared length equal to the file size, a full ZIP local
+  header with a complete end-of-central-directory record ending the file, or a PDF
+  header with `%%EOF` near the end. These are heuristics, not format validators.
 
 One call inspects at most 16 MiB across all sides. Known `unknown` gaps include
 Latin-1 and other legacy encodings, BOM-less UTF-16/UTF-32 and ASCII-only PDFs.
 
 ### Recorded approval and repository scope
 
-A protected structured edit needs the `ready` result's `approval` key:
-`{"approved": <bool>, "scope": [{"root": <path>, "paths": [...]}]}`. Without
-approval the edit is denied with `APPROVAL_REQUIRED`; a protected effect outside
-the scope is denied with `SCOPE_REQUIRED`.
+A protected structured edit needs the `ready` result's `approval` key, described in
+[roadmap approval and repository scope](#roadmap-approval-and-repository-scope).
+Without approval the edit is denied with `APPROVAL_REQUIRED`; a protected effect
+outside the scope is denied with `SCOPE_REQUIRED`.
 
-**Approval** holds when the roadmap has exactly one each of `**Proposal status:**`
-starting with `Approved`, `**Proposal revision:**` and `**Approval record:**`,
-no field contains `<`, the record does not start with `Pending` in any letter
-case, and it names
-`approved revision <token>` equal to the first word of the revision. This checks
-recorded state only. It does not authenticate the human or enforce the prose
-intent of the approval.
-
-**Repository scope** grants paths under absolute worktree roots. A root must be a
-worktree root itself; a subdirectory root grants nothing.
-
-```markdown
-**Repository scope:**
-- `/Users/me/project`: `src/nplet/adapters/`, `docs/runtime/task-workspace.md`
-```
-
-A path ending in `/` covers a subtree, a path without it names one file, and
-exactly `./` covers the whole repository. Absolute paths, globs (`*`, `?`, `[`),
-backslashes, NUL, empty, `.` or `..` segments and duplicate roots are rejected.
-At most 32 roots and 256 paths are allowed. An absent field, `none` or a template
-placeholder grants nothing. The adapter resolves each root to its common Git
-identity, so an entry covers linked worktrees. A target matches by its
-link-resolved path relative to its own worktree root, compared byte for byte.
-Exempt points outside the workspace, failed points and non-repository points need
-no grant. A workspace effect must also reach the session repository through some
-point. A workspace target inside a nested repository cannot be granted today, so
-it is always denied.
-
-A roadmap update that changes the scope must carry a new revision token and an
-`Approval record` starting with `Pending`. Otherwise it fails with
-`INVALID_REQUEST`. A `reconcile-files` import of changed roadmap bytes cannot
-compare with the replaced bytes, so any nonempty scope it imports needs the same
-new revision and `Pending` record. A malformed committed scope grants nothing.
-
-**Migration.** No task gets an implicit whole-workspace grant. Before protected
-work, an existing task adds its `Repository scope` through a new proposal
-revision, explicit approval and readiness.
+The adapter resolves each scope root to its common Git identity, so an entry covers
+linked worktrees. A target matches by its link-resolved path relative to its own
+worktree root, compared byte for byte. Exempt points outside the workspace, failed
+points and non-repository points need no grant. A workspace effect must also reach
+the session repository through some point. A workspace target inside a nested
+repository needs both a grant for its spelling under the session worktree and a
+grant under its own repository.
 
 ### Bootstrap exceptions
 

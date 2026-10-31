@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from nplet.adapters import file_content as content
 from nplet.adapters import task_boundary as boundary
 
 pytestmark = pytest.mark.unit
@@ -32,4 +33,4 @@ def test_bom_text_and_unsupported_encodings(tmp_path: Path, data: bytes, state: 
     """
     path = tmp_path / "f.png"
     path.write_bytes(data)
-    assert boundary.classify(path, boundary.Budget()) == state
+    assert content.classify(path, content.Budget()) == state

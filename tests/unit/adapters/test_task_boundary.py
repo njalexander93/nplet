@@ -200,6 +200,10 @@ def test_malformed_inputs_do_not_claim_a_free_effect() -> None:
     assert not boundary.task_free({"tool_name": "Read", "tool_input": "opaque"}, "codex")
     assert boundary.edit_targets("Write", {"file_path": "note.md"}) is None
     assert boundary.edit_targets("apply_patch", {"command": "opaque"}) is None
+    # A header without its ": " separator is malformed, not an empty target.
+    for header in ("*** Add File", "*** Update File", "*** Delete File", "*** Move to"):
+        bare = f"*** Begin Patch\n*** Update File: a.md\n{header}\n*** End Patch"
+        assert boundary.edit_targets("apply_patch", {"command": bare}) is None
     assert not boundary.read_command(None, "codex")
     assert not boundary.read_command("cat '", "codex")
 

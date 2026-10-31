@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from nplet.lifecycle import task_workspace as core
 
 pytestmark = pytest.mark.unit
 
-ROOT = "/abs/worktree"
+# A drive-less root is relative on Windows.
+BASE = "C:/abs" if os.name == "nt" else "/abs"
+ROOT = f"{BASE}/worktree"
 APPROVED = (
     "**Proposal status:** Approved by the user.\n"
     "**Proposal revision:** r5 (2026-10-30)\n"
@@ -36,15 +40,15 @@ def scope(*entries: str) -> str:
         ("**Repository scope:** <none, or approved entries; see docs>\n", []),
         (scope(f"- `{ROOT}`: `src/a.py`"), [{"root": ROOT, "paths": ["src/a.py"]}]),
         (
-            scope(f"- `{ROOT}`: `src/`, `docs/x.md`", "- `/other`: `./`"),
+            scope(f"- `{ROOT}`: `src/`, `docs/x.md`", f"- `{BASE}/other`: `./`"),
             [
                 {"root": ROOT, "paths": ["src/", "docs/x.md"]},
-                {"root": "/other", "paths": ["./"]},
+                {"root": f"{BASE}/other", "paths": ["./"]},
             ],
         ),
         (
-            scope(*(f"- `/r{i}`: `a`" for i in range(32))),
-            [{"root": f"/r{i}", "paths": ["a"]} for i in range(32)],
+            scope(*(f"- `{BASE}/r{i}`: `a`" for i in range(32))),
+            [{"root": f"{BASE}/r{i}", "paths": ["a"]} for i in range(32)],
         ),
     ],
 )
@@ -85,8 +89,8 @@ def test_repository_scope_accepts_grants(text: str, expected: list[core.ScopeEnt
                 "a\x00b",
             )
         ),
-        scope(*(f"- `/r{i}`: `a`" for i in range(33))),
-        scope(*(f"- `/r{i}`: " + ", ".join(f"`p{j}`" for j in range(129)) for i in range(2))),
+        scope(*(f"- `{BASE}/r{i}`: `a`" for i in range(33))),
+        scope(*(f"- `{BASE}/r{i}`: " + ", ".join(f"`p{j}`" for j in range(129)) for i in range(2))),
         "**Repository scope:** none\n**Repository scope:** none\n",
     ],
 )
@@ -108,6 +112,8 @@ def test_repository_scope_rejects_malformed_grants(text: str) -> None:
         (APPROVED.replace("Approved by", "Proposed by"), False),
         (APPROVED.replace("Human approved", "Pending; approved"), False),
         (APPROVED.replace("Human approved", "pending; approved"), False),
+        (APPROVED.replace("Human approved", "Human disapproved"), False),
+        (APPROVED.replace("Human approved", "Pre-approved"), False),
         (APPROVED.replace("revision r5. Authorizes", "revision r4. Authorizes"), False),
         (APPROVED.replace("r5 (2026", "<r5> (2026"), False),
         (APPROVED.replace("r5 (2026", "r5. (2026"), False),
@@ -123,3 +129,25 @@ def test_roadmap_approved_requires_matching_recorded_revision(text: str, approve
         approved: Expected approval result.
     """
     assert core.roadmap_approved(text) is approved
+
+
+def test_legacy_scope_reports_malformed_committed_scope_as_none() -> None:
+    """Return parsed entries for valid committed scope and None for malformed scope."""
+    assert core.legacy_scope(scope(f"- `{ROOT}`: `./`")) == [{"root": ROOT, "paths": ["./"]}]
+    assert core.legacy_scope("**Repository scope:** everything\n") is None
+
+
+def test_scope_change_needs_a_new_pending_revision_and_a_known_previous_record() -> None:
+    """Accept a changed scope only under a new pending revision of a known record."""
+    granted = scope(f"- `{ROOT}`: `./`")
+    pending = APPROVED.replace("Human approved revision r5.", "Pending approval.") + granted
+    previous = core.roadmap_record(APPROVED)
+    assert core.check_scope_change(None, APPROVED) == previous
+    assert core.check_scope_change(previous, pending.replace("r5 (", "r6 (")) == {
+        "revision": "r6",
+        "scope": [{"root": ROOT, "paths": ["./"]}],
+    }
+    # Unknown history, a reused revision or an approved record cannot change scope.
+    for record, text in ((None, pending), (previous, pending), (previous, APPROVED + granted)):
+        with pytest.raises(core.WorkspaceError):
+            core.check_scope_change(record, text)

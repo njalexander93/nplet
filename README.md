@@ -1,33 +1,59 @@
-# nplet.ai
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/nplet/S2-accent.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/nplet/S2-color.svg">
+    <img src="docs/assets/nplet/S2-color.svg" alt="Nplet" width="260">
+  </picture>
+</p>
 
-**A modular framework for running an agent-powered engineering fleet.**
+# An Agile-based framework and application for agent-driven work.
 
-The Nplet framework brings organizational structure to AI work: specialized roles, shared rules, clear responsibilities and coordinated handoffs. The goal is to help people build teams of agents that work toward a common purpose while humans retain direction and approval of consequential decisions.
+Nplet aims to give AI agents a prescribed process for planning, execution and retrospective learning. People set the direction and retain control of consequential decisions.
 
-## What we're building
+The framework and its core technology are in early development. We are building and testing them together.
 
-- **Teams with clear responsibilities.** Define what each agent owns, what it needs and when to hand work to another role.
-- **Shared context and continuity.** Keep plans, decisions and task progress available as work moves between agents and sessions.
-- **Review and human oversight.** Separate implementation from independent review, with explicit human decisions at key boundaries.
-- **A reusable foundation.** Give companies a common structure they can adapt to their own work and operating rules.
+## What we are building
+
+Nplet has two connected parts:
+
+- **An agentic Agile framework.** An operating model for planning, coordinating, checking and improving work performed by agents.
+- **An orchestration application.** Software that will let people direct agents and coordinate their work through that framework.
+
+The initial proof of concept (POC) uses a plugin to develop and test the approach. What we learn will shape the framework and future application.
+
+## What we want to improve
+
+- **Control and visibility:** Help people understand what agents are doing, where work is blocked and which decisions need attention.
+- **Code quality:** Combine tightly scoped changes with clear acceptance criteria and independent checks.
+- **Incremental delivery:** Deliver useful changes sooner while accounting for quality, human effort, cost and reliability.
+
+These are goals for the POC. We still need evidence that the approach improves delivery against a fair comparison.
+
+## The workflow
+
+1. **Planning:** Turn a desired outcome into scoped work, dependencies and acceptance criteria. Establish what agents are authorized to do before execution.
+2. **Execution:** Coordinate that work, expose progress and blockers, and check the result independently. Bring decisions that require human judgment back to people.
+3. **Retrospective:** Review the outcome and the effort it required. Use what we learn to improve later work.
+
+For example, a feature moves from an agreed outcome to a bounded change, independent review and a retrospective that informs the next plan.
 
 ## Current development
 
-The Nplet framework is in **early development**. This repository currently contains the framework's published rules, role and profile templates, worked examples, and Python tooling for shared local task workspaces.
+This repository contains published framework rules, role and profile templates, worked examples, and Python tooling for shared local task workspaces.
 
-The workspace tooling includes integrations for Codex, Claude Code and Cursor. The broader company runtime and complete set of executable roles are still being developed.
+The workspace tooling includes integrations for Codex, Claude Code and Cursor. The complete orchestration application is still to be built. Coordinating agents across different runtimes remains a product goal.
 
-## Requirements and setup
+## Contributor setup
 
-Contributor setup supports **macOS, Linux and native Windows**. The setup guides cover Python, Poetry, editor configuration and local checks, including platform requirements.
+The contributor guides cover macOS, Linux and native Windows. They describe the development environment, agent integrations and local checks.
 
-1. **[Set up your development workspace](docs/runtime/development.md#set-up-each-worktree)**
-2. **[Configure your agent's task-workspace integration](docs/runtime/host-hooks.md#setup-and-bootstrap)**
-3. **[Use the shared task workspace](docs/runtime/task-workspace-usage.md#usage)**
+1. [Set up your development workspace](docs/runtime/development.md#set-up-each-worktree).
+2. [Configure your agent's task-workspace integration](docs/runtime/host-hooks.md#setup-and-bootstrap).
+3. [Use the shared task workspace](docs/runtime/task-workspace-usage.md#usage).
 
-For contributions, follow the [local checks](docs/runtime/development.md#checks) and submit a pull request for human review.
+Follow the [contributor workflow](docs/runtime/contributor-workflow.md) for repository changes. Submit changes through a pull request for human review.
 
-## Explore the framework
+## Explore the project
 
 - [Organization and teams](src/nplet/resources/organization/team-map.md)
 - [Role and profile definitions](src/nplet/resources/templates/definition-format.md)

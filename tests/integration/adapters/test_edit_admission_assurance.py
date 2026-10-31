@@ -112,19 +112,19 @@ def test_c6_scope_change_resets_approval_and_readiness(ready: tuple[str, Fixture
     root = case.root
     (root / "docs").mkdir()
     pin_roadmap(case)
-    case.approve({root: ["src/"]})
+    case.approve({root: ["src/"]}, refresh=False)
     # Every roadmap update stales the pinned packet until it is acknowledged again.
     assert not allowed(host, write(root, host, root / "src/x.py", "stale", bound=True))
     reacknowledge(case)
     assert allowed(host, write(root, host, root / "src/x.py", "granted", bound=True))
     # Proposing a wider grant withdraws approval of the earlier one too.
-    case.approve({root: ["src/", "docs/"]}, approved=False)
+    case.approve({root: ["src/", "docs/"]}, approved=False, refresh=False)
     reacknowledge(case)
     for index, target in enumerate((root / "src/x.py", root / "docs/y.md")):
         response = write(root, host, target, f"pending-{index}", bound=True)
         assert "APPROVAL_REQUIRED" in str(response)
     # Approval of the new revision admits the added path after readiness.
-    case.approve({root: ["src/", "docs/"]})
+    case.approve({root: ["src/", "docs/"]}, refresh=False)
     reacknowledge(case)
     assert allowed(host, write(root, host, root / "docs/y.md", "widened", bound=True))
 
@@ -166,7 +166,7 @@ def test_c5_c15_stale_packet_survives_task_free_edits(
     host, case = ready
     root = case.root
     pin_roadmap(case)
-    case.approve({root: ["src/"]})
+    case.approve({root: ["src/"]}, refresh=False)
     assert "NOT_READY" in str(write(root, host, root / "src/x.py", "stale-before", bound=True))
     before = task_store_snapshot(root)
     for index, target in enumerate((repos.plain / "x.md", repos.v / "note.md")):

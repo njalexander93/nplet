@@ -12,6 +12,7 @@ from nplet.adapters import repository_exemptions as exemptions
 from nplet.adapters import repository_location as location
 from nplet.adapters import task_boundary as boundary
 from nplet.lifecycle import task_workspace as core
+from tests.platform_support import link_directory
 
 pytestmark = pytest.mark.unit
 
@@ -146,7 +147,7 @@ def test_policy_target_is_reserved(tmp_path: Path) -> None:
     """
     real = tmp_path / "real"
     real.mkdir()
-    (tmp_path / "alias").symlink_to(real)
+    link_directory(tmp_path / "alias", real)
     policy = tmp_path / "alias" / "policy.json"
     for spelling in (policy, real / "policy.json"):
         target = effect((spelling, None, None), before=ABSENT)
@@ -159,27 +160,59 @@ def test_policy_target_is_reserved(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("exists", [True, False])
 def test_policy_case_variants_are_reserved(tmp_path: Path, exists: bool) -> None:
-    """A case variant of the policy name or its directory is the policy where case folds.
+    """A case variant of the policy name is reserved; a variant directory is where case folds.
 
     Args:
         tmp_path: Directory holding the policy.
         exists: Whether the policy file exists, so a variant edits or creates it.
     """
-    # Probe the temporary filesystem; a case-sensitive one has no variant spellings.
+    # Probe the temporary filesystem; only a case-insensitive one aliases the directory.
     (tmp_path / "probe").touch()
-    if not (tmp_path / "PROBE").exists():
-        pytest.skip("case-sensitive temporary filesystem")
+    folds = (tmp_path / "PROBE").exists()
     (tmp_path / "cfg").mkdir()
     policy = tmp_path / "cfg" / "repository-exemptions.json"
     if exists:
         policy.write_text("{}")
-    # Both a variant name and a variant parent directory must be recognized.
-    for spelling in (
-        tmp_path / "cfg" / "REPOSITORY-Exemptions.json",
-        tmp_path / "CFG" / "repository-exemptions.json",
+    for spelling, reserved in (
+        (tmp_path / "cfg" / "REPOSITORY-Exemptions.json", True),
+        (tmp_path / "CFG" / "repository-exemptions.json", folds),
     ):
         decision = boundary.decide([effect((spelling, None, None), before=ABSENT)], NONE, policy)
+        assert decision.policy is reserved
+
+
+def test_existing_policy_case_variant_is_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing case-variant file beside the policy is reserved like an absent one.
+
+    Args:
+        tmp_path: Directory holding the policy and its variant.
+        monkeypatch: Gives the variant its own identity, as a case-sensitive
+            filesystem would.
+    """
+    policy = tmp_path / "repository-exemptions.json"
+    policy.write_text("{}")
+    variant = tmp_path / "REPOSITORY-Exemptions.json"
+    variant.write_text("{}")
+    real = boundary._file_id
+    monkeypatch.setattr(boundary, "_file_id", lambda p: (0, 0) if p == variant else real(p))
+    decision = boundary.decide([effect((variant, None, None))], NONE, policy)
+    assert decision.policy is True
+
+
+def test_policy_case_variant_is_reserved_before_its_directory_exists(tmp_path: Path) -> None:
+    """A case variant of a policy whose directory is absent may create that policy.
+
+    Args:
+        tmp_path: Directory that does not yet hold the policy directory.
+    """
+    policy = tmp_path / "cfg" / "repository-exemptions.json"
+    for spelling in (policy, tmp_path / "CFG" / "Repository-Exemptions.json"):
+        decision = boundary.decide([effect((spelling, None, None), before=ABSENT)], NONE, policy)
         assert decision.policy is True
+    other = effect((tmp_path / "cfg" / "other.json", None, None), before=ABSENT)
+    assert boundary.decide([other], NONE, policy).policy is False
 
 
 def test_session_repository_declared_as_vault_still_needs_scope() -> None:
@@ -234,6 +267,22 @@ def test_scope_covers_only_granted_paths_of_each_repository() -> None:
     assert boundary.unauthorized(decision, scope, None, memo, VAULT)[:2] == covered[:2]
 
 
+def test_workspace_membership_and_vault_exemption_are_decided_per_point() -> None:
+    """A nested repository needs both grants; a vault point behind a workspace link stays exempt."""
+    nested = identity("w/sub", 5)
+    inner = effect((BASE / "w" / "sub" / "x.py", nested, None), ws=True)
+    linked = effect((BASE / "w" / "notes", W, None), (BASE / "v" / "n.md", V, None), ws=True)
+    decision = boundary.decide([inner, linked], VAULT)
+    memo = {str(BASE / "w"): (W, None), str(BASE / "w" / "sub"): (nested, None)}
+    grants = [
+        {"root": str(BASE / "w"), "paths": ["sub/", "notes"]},
+        {"root": str(BASE / "w" / "sub"), "paths": ["x.py"]},
+    ]
+    assert boundary.unauthorized(decision, grants, W.repository, memo, VAULT) == []
+    assert boundary.unauthorized(decision, grants[:1], W.repository, memo, VAULT) == [inner]
+    assert boundary.unauthorized(decision, grants[1:], W.repository, memo, VAULT) == [inner, linked]
+
+
 def test_alias_spelling_is_related_through_its_real_directory(tmp_path: Path) -> None:
     """A lexical point under a linked ancestor matches the root Git reports in real form.
 
@@ -242,7 +291,7 @@ def test_alias_spelling_is_related_through_its_real_directory(tmp_path: Path) ->
     """
     root = tmp_path.resolve() / "r"
     (root / "src").mkdir(parents=True)
-    (tmp_path / "alias").symlink_to(root)
+    link_directory(tmp_path / "alias", root)
     repo = location.Identity(core.Repository(root, root / ".git", [root]), (1, 9))
     target = effect((tmp_path / "alias" / "src" / "x.py", repo, None))
     decision = boundary.decide([target], NONE)

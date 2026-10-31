@@ -5,14 +5,17 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import stat
-import zlib
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
 from nplet.adapters import repository_exemptions, repository_location
+from nplet.adapters.file_content import ABSENT as ABSENT
+from nplet.adapters.file_content import BINARY as BINARY
+from nplet.adapters.file_content import TEXT as TEXT
+from nplet.adapters.file_content import UNKNOWN as UNKNOWN
+from nplet.adapters.file_content import Budget as Budget
+from nplet.adapters.file_content import classify as classify
 from nplet.lifecycle import task_workspace as core
 
 LINEAR_OPERATIONS = frozenset(
@@ -88,15 +91,6 @@ COMMENTS_QUERY = (
     "(first:100,after:$cursor){nodes{id body url author{login}} pageInfo{hasNextPage endCu"
     "rsor}}}}}"
 )
-# Content states of one side of an edit effect.
-TEXT, BINARY, UNKNOWN, ABSENT = "text", "binary", "unknown", "absent"
-# Largest file whose whole content can be text evidence.
-TEXT_LIMIT = 1 << 20
-# Most bytes one call inspects across every effect side.
-CALL_LIMIT = 16 << 20
-# Binary evidence reads the first 64 KiB and the last 65,557 bytes, the largest ZIP
-# end-of-central-directory span (22-byte record plus a 65,535-byte comment).
-HEAD, TAIL = 64 << 10, 65_557
 # Patch headers mapped to the operation they apply to their target.
 PATCH_OPERATIONS = {
     "*** Add File": "create",
@@ -193,15 +187,19 @@ def target_role(cwd: str, value: object, is_root: Callable[[Path], bool]) -> str
 EDIT_TOOLS = frozenset({"Write", "Edit", "NotebookEdit", "apply_patch"})
 
 
-def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
-    """Extract every target from supported deterministic edit shapes.
+def edit_records(tool: str, args: core.JSONObject) -> list[tuple[str, str | None]] | None:
+    """Parse supported deterministic edit shapes into ordered target operations.
 
     Args:
         tool: Native file tool name.
         args: Structured native input.
 
     Returns:
-        All targets, or None for an unknown or malformed shape.
+        One ``(target, operation)`` pair per target, or None for an unknown or
+        malformed shape. Write, Edit and NotebookEdit ``write`` their target; a patch adds
+        ``create``, ``write`` or ``delete``, and a move splits its update into
+        ``move-from`` and ``move-to``. A ``Move to`` not directly after ``Update
+        File`` has no operation.
     """
     # Native file edits expose exactly one target, required text fields and optional fields.
     shapes = {
@@ -215,23 +213,42 @@ def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
         if strings <= set(args) <= strings | optional and all(
             isinstance(args[field], str) for field in strings
         ):
-            return [args[key]]
+            return [(args[key], "write")]
         return None
     # A patch header enumerates all affected files, including both sides of moves.
     if tool == "apply_patch" and set(args) == {"command"} and isinstance(args["command"], str):
         lines = args["command"].splitlines()
         if not lines or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
             return None
-        targets = []
+        records: list[tuple[str, str | None]] = []
         for line in lines[1:-1]:
-            if line.startswith(
-                ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
-            ):
-                targets.append(line.split(": ", 1)[1])
+            # A header needs its ": " separator; a bare name is malformed.
+            header, colon, target = line.partition(": ")
+            if header == "*** Move to" and colon:
+                moved = records[-1:] and records[-1][1] == "write"
+                if moved:
+                    records[-1] = (records[-1][0], "move-from")
+                records.append((target, "move-to" if moved else None))
+            elif header in PATCH_OPERATIONS and colon:
+                records.append((target, PATCH_OPERATIONS[header]))
             elif line.startswith("*** ") and line != "*** End of File":
                 return None
-        return targets or None
+        return records or None
     return None
+
+
+def edit_targets(tool: str, args: core.JSONObject) -> list[str] | None:
+    """Extract every target from supported deterministic edit shapes.
+
+    Args:
+        tool: Native file tool name.
+        args: Structured native input.
+
+    Returns:
+        All targets, or None for an unknown or malformed shape.
+    """
+    records = edit_records(tool, args)
+    return None if records is None else [target for target, _ in records]
 
 
 def github_read(tool: str, args: core.JSONObject) -> bool:
@@ -511,9 +528,22 @@ def edit_locations(
         edit shape.
     """
     # Unknown edits have no targets to locate.
-    targets = edit_targets(event["tool_name"], event["tool_input"])
-    if not targets:
-        return []
+    return _locate(event, edit_targets(event["tool_name"], event["tool_input"]) or [], repository)
+
+
+def _locate(
+    event: core.JSONObject, targets: list[str], repository: core.Repository | None
+) -> list[repository_location.Location]:
+    """Resolve the given targets of one edit, sharing a root predicate and discovery memo.
+
+    Args:
+        event: Validated native tool and argument envelope.
+        targets: Targets parsed from the event, in order.
+        repository: The session's carried project repository, if any.
+
+    Returns:
+        One location per target in order.
+    """
     # One root predicate and one discovery memo cover every target of the call.
     is_root = root_test([] if repository is None else repository.trees)
     memo: repository_location.Memo = {}
@@ -521,17 +551,6 @@ def edit_locations(
         repository_location.resolve(event["cwd"], target, repository, is_root, memo)
         for target in targets
     ]
-
-
-@dataclass
-class Budget:
-    """Bytes one call may still inspect across every effect side.
-
-    Attributes:
-        remaining: Uncharged bytes; negative once a charge exceeded the limit.
-    """
-
-    remaining: int = CALL_LIMIT
 
 
 class Effect(NamedTuple):
@@ -550,147 +569,6 @@ class Effect(NamedTuple):
     location: repository_location.Location
     before: str | None
     after: str | None
-
-
-def text_evidence(data: bytes) -> bool:
-    """Report whether whole file content is plausibly text.
-
-    Args:
-        data: The complete content.
-
-    Returns:
-        Whether the content is empty, strict UTF-8 with an optional BOM, or strict
-        UTF-16/UTF-32 with a BOM, and decodes without NUL or C0 controls other than
-        tab, LF, CR and FF.
-    """
-    # Empty content is text; otherwise pick the codec by BOM, UTF-32LE before UTF-16LE.
-    if not data:
-        return True
-    boms = (
-        (b"\xff\xfe\x00\x00", "utf-32-le"),
-        (b"\x00\x00\xfe\xff", "utf-32-be"),
-        (b"\xff\xfe", "utf-16-le"),
-        (b"\xfe\xff", "utf-16-be"),
-        (b"\xef\xbb\xbf", "utf-8"),
-        (b"", "utf-8"),
-    )
-    bom, codec = next(pair for pair in boms if data.startswith(pair[0]))
-    # Strict decoding rejects invalid sequences and unpaired surrogates.
-    try:
-        text = data[len(bom) :].decode(codec)
-    except UnicodeDecodeError:
-        return False
-    return re.search("[\x00-\x08\x0b\x0e-\x1f]", text) is None
-
-
-def binary_evidence(head: bytes, tail: bytes, size: int) -> bool:
-    """Report whether a file's edges match one supported binary format heuristic.
-
-    Args:
-        head: The first ``HEAD`` bytes or fewer.
-        tail: The last ``TAIL`` bytes or fewer.
-        size: The file size.
-
-    Returns:
-        Whether PNG, JPEG, GIF, WOFF/WOFF2, ZIP or PDF framing is present.
-    """
-    # PNG needs its IHDR chunk with a matching CRC over type and data.
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return (
-            head[8:16] == b"\x00\x00\x00\x0dIHDR"
-            and len(head) >= 33
-            and zlib.crc32(head[12:29]) == int.from_bytes(head[29:33], "big")
-        )
-    # The other formats pair a leading signature with a trailing marker or declared size.
-    return (
-        (head.startswith(b"\xff\xd8\xff") and tail.endswith(b"\xff\xd9"))
-        or (head.startswith((b"GIF87a", b"GIF89a")) and tail.endswith(b";"))
-        or (head.startswith((b"wOFF", b"wOF2")) and int.from_bytes(head[8:12], "big") == size)
-        or (head.startswith(b"PK\x03\x04") and b"PK\x05\x06" in tail)
-        or (head.startswith((b"%PDF-1.", b"%PDF-2.")) and b"%%EOF" in tail[-1024:])
-    )
-
-
-def classify(path: Path, budget: Budget) -> str:
-    """Classify one existing path's content without opening special files.
-
-    Args:
-        path: Link-resolved path to inspect; a link found here is not followed.
-        budget: The call's inspection budget, charged before reading.
-
-    Returns:
-        ``absent`` for a missing path; ``text`` or ``binary`` when only that evidence
-        holds; ``unknown`` for both or neither, a non-regular or unreadable file, or an
-        exhausted budget.
-    """
-    # Only a regular file is ever opened; a missing path is absent.
-    try:
-        info = os.lstat(path)
-    except OSError as error:
-        return ABSENT if error.errno in repository_location.MISSING else UNKNOWN
-    if not stat.S_ISREG(info.st_mode):
-        return UNKNOWN
-    # Charge the bytes this side reads; once the call limit is passed, stop reading.
-    size = info.st_size
-    budget.remaining -= size if size <= TEXT_LIMIT else HEAD + TAIL
-    if budget.remaining < 0:
-        return UNKNOWN
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        fd = os.open(path, flags | getattr(os, "O_BINARY", 0))
-    except OSError:
-        return UNKNOWN
-    with os.fdopen(fd, "rb") as file:
-        try:
-            # Recheck the opened file, then read it whole or read only its edges.
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return UNKNOWN
-            if size <= TEXT_LIMIT:
-                data = file.read(size + 1)
-                # A file that changed size since stat has no reliable evidence.
-                if len(data) != size:
-                    return UNKNOWN
-                head, tail, text = data[:HEAD], data[-TAIL:], text_evidence(data)
-            else:
-                head = file.read(HEAD)
-                file.seek(size - TAIL)
-                tail, text = file.read(TAIL), False
-        except OSError:
-            return UNKNOWN
-    # Exactly one kind of evidence decides the state.
-    binary = binary_evidence(head, tail, size)
-    return TEXT if text and not binary else BINARY if binary and not text else UNKNOWN
-
-
-def edit_operations(tool: str, args: core.JSONObject) -> list[str] | None:
-    """Name the operation of every target ``edit_targets`` returns, in the same order.
-
-    Args:
-        tool: Native file tool name.
-        args: Structured native input.
-
-    Returns:
-        One operation per target, with ``write`` for Write and NotebookEdit whatever the target's
-        existence, or None for an unknown or malformed shape, including ``Move to``
-        not directly after ``Update File``.
-    """
-    # Native file tools write their single target.
-    targets = edit_targets(tool, args)
-    if not targets:
-        return None
-    if tool != "apply_patch":
-        return ["write"]
-    # A move splits its update into the source's removal and the destination's write.
-    operations: list[str] = []
-    for line in args["command"].splitlines()[1:-1]:
-        header = line.split(": ", 1)[0]
-        if header == "*** Move to":
-            if operations[-1:] != ["write"]:
-                return None
-            operations[-1:] = ["move-from", "move-to"]
-        elif header in PATCH_OPERATIONS:
-            operations.append(PATCH_OPERATIONS[header])
-    return operations
 
 
 def edit_effects(
@@ -712,12 +590,14 @@ def edit_effects(
         One effect per target in target order, or an empty list for an unknown or
         malformed edit shape.
     """
-    # Unknown or malformed edits have no effects.
-    operations = edit_operations(event["tool_name"], event["tool_input"])
-    if not operations:
+    # Unknown or malformed edits, including a misplaced move, have no effects.
+    records = edit_records(event["tool_name"], event["tool_input"]) or []
+    operations = [op for _, op in records if op]
+    if not records or len(operations) != len(records):
         return []
+    targets = [target for target, _ in records]
     effects = []
-    for op, location in zip(operations, edit_locations(event, repository), strict=True):
+    for op, location in zip(operations, _locate(event, targets, repository), strict=True):
         # The resolved point is last; an invalid target's only point carries its error.
         point = location.points[-1]
         path = None if point.error else point.path
@@ -775,22 +655,26 @@ def policy_target(effect: Effect, policy: Path) -> bool:
 
     Returns:
         Whether a point spells the policy's lexical or real path, is the same file,
-        or names it case-insensitively in the same directory.
+        names it case-insensitively in the same directory whether or not that name
+        exists, or folds to its spelling while that directory is absent.
     """
     spellings = {os.path.normpath(policy), os.path.realpath(policy)}
     # File identity catches spellings a case-insensitive filesystem treats as equal.
     own, folder, name = _file_id(policy), _file_id(policy.parent), policy.name.casefold()
+    folded = {spelling.casefold() for spelling in spellings}
     for point in effect.location.points:
         # An exact spelling or the same existing file is the policy.
         found = _file_id(point.path)
         if os.path.normpath(point.path) in spellings or (found is not None and found == own):
             return True
-        # A point that cannot be read may create the policy under a case variant.
+        # A case-variant name of the policy is reserved whether or not that variant exists.
         if (
-            found is None
-            and folder is not None
+            folder is not None
             and point.path.name.casefold() == name
             and _file_id(point.path.parent) == folder
+        ) or (
+            # Without the policy directory there is no identity, so compare folded spellings.
+            folder is None and os.path.normpath(point.path).casefold() in folded
         ):
             return True
     return False
@@ -859,6 +743,22 @@ def covered(relative: str, granted: list[str]) -> bool:
     )
 
 
+def _below(path: Path, root: Path | str) -> str | None:
+    """Spell a path relative to a root in POSIX form.
+
+    Args:
+        path: Real-directory spelling of a point.
+        root: Worktree root.
+
+    Returns:
+        The relative spelling, ``.`` for the root itself, or None outside it.
+    """
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
 def unauthorized(
     decision: Decision,
     scope: list[core.ScopeEntry],
@@ -894,6 +794,8 @@ def unauthorized(
         }:
             grants.setdefault(identity.key(), []).extend(entry["paths"])
     common = None if session is None else os.path.normpath(session.common)
+    roots = [] if session is None else [os.path.realpath(tree) for tree in session.trees]
+    own = [path for key, paths in grants.items() if key[0] == common for path in paths]
     missing = []
     for effect in decision.protected:
         # Reserved policy edits are never authorized.
@@ -901,26 +803,30 @@ def unauthorized(
         if policy_target(effect, policy):
             missing.append(effect)
             continue
-        # A workspace effect must map to the session repository through some point.
-        if effect.location.workspace and not any(
-            p.repository and os.path.normpath(p.repository.repository.common) == common
-            for p in points
-        ):
-            missing.append(effect)
-            continue
-        # Every non-exempt repository point must be granted under its own root.
         flags = repository_exemptions.exempt(effect.location, exemptions)
+        inside, granted = False, True
         for point, vault in zip(points, flags, strict=True):
-            # The workspace stays protected even if its repository is declared a vault.
-            if (vault and not effect.location.workspace) or point.repository is None:
-                continue
-            # Discovery saw the real directory, so relate its real spelling to the root.
+            # Discovery saw the real directory, so relate its real spelling to each root.
             real = Path(os.path.realpath(point.path.parent), point.path.name)
-            try:
-                relative = real.relative_to(point.repository.repository.root).as_posix()
-            except ValueError:
-                relative = None
+            family = (
+                point.repository is not None
+                and os.path.normpath(point.repository.repository.common) == common
+            )
+            # A spelling below a session worktree root is in the workspace even when a
+            # nested repository holds it, so the session grant must also cover it.
+            nested = None
+            if not family:
+                nested = next((r for t in roots if (r := _below(real, t)) is not None), None)
+            inside = inside or family or nested is not None
+            if nested is not None and not covered(nested, own):
+                granted = False
+            # Only points outside the workspace keep a vault exemption.
+            if (vault and not (family or nested is not None)) or point.repository is None:
+                continue
+            relative = _below(real, point.repository.repository.root)
             if relative is None or not covered(relative, grants.get(point.repository.key(), [])):
-                missing.append(effect)
-                break
+                granted = False
+        # A workspace effect must also reach the workspace through some point.
+        if not granted or (effect.location.workspace and not inside):
+            missing.append(effect)
     return missing
