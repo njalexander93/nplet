@@ -555,10 +555,10 @@ def test_codex_pretool_preserves_failed_core_readiness_code(
         {
             "session_id": "unit-session",
             "tool_use_id": "unit-tool",
-            "tool_input": {},
+            "tool_input": {"command": "touch x"},
             "hook_event_name": "PreToolUse",
             "cwd": str(Path.cwd()),
-            "tool_name": "apply_patch",
+            "tool_name": "Bash",
         }
     )
     assert response == codex.denial("SOURCE_STALE")
@@ -646,10 +646,10 @@ def test_codex_pretool_requires_recorded_ticket_lookup_before_other_tools(
         {
             "session_id": "unit-session",
             "tool_use_id": "unit-tool",
-            "tool_input": {},
+            "tool_input": {"command": "touch x"},
             "hook_event_name": "PreToolUse",
             "cwd": str(Path.cwd()),
-            "tool_name": "apply_patch",
+            "tool_name": "Bash",
         }
     ) == codex.denial("TICKET_READ_REQUIRED")
     assert (
@@ -801,10 +801,10 @@ def test_codex_pretool_records_ready_tool_or_exact_core_denial(
     response = codex.handle(
         {
             "session_id": "unit-session",
-            "tool_input": {},
+            "tool_input": {"command": "touch x"},
             "hook_event_name": "PreToolUse",
             "cwd": str(Path.cwd()),
-            "tool_name": "apply_patch",
+            "tool_name": "Bash",
             "tool_use_id": "read-1",
         }
     )
@@ -1636,3 +1636,51 @@ def test_startup_lookup_state_is_false_outside_every_repository(
     monkeypatch.setattr(core, "project_repository", lambda _path: None)
     observed = carrier.carry_repository({"cwd": str(tmp_path), "session_id": "s"})
     assert codex.startup_lookup_state(observed, ".lookup-required.json") is False
+
+
+@pytest.mark.parametrize("protected", [False, True], ids=["free", "protected"])
+def test_codex_pretool_decides_structured_edits_by_their_effects(
+    monkeypatch: pytest.MonkeyPatch, protected: bool
+) -> None:
+    """Free an edit without protected effects; check authority for a protected one.
+
+    Args:
+        monkeypatch: Pytest fixture that isolates external state for this case.
+        protected: Whether the edit has a protected effect.
+    """
+    gate = common.EditGate(SimpleNamespace(protected=protected), {}, None, Path("p.json"))
+    monkeypatch.setattr(codex, "session_repository", lambda *_args: None)
+    monkeypatch.setattr(common, "edit_gate", lambda *_args: gate)
+    monkeypatch.setattr(codex, "startup_lookup_state", lambda *_args: False)
+    monkeypatch.setattr(codex, "bootstrap", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(codex, "provider_gate", lambda *_args: False)
+    monkeypatch.setattr(codex, "request_for", lambda *_args: {})
+    monkeypatch.setattr(core, "execute", lambda _request: {"ok": True, "code": "OK"})
+
+    def authority(*_args: object) -> None:
+        """Deny the protected effect as outside the recorded scope.
+
+        Args:
+            *_args: Gate, ready result and repository.
+
+        Raises:
+            core.WorkspaceError: Always, with ``SCOPE_REQUIRED``.
+        """
+        raise core.WorkspaceError("SCOPE_REQUIRED")
+
+    monkeypatch.setattr(common, "edit_authority", authority)
+    event = {
+        "session_id": "unit-session",
+        "tool_use_id": "unit-tool",
+        "tool_input": {"command": "x"},
+        "hook_event_name": "PreToolUse",
+        "cwd": str(Path.cwd()),
+        "tool_name": "apply_patch",
+    }
+    if not protected:
+        assert codex.handle(event) == {}
+        return
+    # The hook entry point turns the raised code into the host denial.
+    with pytest.raises(core.WorkspaceError) as captured:
+        codex.handle(event)
+    assert captured.value.code == "SCOPE_REQUIRED"

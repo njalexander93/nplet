@@ -461,7 +461,6 @@ def test_real_cursor_store_lifecycle_owns_sources_note_and_exact_retirement(
     for tool, tool_input, output in (
         ("Shell", {"command": "pwd"}, json.dumps({"exitCode": 0})),
         ("Read", {"file_path": path}, "{}"),
-        ("Edit", {"file_path": path}, "{}"),
         ("Grep", {"pattern": "anything"}, "{}"),
     ):
         native = cursor_native(

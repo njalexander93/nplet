@@ -364,6 +364,7 @@ def test_native_admission_records_actual_tool_before_continuation(native: Native
     host, case = native
     case.create()
     case.ready()
+    case.approve()
     # Admit using native fields and inspect the real committed participant state.
     response = dispatch(host, native_event(host, case, "PreToolUse"))
     assert_decision(host, response, True)
@@ -397,6 +398,7 @@ def test_claude_compaction_preserves_authority_and_pending_work(
     host, case = native
     case.create()
     case.ready()
+    case.approve()
     assert_decision(host, dispatch(host, native_event(host, case, "PreToolUse")), True)
     # Only acknowledged packets grant ordinary tool readiness.
     if not acknowledged:
@@ -542,6 +544,7 @@ def test_native_uncertain_completion_and_stop_retain_pending_work(native: Native
     host, case = native
     case.create()
     case.ready()
+    case.approve()
     assert_decision(host, dispatch(host, native_event(host, case, "PreToolUse")), True)
     # Feed raw text without typed completion evidence through the native result field.
     field = "tool_response" if host == "claude" else "tool_output"
@@ -572,6 +575,7 @@ def test_native_wrong_tool_completion_cannot_settle_original(native: NativeCase)
     host, case = native
     case.create()
     case.ready()
+    case.approve()
     inputs: JsonObject = {"file_path": str(case.root / "src/protected.py"), "content": "protected"}
     dispatch(host, native_event(host, case, "PreToolUse", tool_name="Write", tool_input=inputs))
     failure = native_event(
@@ -782,6 +786,7 @@ def test_native_synchronous_completion_settles_only_admitted_work(native: Native
     host, case = native
     case.create()
     case.ready()
+    case.approve()
     inputs: JsonObject = {
         "file_path": str(case.root / "src/protected.py"),
         "content": "protected",
@@ -1253,6 +1258,10 @@ def test_native_coordinator_self_refresh_recovers_stale_governing_source(
     """
     # Change a governing source in the ready coordinator's packet.
     host, case, base, shell = started_coordinator(native)
+    # The started issue's identities, not the fixture's, approve whole-repository scope.
+    case.base.pop("issue_uuid")
+    case.base.update(base)
+    case.approve()
     with core.Directory.absolute(case.root) as checkout:
         checkout.write("AGENTS.md", b"# Rules\n\nEdited by the coordinator.\n")
     denied = dispatch(host, native_event(host, case, "PreToolUse"))

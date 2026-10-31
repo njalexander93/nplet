@@ -92,7 +92,7 @@ The roadmap records the approved proposal and the repository paths it grants. Th
 lifecycle checks this recorded text only. It does not authenticate the human
 approver or enforce the prose intent of the approval. `ready` reports the result as
 `approval: {"approved": <bool>, "scope": [{"root": <path>, "paths": [...]}]}`.
-Edit admission does not yet act on it.
+Structured edit admission [acts on it](#recorded-approval-and-repository-scope).
 
 **Approval** holds when the roadmap has exactly one each of `**Proposal status:**`,
 `**Proposal revision:**` and `**Approval record:**`, and all of these are true:
@@ -229,34 +229,58 @@ A hook can deny a covered action only when the host actually invokes and honors 
 
 The adapters classify a validated parent operation before requiring task readiness.
 The finite [host operation contracts](host-hooks.md#task-free-parent-operations)
-allow reads, planning helpers, edits outside the project code repositories and named Linear administration
+allow reads, planning helpers, edits without protected effects and named Linear administration
 without a task. They create no task, participant, binding, approval or pending-tool
 record. Independent task-free work also preserves an existing pending ticket read,
 stale packet and unresolved task work.
 
-Protected implementation is every file edit inside a project code repository,
-whatever its extension or purpose, plus package commands and other mutation-capable
-shell commands. The project code repositories are the session's Git repository and
-its linked worktrees. The gate covers only those. A separate clone or sibling
-repository of the same project is gated only by a session rooted inside it.
-[Target repository evidence](#target-repository-identity-and-location-evidence)
-does not change this gate yet. A note, draft or README inside them is protected
-implementation. Unknown or mixed effects remain readiness-gated or unsupported. The [contributor procedure](contributor-workflow.md)
-separately requires explicit roadmap approval. Readiness verifies delivery facts;
-it does not authenticate human approval.
+Protected implementation covers file edits by their effects, plus package commands
+and other mutation-capable shell commands. Only structured edits (`Write`, `Edit`,
+`apply_patch` and Claude `NotebookEdit`) use the effect decision below. Shell
+commands, other tool admission and Codex Desktop keep their current routes; later
+work covers them. A call to one of these edit tools with an unknown or malformed
+input shape, including an extra field, is denied with `INVALID_REQUEST` before any
+lifecycle check, whether or not the session is ready. A `NotebookEdit` names its
+single target in `notebook_path`, requires `new_source` and accepts only
+`cell_id`, `cell_type` and `edit_mode` besides.
 
-A file edit is task-free only when it uses a supported deterministic edit shape
-and every target lies outside the project code repositories. The adapters compare
-both the lexical and the link-resolved spelling of each target with the worktree
-directories. A target is protected when either spelling is inside one, and
-unresolvable targets are protected too. Hard links are not detected; the supported
-edit shapes cannot create them. The shared and personal vaults, and any
-other directory outside the repositories, are not gated by this hook, even when
-they have their own Git history. A session whose working directory is inside no
-Git repository has no project code repositories, so this hook gates none of its
-edits. Host permissions still apply in every case. Raw `.task`, `.git` and host
-control directories inside a repository remain protected by their specific rules
-even after readiness. Managed notes still require owned lifecycle updates.
+Each edit target becomes an effect: create, write, delete, or a move split into
+`move-from` and `move-to`. Each effect is decided as follows:
+
+- **Workspace.** A target in the session repository or its linked worktrees is
+  protected for every file type. A note, draft or README there is implementation.
+  Workspace membership takes precedence over a vault exemption.
+- **Other Git repositories.** Any other repository, including an unknown one, is
+  protected when a side of the effect is text. A binary-only effect is task-free
+  and unknown content is unchecked. Every supported shape writes text, so only
+  deleting or moving away a binary or missing file there is task-free.
+  Such a delete or move-away can also be unchecked, and so task-free, when the
+  per-call budget is exhausted or a heuristic misclassifies the file; for example,
+  a text file over 1 MiB framed like a PDF reads as binary.
+- **Declared vaults.** A point in a repository declared in the
+  [exemption policy](#explicit-vault-exemptions) is task-free.
+- **Outside every repository.** A point outside Git is task-free.
+
+The decision ranks every [location point](#target-repository-identity-and-location-evidence)
+of a target, and the strongest point wins. An exempt point never frees another
+point. A failed point is unchecked and never erases a protected point. Unchecked
+effects, such as [unknown content](#edit-content-classification) or a failed
+point, are not task-gated, but they are not shown to be safe either. One
+unauthorized protected effect denies the whole call.
+
+A protected structured edit needs readiness, then
+[recorded approval and repository scope](#recorded-approval-and-repository-scope).
+A child's structured edit always uses this readiness and authority check. Raw
+`.task`, `.git` and host control directories inside a repository remain protected
+by their specific rules even after readiness. Managed notes still require owned
+lifecycle updates. Host permissions still apply in every case. Hard links are not
+detected; the supported edit shapes cannot create them.
+
+The [exemption policy](#explicit-vault-exemptions) file is reserved. An agent edit
+that targets it in any spelling is denied with `POLICY_ADMINISTRATION`, even
+without a task. Any spelling includes the same existing file and, for a missing
+file, a case-insensitive name in the same directory. The user edits that file directly; there is no approval flow for
+it.
 
 Child identity, scope, provider and delegation restrictions apply before this
 parent classification. Task-free work never broadens child authority. A completion
@@ -328,9 +352,9 @@ siblings or home directories. Git inherits the process environment, including
 `GIT_*` variables. A repository owned by another user fails Git's
 `safe.directory` check and reports `REPOSITORY_MISMATCH`. Hard-link aliases are
 not inventoried. Junction link points are implemented but not yet exercised by
-native Windows tests. No adapter calls `edit_locations` yet, so task admission is
-unchanged.
-Other location facts may be layered on this evidence later.
+native Windows tests. Structured edit admission reads this evidence through
+`edit_effects` and ranks its points as described in
+[task-free and protected work](#task-free-and-protected-work).
 
 ### Explicit vault exemptions
 
@@ -341,7 +365,8 @@ the file. `exempt(location, exemptions)` returns one flag per location point:
 true only when that point's repository `Identity.key()` (normalized common Git
 directory plus `(st_dev, st_ino)`) is declared. It never changes or drops the
 location evidence (workspace flag, points or errors), and a failed point is
-never exempt. No adapter calls it yet, so admission is unchanged.
+never exempt. Structured edit admission loads the policy once per call and
+treats exempt points as task-free; any policy error exempts nothing.
 
 ```json
 {"schema_version": 1, "vaults": [{"common_git_dir": "/Users/me/vault/.git", "common_identity": [16777230, 1234567]}]}
@@ -358,10 +383,9 @@ identity does not match, from the next call. A nested independent repository has
 its own identity and does not inherit its parent's exemption. For a link from
 repository C into vault V, only V's points match.
 
-**Precedence.** When admission applies this policy, workspace membership always
-takes precedence over an exemption. `POLICY` is a reserved configuration target:
-a match never authorizes editing it, and edits are explicit user-authorized
-administration.
+**Precedence.** Workspace membership always takes precedence over an exemption.
+`POLICY` is a reserved configuration target: agent edits to it are denied with
+`POLICY_ADMINISTRATION`, and the user edits it directly.
 
 Any error yields no exemptions. A missing file or directory is an empty set
 without error.
@@ -398,6 +422,42 @@ Declare Git's output exactly, including case; on Windows pass it through
 
 This is user-controlled workflow configuration, not containment against the
 same user.
+
+### Edit content classification
+
+`classify` in `src/nplet/adapters/task_boundary.py` reads the existing side of an
+effect outside the workspace. Workspace targets are never read. The state is
+`text` or `binary` when only that evidence holds, `absent` for a missing path,
+and `unknown` for both, neither, a non-regular or unreadable file, a size change
+during the read or an exhausted budget. Special files are never opened, and a
+link at the resolved path is not followed.
+
+- **Text evidence:** the whole file, at most 1 MiB, is empty, strict UTF-8 with an
+  optional BOM, or strict UTF-16/UTF-32 with a BOM, and has no NUL or C0 control
+  other than tab, LF, CR and FF.
+- **Binary evidence:** heuristics on the first 64 KiB and the last 65,557 bytes:
+  PNG signature with a valid IHDR CRC, JPEG start and end markers, GIF header and
+  trailer, WOFF/WOFF2 declared length equal to the file size, a full ZIP local
+  header with a complete end-of-central-directory record ending the file, or a PDF
+  header with `%%EOF` near the end. These are heuristics, not format validators.
+
+One call inspects at most 16 MiB across all sides. Known `unknown` gaps include
+Latin-1 and other legacy encodings, BOM-less UTF-16/UTF-32 and ASCII-only PDFs.
+
+### Recorded approval and repository scope
+
+A protected structured edit needs the `ready` result's `approval` key, described in
+[roadmap approval and repository scope](#roadmap-approval-and-repository-scope).
+Without approval the edit is denied with `APPROVAL_REQUIRED`; a protected effect
+outside the scope is denied with `SCOPE_REQUIRED`.
+
+The adapter resolves each scope root to its common Git identity, so an entry covers
+linked worktrees. A target matches by its link-resolved path relative to its own
+worktree root, compared byte for byte. Exempt points outside the workspace, failed
+points and non-repository points need no grant. A workspace effect must also reach
+the session repository through some point. A workspace target inside a nested
+repository needs both a grant for its spelling under the session worktree and a
+grant under its own repository.
 
 ### Bootstrap exceptions
 

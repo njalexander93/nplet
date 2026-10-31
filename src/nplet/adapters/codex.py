@@ -532,8 +532,14 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         common.native_token(event.get("session_id"))
         common.native_token(event.get("tool_use_id"))
         core.require(isinstance(event.get("tool_input"), dict), "INVALID_REQUEST")
-        roles = task_boundary.edit_roles(event, session_repository(event))
-        if task_boundary.task_free(common.native_effect(event, "codex"), "codex", roles=roles):
+        repository = session_repository(event)
+        roles = task_boundary.edit_roles(event, repository)
+        gate = common.edit_gate(event, repository)
+        # A structured edit is task-free only without protected effects.
+        if gate is not None:
+            if not gate.decision.protected:
+                return {}
+        elif task_boundary.task_free(common.native_effect(event, "codex"), "codex", roles=roles):
             return {}
         core.require("control" not in roles, "NOT_OWNER")
         if startup_lookup_state(event, ".lookup-required.json"):
@@ -561,6 +567,9 @@ def handle(event: core.JSONObject) -> core.JSONObject:
         if not result["ok"]:
             # Reflect the core readiness failure without starting tool work.
             return denial(result["code"])
+        # A protected structured edit also needs the roadmap's approval and scope.
+        if gate is not None:
+            common.edit_authority(gate, result, repository)
         # Avoid counting the lifecycle transaction itself as pending external work.
         if bootstrap(event, ready=True):
             # A ready lifecycle transaction is not tracked as external work.
