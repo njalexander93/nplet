@@ -120,6 +120,28 @@ def test_unready_parent_unknown_tool_records_nothing(
     assert (case.root / ".task/TEST-1/events.jsonl").read_bytes() == events
 
 
+@pytest.mark.parametrize(("tool", "args"), UNCHECKED)
+def test_ready_parent_unknown_tool_records_nothing(
+    case: Fixture, tool: str, args: JsonObject
+) -> None:
+    """Record no tool-start or settlement for a ready coordinator's unknown tool.
+
+    Args:
+        case: Disposable repository whose coordinator is ready.
+        tool: Unknown native tool name.
+        args: Native tool input.
+    """
+    # Make the coordinator ready and snapshot the state and event log.
+    case.create()
+    case.ready()
+    before = case.state()
+    events = (case.root / ".task/TEST-1/events.jsonl").read_bytes()
+    # The call passes, leaves nothing pending and appends no event.
+    assert call(case, tool, args) == {}
+    assert case.state() == before
+    assert (case.root / ".task/TEST-1/events.jsonl").read_bytes() == events
+
+
 def test_pending_ticket_read_survives_unchecked_call(case: Fixture) -> None:
     """Keep the selected-ticket requirement across an unrelated unchecked call.
 
@@ -149,6 +171,8 @@ def test_pending_ticket_read_survives_unchecked_call(case: Fixture) -> None:
         ("Workflow", {}, "HOST_UNSUPPORTED_CHILD_IDENTITY"),
         ("SubagentHandback", {}, "HOST_UNSUPPORTED_TOOL"),
         ("Monitor", {}, "HOST_UNSUPPORTED_TOOL"),
+        ("PowerShell", {}, "HOST_UNSUPPORTED_TOOL"),
+        ("MultiEdit", {}, "HOST_UNSUPPORTED_TOOL"),
     ],
 )
 def test_ready_parent_closed_tools_stay_denied(

@@ -1430,18 +1430,9 @@ CLAUDE_PARENT_GATED_TOOLS = frozenset({"EnterWorktree", "ExitWorktree"})
 # These run shell commands outside the Bash policy, so they stay closed until shell
 # admission covers them.
 CLAUDE_CLOSED_TOOLS = frozenset({"Monitor", "PowerShell"})
-# Deletes on the configured Linear server stay denied (these five are documented; any
-# other delete_ operation is closed as well); other unlisted operations are unchecked
-# external work that grants no ticket or lifecycle evidence.
-LINEAR_DENIED_OPERATIONS = frozenset(
-    {
-        "delete_comment",
-        "delete_customer",
-        "delete_customer_need",
-        "delete_diff_comment",
-        "delete_status_update",
-    }
-)
+# Claude's retired multi-edit tool has no supported edit shape, so it stays denied rather
+# than bypassing the edit guard as an unknown tool.
+CLAUDE_UNSUPPORTED_EDIT_TOOLS = frozenset({"MultiEdit"})
 # Desktop app servers that keep their own route or stay denied: PR delivery, session
 # management, settings and the turn plan.
 APP_CLOSED_SERVERS = ("ccd_pr", "ccd_session_mgmt", "ccd_settings", "ccd_turn")
@@ -1474,6 +1465,7 @@ def unchecked(event: core.JSONObject, host: str) -> bool:
         return tool.startswith("MCP:") and tool[4:] not in LINEAR_PROVIDER_OPERATIONS
     if host != "claude-code":
         return False
+    # Every tool with its own route, edit or shell admission, or closed status is known.
     known = (
         CLAUDE_SYNC_TOOLS
         | CLAUDE_NO_EFFECT_TOOLS
@@ -1481,6 +1473,7 @@ def unchecked(event: core.JSONObject, host: str) -> bool:
         | CLAUDE_DELEGATION_TOOLS
         | CLAUDE_PARENT_GATED_TOOLS
         | CLAUDE_CLOSED_TOOLS
+        | CLAUDE_UNSUPPORTED_EDIT_TOOLS
         | task_boundary.EDIT_TOOLS
         | {"Bash"}
     )
@@ -1492,7 +1485,8 @@ def unchecked(event: core.JSONObject, host: str) -> bool:
         prefix = f"mcp__{provider}__"
         if tool.startswith(prefix):
             operation = tool[len(prefix) :]
-            # Any other delete_ operation stays closed too, not only the named five.
+            # Every delete_ operation stays closed; other unlisted operations are unchecked
+            # external work that grants no ticket or lifecycle evidence.
             return operation not in LINEAR_PROVIDER_OPERATIONS and not operation.startswith(
                 "delete_"
             )

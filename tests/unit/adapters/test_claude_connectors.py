@@ -98,7 +98,15 @@ def test_provider_admission_accepts_only_allowlisted_configured_operations(
 
 
 @pytest.mark.parametrize(
-    "operation", [*sorted(common.LINEAR_DENIED_OPERATIONS), "delete_attachment"]
+    "operation",
+    [
+        "delete_comment",
+        "delete_customer",
+        "delete_customer_need",
+        "delete_diff_comment",
+        "delete_status_update",
+        "delete_attachment",
+    ],
 )
 def test_provider_admission_rejects_linear_deletes(
     monkeypatch: pytest.MonkeyPatch, operation: str
@@ -192,7 +200,25 @@ def test_unknown_tools_are_unchecked_only_for_a_claude_parent(tool: str, code: s
     assert failure.value.code == code
 
 
-@pytest.mark.parametrize("tool", ["Write", "apply_patch", "Bash", "Monitor", "Workflow"])
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "apply_patch",
+        "Bash",
+        "PowerShell",
+        "Monitor",
+        "Agent",
+        "Task",
+        "TaskOutput",
+        "TaskStop",
+        "SpawnAgent",
+        "Workflow",
+    ],
+)
 def test_edit_shell_and_delegation_tools_are_never_unchecked(tool: str) -> None:
     """Keep edits, shells and delegation off the unchecked route.
 

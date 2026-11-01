@@ -10,10 +10,31 @@ import pytest
 from nplet.adapters import common, cursor
 from nplet.lifecycle import task_workspace as core
 from tests.integration.adapters.native_events import event
+from tests.support import Fixture
 
 pytestmark = pytest.mark.integration
 GITHUB = {"mcp_server_name": "github", "mcp_server_url": "https://api.githubcopilot.com/mcp/"}
 LINEAR = {"mcp_server_name": "linear", "mcp_server_url": "https://mcp.linear.app/mcp"}
+# Browser, computer-use, PDF and app servers, each with one operation and its input.
+EXTERNAL = [
+    ("search_repositories", {"query": "nplet"}, GITHUB),
+    (
+        "navigate",
+        {"url": "https://example.test"},
+        {"mcp_server_name": "browser", "mcp_server_url": "http://127.0.0.1:9/mcp"},
+    ),
+    (
+        "screenshot",
+        {},
+        {"mcp_server_name": "computer-use", "mcp_server_url": "http://127.0.0.1:9/mcp"},
+    ),
+    (
+        "read_pdf",
+        {"path": "/tmp/x.pdf"},
+        {"mcp_server_name": "pdf-tools", "mcp_server_url": "http://127.0.0.1:9/mcp"},
+    ),
+    ("list_groups", {}, {"mcp_server_name": "app", "mcp_server_url": "http://127.0.0.1:9/mcp"}),
+]
 
 
 def specific(checkout: Path, name: str, operation: str, args: object, **server: str) -> dict:
@@ -36,28 +57,28 @@ def specific(checkout: Path, name: str, operation: str, args: object, **server: 
     return observed
 
 
-def test_cursor_external_mcp_is_unchecked_through_every_callback(checkout: Path) -> None:
-    """Admit another server's call with no binding, lifecycle state or event change.
+def external_calls(checkout: Path, operation: str, args: dict, server: dict) -> list:
+    """Build every Cursor callback for one call to a server other than Linear.
 
     Args:
-        checkout: Unregistered checkout whose lifecycle storage must remain absent.
+        checkout: Disposable Git checkout.
+        operation: Server operation name.
+        args: Native tool input object.
+        server: Server name and URL fields.
+
+    Returns:
+        Each envelope paired with its expected adapter response.
     """
-    # Every callback for one call to a server other than Linear passes.
-    args = {"query": "nplet"}
-    generic = event(checkout, "cursor", "MCP:search_repositories", args)
-    calls = [
+    generic = event(checkout, "cursor", f"MCP:{operation}", args)
+    return [
         (generic, {"permission": "allow"}),
         (
-            specific(
-                checkout, "BeforeMCPExecution", "search_repositories", json.dumps(args), **GITHUB
-            ),
+            specific(checkout, "BeforeMCPExecution", operation, json.dumps(args), **server),
             {"permission": "allow"},
         ),
         (
             {
-                **specific(
-                    checkout, "AfterMCPExecution", "search_repositories", json.dumps(args), **GITHUB
-                ),
+                **specific(checkout, "AfterMCPExecution", operation, json.dumps(args), **server),
                 "result_json": "{}",
             },
             {},
@@ -74,11 +95,59 @@ def test_cursor_external_mcp_is_unchecked_through_every_callback(checkout: Path)
             {},
         ),
     ]
-    for observed, expected in calls:
+
+
+@pytest.mark.parametrize(("operation", "args", "server"), EXTERNAL)
+def test_cursor_external_mcp_is_unchecked_through_every_callback(
+    checkout: Path, operation: str, args: dict, server: dict
+) -> None:
+    """Admit another server's call with no binding, lifecycle state or event change.
+
+    Args:
+        checkout: Unregistered checkout whose lifecycle storage must remain absent.
+        operation: Server operation name.
+        args: Native tool input object.
+        server: Server name and URL fields.
+    """
+    # Every callback for one call to a server other than Linear passes unchanged.
+    for observed, expected in external_calls(checkout, operation, args, server):
         before = copy.deepcopy(observed)
         assert cursor.handle(observed) == expected
         assert observed == before
     assert not (checkout / ".task").exists()
+
+
+@pytest.mark.parametrize(("operation", "args", "server"), EXTERNAL[:2])
+def test_cursor_ready_session_external_mcp_records_nothing(
+    operation: str, args: dict, server: dict
+) -> None:
+    """Skip tool-start and settlement for a ready Cursor session's external call.
+
+    Args:
+        operation: Server operation name.
+        args: Native tool input object.
+        server: Server name and URL fields.
+    """
+    # Make a Cursor coordinator ready, then snapshot its state and event log.
+    case = Fixture()
+    case.setUp()
+    case.base["host"] = "cursor"
+    case.base["coordinator"] = core.participant_key(case.base)
+    try:
+        case.create()
+        case.ready()
+        before = case.state()
+        events = (case.root / ".task/TEST-1/events.jsonl").read_bytes()
+        # Every callback passes and leaves both unchanged, with nothing pending.
+        for observed, expected in external_calls(case.root, operation, args, server):
+            observed.update(
+                session_id=case.base["session_id"], conversation_id=case.base["session_id"]
+            )
+            assert cursor.handle(observed) == expected
+        assert case.state() == before
+        assert (case.root / ".task/TEST-1/events.jsonl").read_bytes() == events
+    finally:
+        case.doCleanups()
 
 
 @pytest.mark.parametrize(
@@ -125,6 +194,11 @@ def test_cursor_generic_callback_keeps_linear_and_non_mcp_routes(checkout: Path)
     # A Linear operation keeps its route; its server is checked by beforeMCPExecution.
     for tool, unchecked in (("MCP:save_issue", False), ("MCP:search", False), ("MCP:x", True)):
         assert common.unchecked(event(checkout, "cursor", tool, {}), "cursor") is unchecked
+    # The generic callback carries no server, so a delete passes there and its server is
+    # checked by the blocking beforeMCPExecution callback (tested above).
+    for tool in ("MCP:delete_comment", "MCP:delete_issue"):
+        response = cursor.handle(event(checkout, "cursor", tool, {"id": "c"}))
+        assert response == {"permission": "allow"}
     # A native tool that is not MCP stays outside the unchecked set.
     response = cursor.handle(event(checkout, "cursor", "ApplyPatch", {"patch": "p"}))
     assert response == cursor.failure("preToolUse", "HOST_UNSUPPORTED_TOOL")
@@ -295,4 +369,9 @@ def test_cursor_mirrored_directory_keeps_lifecycle_and_child_checks(
     foreign["cwd"] = str(tmp_path)
     with pytest.raises(core.WorkspaceError, match="REPOSITORY_MISMATCH"):
         common.native_identity(foreign, "cursor")
+    # Only Shell's directory is mirrored; another tool repeating it still moves nothing.
+    for tool in ("Write", "MCP:navigate"):
+        spoofed = {**mirrored(checkout, {"path": "x", "cwd": str(tmp_path)}), "tool_name": tool}
+        with pytest.raises(core.WorkspaceError, match="REPOSITORY_MISMATCH"):
+            common.native_identity(spoofed, "cursor")
     assert not (checkout / ".task").exists()

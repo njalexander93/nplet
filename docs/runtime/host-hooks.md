@@ -581,6 +581,7 @@ In Claude Code, these stay closed or keep their own route:
 - Delegation: `Agent` outside the ready parent's foreground route, `Task`,
   `TaskOutput`, `TaskStop`, `SpawnAgent` and `Workflow`; a parent's `SubagentHandback`.
 - `Monitor` and `PowerShell`, which run shell commands outside the Bash policy.
+- `MultiEdit`, which has no supported edit shape.
 - Every `delete_` operation on a Linear-named server. Other operations on a
   Linear-named server outside the named inventory are unchecked and grant no
   Linear authority; inventory operations keep their server and provenance checks.
@@ -631,8 +632,8 @@ bootstrap, reconciliation and child Shell commands still require the same reposi
 and report `REPOSITORY_MISMATCH`; a redirected lifecycle command is denied rather
 than admitted as ordinary Shell. Other fields remain unsupported.
 
-The canonical shell effect carries a top-level advisory `command_cwd` for
-shell-effect recognition: the event `cwd` for Claude Bash and for Cursor with no
+The canonical shell effect carries a top-level advisory `command_cwd`, reserved for
+shell-effect recognition (no current adapter decision reads it): the event `cwd` for Claude Bash and for Cursor with no
 override or empty `cwd`, or null when Cursor supplies any override. Null means the
 directory is unknown; a recognized relative file effect must not become unchecked
 solely for that reason. Installed Cursor 3.27.22 (macOS 26.6.2) admitted overrides
