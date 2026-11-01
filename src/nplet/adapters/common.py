@@ -1433,51 +1433,36 @@ CLAUDE_CLOSED_TOOLS = frozenset({"Monitor", "PowerShell"})
 # Claude's retired multi-edit tool has no supported edit shape, so it stays denied rather
 # than bypassing the edit guard as an unknown tool.
 CLAUDE_UNSUPPORTED_EDIT_TOOLS = frozenset({"MultiEdit"})
+# Claude tools that never become unchecked when no route admits them: closed shells,
+# unsupported edits, a parent's hand-back and every structured edit tool.
+CLAUDE_DENIED_TOOLS = (
+    CLAUDE_CLOSED_TOOLS
+    | CLAUDE_UNSUPPORTED_EDIT_TOOLS
+    | CLAUDE_CHILD_REPORT_TOOLS
+    | task_boundary.EDIT_TOOLS
+)
 # Desktop app servers that keep their own route or stay denied: PR delivery, session
 # management, settings and the turn plan.
 APP_CLOSED_SERVERS = ("ccd_pr", "ccd_session_mgmt", "ccd_settings", "ccd_turn")
 CURSOR_SYNC_TOOLS = frozenset({"Read", "Write", "Edit", "Grep", "Delete"})
 
 
-def unchecked(event: core.JSONObject, host: str) -> bool:
-    """Decide whether a Claude or Cursor parent call is unchecked external work.
-
-    An unchecked call is admitted with no lifecycle work: no readiness, ticket-read,
-    tool-start or settlement. Every tool with its own route, every edit and shell
-    tool, the delegation tools and closed provider operations stay outside it, as
-    does every child call and every Codex call. In Cursor only a generic ``MCP:``
-    call that names no Linear operation is unchecked.
+def _external_provider_call(tool: str, host: str) -> bool:
+    """Decide whether a parent MCP call with no provider route is unchecked or closed.
 
     Args:
-        event: Native envelope carrying the host's tool name and child flag.
-        host: Explicit adapter identity; Claude Code and Cursor have unchecked calls.
+        tool: Native tool name.
+        host: Explicit adapter identity, Claude Code or Cursor.
 
     Returns:
-        True only for a parent tool that no existing route names.
+        False for a closed desktop app server, a Cursor Linear operation and every
+        operation on a Linear-named Claude server that is a delete or in the inventory.
     """
-    # Children, Codex and every tool with its own route keep their admission.
-    tool = event.get("tool_name")
-    if event.get("child") is True or not isinstance(tool, str):
-        return False
     # Cursor's generic callback carries no server, so a Linear operation keeps its route
     # and the blocking beforeMCPExecution hook checks the server of every other call.
     if host == "cursor":
         return tool.startswith("MCP:") and tool[4:] not in LINEAR_PROVIDER_OPERATIONS
-    if host != "claude-code":
-        return False
-    # Every tool with its own route, edit or shell admission, or closed status is known.
-    known = (
-        CLAUDE_SYNC_TOOLS
-        | CLAUDE_NO_EFFECT_TOOLS
-        | CLAUDE_CHILD_REPORT_TOOLS
-        | CLAUDE_DELEGATION_TOOLS
-        | CLAUDE_PARENT_GATED_TOOLS
-        | CLAUDE_CLOSED_TOOLS
-        | CLAUDE_UNSUPPORTED_EDIT_TOOLS
-        | task_boundary.EDIT_TOOLS
-        | {"Bash"}
-    )
-    if tool in known or tool.startswith(tuple(f"mcp__{s}__" for s in APP_CLOSED_SERVERS)):
+    if tool.startswith(tuple(f"mcp__{s}__" for s in APP_CLOSED_SERVERS)):
         return False
     # A Linear-named server keeps its inventory route and denied deletes whatever its
     # provenance; that route checks provenance before granting Linear authority.
@@ -1493,15 +1478,18 @@ def unchecked(event: core.JSONObject, host: str) -> bool:
     return True
 
 
-def native_tool(event: core.JSONObject, host: str) -> str:
-    """Validate task-free inputs or tools with correlated synchronous completion.
+def _route(event: core.JSONObject, host: str) -> bool:
+    """Validate a native tool call against every route and report unchecked admission.
+
+    Known routes and denials run first; unchecked admission is the final fallback, so a
+    new route here can never be bypassed by it.
 
     Args:
         event: Native envelope carrying the actual tool-use identifier.
         host: Explicit adapter identity.
 
     Returns:
-        The native tool name after validating its supported input shape.
+        True for a valid parent call that no route names; False for a routed call.
 
     Raises:
         core.WorkspaceError: If the tool, child, provider, or async path is unsupported.
@@ -1513,16 +1501,15 @@ def native_tool(event: core.JSONObject, host: str) -> str:
     # Require a structured native tool input for supported synchronous work.
     if not isinstance(args, dict):
         raise core.WorkspaceError("INVALID_REQUEST")
-    # A parent tool that no route names is unchecked external work.
-    if unchecked(event, host):
-        return tool
+    # Only a Claude or Cursor parent can make an unchecked call.
+    parent = event.get("child") is not True and host in {"claude-code", "cursor"}
     # Validate configured provider provenance and exact named parent operations before effects.
     # Existing child restrictions remain narrower than the parent's task-free contracts.
     if tool.startswith(("mcp__", "MCP:")) or event.get("mcp_server") is not None:
         # A parent may read and arm the app's PR monitor; delivery stays with the parent.
         if _app_pr_monitor_tool(event, host) is not None:
             core.require(event.get("child") is not True, "HOST_UNSUPPORTED_PROVIDER")
-            return tool
+            return False
         if host == "claude-code" and tool in {
             "mcp__ccd_turn__update_plan",
             "mcp__ccd_turn__wrap_up",
@@ -1538,7 +1525,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
                 else {"recap", "ask", "blocked", "actions"}
             )
             core.require(bool(args) and set(args) <= allowed, "INVALID_REQUEST")
-            return tool
+            return False
         operation = (
             tool[4:]
             if host == "cursor"
@@ -1546,13 +1533,16 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             and tool[4:] in LINEAR_PROVIDER_OPERATIONS
             else _linear_provider_tool(event, host)
         )
+        # A parent call that no provider route names is unchecked unless it is closed.
+        if operation is None and parent and _external_provider_call(tool, host):
+            return True
         core.require(operation is not None, "HOST_UNSUPPORTED_PROVIDER")
         # A child subagent gets no provider writes; issue delivery stays with the parent.
         core.require(
             event.get("child") is not True or operation in LINEAR_CHILD_OPERATIONS,
             "HOST_UNSUPPORTED_PROVIDER",
         )
-        return tool
+        return False
     # Child and delegation tools require their own verified identity. Only a Claude
     # parent's foreground Agent call has one: SubagentStart joins its child.
     if tool in CLAUDE_DELEGATION_TOOLS:
@@ -1564,7 +1554,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         core.require(args.get("run_in_background", False) is False, "HOST_UNSUPPORTED_BACKGROUND")
         # An isolated child runs in another worktree that this binding does not cover.
         core.require(args.get("isolation") is None, "HOST_UNSUPPORTED_CHILD_IDENTITY")
-        return tool
+        return False
     # The project disables Claude auto-backgrounding; never assume an unconfigured host did so.
     if host == "claude-code" and tool == "Bash":
         core.require(
@@ -1576,7 +1566,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             and args.get("run_in_background", False) is False,
             "HOST_UNSUPPORTED_ASYNC",
         )
-        return tool
+        return False
     # Parent Shell metadata grants neither readiness nor terminal completion evidence.
     if host == "cursor" and tool == "Shell":
         if (
@@ -1586,7 +1576,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         ):
             # An ordinary command may run in any directory; shell-effect recognition checks it.
             cursor_shell_directory(args)
-            return tool
+            return False
         # Children and unsupported inputs retain their existing narrower contract.
         core.require(
             set(args) <= {"command", "working_directory"} and isinstance(args.get("command"), str),
@@ -1599,7 +1589,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
                 project_root(args["working_directory"]) == session_project_root(event),
                 "REPOSITORY_MISMATCH",
             )
-        return tool
+        return False
     # A child may also hand its report back and only a parent moves worktrees; every
     # other host keeps its own set.
     supported = (
@@ -1609,6 +1599,10 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         if host == "claude-code"
         else CURSOR_SYNC_TOOLS
     )
+    # Every route above runs first, so only a Claude parent tool that none of them
+    # names, and that is not closed, falls through to unchecked admission.
+    if host == "claude-code" and parent and tool not in supported | CLAUDE_DENIED_TOOLS:
+        return True
     core.require(tool in supported, "HOST_UNSUPPORTED_TOOL")
     core.require(
         not any(
@@ -1616,7 +1610,46 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         ),
         "HOST_UNSUPPORTED_ASYNC",
     )
-    return tool
+    return False
+
+
+def unchecked(event: core.JSONObject, host: str) -> bool:
+    """Decide whether a Claude or Cursor parent call is unchecked external work.
+
+    An unchecked call is admitted with no lifecycle work: no readiness, ticket-read,
+    tool-start or settlement. The decision is ``native_tool``'s own routing, so every
+    tool with its own route, every edit and shell tool, the delegation tools, closed
+    provider operations, child calls and Codex calls stay outside it.
+
+    Args:
+        event: Native envelope carrying the host's tool name and child flag.
+        host: Explicit adapter identity; Claude Code and Cursor have unchecked calls.
+
+    Returns:
+        True only for a valid parent tool that no existing route names.
+    """
+    # A denied or malformed call is never unchecked; its admission reports the denial.
+    try:
+        return _route(event, host)
+    except core.WorkspaceError:
+        return False
+
+
+def native_tool(event: core.JSONObject, host: str) -> str:
+    """Validate task-free inputs or tools with correlated synchronous completion.
+
+    Args:
+        event: Native envelope carrying the actual tool-use identifier.
+        host: Explicit adapter identity.
+
+    Returns:
+        The native tool name after validating its supported input shape.
+
+    Raises:
+        core.WorkspaceError: If the tool, child, provider, or async path is unsupported.
+    """
+    _route(event, host)
+    return native_token(event["tool_name"])
 
 
 def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
