@@ -112,6 +112,9 @@ def test_untrusted_syntax_yields_no_effects(repos: tuple, command: str) -> None:
         "cp -r dir copy",
         "mv -p README.md moved.md",
         "cp README.md",
+        "rm README.md -f",
+        "cp README.md copy.md -p",
+        "mv README.md moved.md -i",
         'cp -- README.md "$X"',
         "cd dir; mv README.md moved.md",
         "cp README.md logo.png dir/missing",
@@ -283,6 +286,7 @@ def test_cross_repository_states_and_workspace_targets(repos: tuple) -> None:
         ("> out", [("create", "out", ABSENT, UNKNOWN)], False),
         ("cat < README.md > out", [("create", "out", ABSENT, UNKNOWN)], False),
         ("echo hi 2>&1", [], False),
+        ("echo hi 2>&1-", [], False),
         ("echo hi >&-", [], False),
         ("echo hi 3>&-", [], False),
         ("echo hi > /dev/null", [], False),
@@ -476,3 +480,33 @@ def test_workspace_only_copies_and_moves_leave_the_budget(repos: tuple) -> None:
         ("move-to", None, UNKNOWN),
         ("delete", TEXT, None),
     ]
+
+
+def test_earlier_writes_set_later_source_states(repos: tuple, tmp_path: Path) -> None:
+    """A source overwritten, copied or removed earlier in the command keeps that state.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        tmp_path: Disposable parent holding a non-repository directory.
+    """
+    _, other, session = repos
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "logo.png").write_bytes(PNG)
+    src, dst = f"{outside.as_posix()}/logo.png", f"{other.as_posix()}/new.txt"
+    for program in ("cp", "mv"):
+        flat, _ = run(f"echo hello > {src}; {program} {src} {dst}", outside, session)
+        assert flat[-1] == ("create" if program == "cp" else "move-to", dst, ABSENT, TEXT)
+    # A copy carries the original content of a source changed afterwards.
+    flat, _ = run(
+        f"cp {src} {outside.as_posix()}/c.png; echo hi > {src}; "
+        f"cp {outside.as_posix()}/c.png {dst}",
+        outside,
+        session,
+    )
+    assert flat[-1] == ("create", dst, ABSENT, BINARY)
+    # A removed or moved-away source is absent for later reads.
+    flat, _ = run(f"rm {src}; cp {src} {dst}", outside, session)
+    assert flat[-1] == ("create", dst, ABSENT, ABSENT)
+    flat, _ = run(f"mv {src} {outside.as_posix()}/m.png; cp {src} {dst}", outside, session)
+    assert flat[-1] == ("create", dst, ABSENT, ABSENT)

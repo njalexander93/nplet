@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from nplet.adapters import repository_location
-from nplet.adapters.file_content import TEXT, UNKNOWN, Budget, classify
+from nplet.adapters.file_content import ABSENT, TEXT, UNKNOWN, Budget, classify
 from nplet.adapters.task_boundary import Effect, root_test
 from nplet.lifecycle import task_workspace as core
 
@@ -225,7 +225,7 @@ def _operands(program: str, words: list[Word]) -> list[str | None] | None:
     Returns:
         The operands in order, with None for a non-literal or empty operand after
         ``--``; None overall for such a word before ``--``, an unsupported or combined
-        flag, or an operand starting with ``-`` before ``--``.
+        flag, or a word starting with ``-`` after an operand and before ``--``.
     """
     operands: list[str | None] = []
     options = True
@@ -240,7 +240,8 @@ def _operands(program: str, words: list[Word]) -> list[str | None] | None:
         if options and word.text == "--":
             options = False
         elif options and word.text.startswith("-"):
-            if word.text not in FLAGS[program]:
+            # After an operand, BSD treats a flag as an operand and GNU as an option.
+            if word.text not in FLAGS[program] or operands:
                 return None
         else:
             operands.append(word.text)
@@ -278,6 +279,9 @@ def shell_effects(
     effects: list[Effect] = []
     targets: list[str] = []
     opaque = False
+    # Content an earlier recognized write leaves at a path: a state, or the path whose
+    # original content was copied or moved there.
+    contents: dict[Path | None, str | Path] = {}
 
     def locate(base: str | None, target: str) -> tuple[repository_location.Location, Path | None]:
         """Resolve one operand, joining a relative one to the execution directory.
@@ -295,7 +299,7 @@ def shell_effects(
         return location, None if point.error else point.path
 
     def state(path: Path | None) -> str:
-        """Classify one resolved side.
+        """Classify one resolved side as an earlier recognized write leaves it.
 
         Args:
             path: Resolved path, or None when resolution failed.
@@ -303,7 +307,17 @@ def shell_effects(
         Returns:
             The content state; unknown without a path.
         """
-        return UNKNOWN if path is None else classify(path, budget)
+        known = UNKNOWN if path is None else contents.get(path, path)
+        return known if isinstance(known, str) else classify(known, budget)
+
+    def carry(source: Path | None, path: Path | None) -> None:
+        """Record that a path now holds a source's content.
+
+        Args:
+            source: Resolved source path, or None when resolution failed.
+            path: Resolved destination path, or None when resolution failed.
+        """
+        contents[path] = UNKNOWN if source is None else contents.get(source, source)
 
     def add(
         op: str,
@@ -348,9 +362,9 @@ def shell_effects(
         ):
             output = TEXT
         for op, word in redirections:
-            # Input and descriptor duplication or closing open no file for output.
+            # Input and descriptor duplication, moving or closing open no file for output.
             if op == "<" or (
-                op == ">&" and word.kind == LITERAL and (word.text == "-" or word.text.isdigit())
+                op == ">&" and word.kind == LITERAL and re.fullmatch(r"[0-9]+-?|-", word.text)
             ):
                 continue
             # A non-literal or unanchored target is unchecked; /dev/null holds nothing.
@@ -363,6 +377,7 @@ def shell_effects(
             elif word.text != "/dev/null":
                 location, path = locate(base, word.text)
                 add(written(path), location, path, output)
+                contents[path] = output
         name = PROGRAMS.get(program or "")
         # A program that may change directory (cd, a wrapper, a keyword or an unknown
         # program) makes later relative operands unchecked.
@@ -387,6 +402,7 @@ def shell_effects(
                     opaque = True
                 else:
                     add("delete", location, path, None)
+                    contents[path] = ABSENT
             continue
         # A copy or move needs every operand identified; a move still removes each
         # identified source, so only its unresolved operands stay unchecked.
@@ -438,4 +454,7 @@ def shell_effects(
                 add("move-to", location, path, after)
             else:
                 add(written(path), location, path, after)
+            carry(source_path, path)
+            if name == "mv":
+                contents[source_path] = ABSENT
     return Shell(effects, targets, opaque)
