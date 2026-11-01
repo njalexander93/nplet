@@ -510,3 +510,22 @@ def test_earlier_writes_set_later_source_states(repos: tuple, tmp_path: Path) ->
     assert flat[-1] == ("create", dst, ABSENT, ABSENT)
     flat, _ = run(f"mv {src} {outside.as_posix()}/m.png; cp {src} {dst}", outside, session)
     assert flat[-1] == ("create", dst, ABSENT, ABSENT)
+    flat, _ = run(f'mv -- {src} "$DEST"; cp {src} {dst}', outside, session)
+    assert flat[-1] == ("create", dst, ABSENT, ABSENT)
+
+
+def test_carried_copies_read_the_original_once(repos: tuple, tmp_path: Path) -> None:
+    """Copying through a destination reuses the original's classification.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        tmp_path: Disposable parent holding a non-repository directory.
+    """
+    _, other, session = repos
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.md").write_text("text\n")
+    a, b = f"{outside.as_posix()}/a.md", f"{outside.as_posix()}/b.md"
+    command = f"cp {a} {b}; cp {b} {other.as_posix()}/x.md; cp {a} {other.as_posix()}/y.md"
+    shell = shell_effects(command, str(outside), session, Budget(remaining=5))
+    assert [e.after for e in shell.effects] == [TEXT, TEXT, TEXT]

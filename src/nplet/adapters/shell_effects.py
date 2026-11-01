@@ -282,6 +282,8 @@ def shell_effects(
     # Content an earlier recognized write leaves at a path: a state, or the path whose
     # original content was copied or moved there.
     contents: dict[Path | None, str | Path] = {}
+    # Each original file is classified at most once per command.
+    originals: dict[Path, str] = {}
 
     def locate(base: str | None, target: str) -> tuple[repository_location.Location, Path | None]:
         """Resolve one operand, joining a relative one to the execution directory.
@@ -308,7 +310,11 @@ def shell_effects(
             The content state; unknown without a path.
         """
         known = UNKNOWN if path is None else contents.get(path, path)
-        return known if isinstance(known, str) else classify(known, budget)
+        if isinstance(known, str):
+            return known
+        if known not in originals:
+            originals[known] = classify(known, budget)
+        return originals[known]
 
     def carry(source: Path | None, path: Path | None) -> None:
         """Record that a path now holds a source's content.
@@ -415,6 +421,7 @@ def shell_effects(
                     # A directory is content-independent only inside the workspace.
                     if source_location.workspace or source_path is None or not source_path.is_dir():
                         add("move-from", source_location, source_path, None)
+                        contents[source_path] = ABSENT
             continue
         operands = [a for a in arguments if a is not None]
         # A usable destination is required: an existing directory takes many sources.
