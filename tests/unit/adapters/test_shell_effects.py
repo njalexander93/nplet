@@ -81,6 +81,7 @@ def run(
         "rm README.md >",
         "rm README.md; {;",
         "rm README.md; }>out",
+        "[[ a > out ]]",
     ],
 )
 def test_untrusted_syntax_yields_no_effects(repos: tuple, command: str) -> None:
@@ -553,3 +554,28 @@ def test_repeated_and_cyclic_copies_stay_bounded(repos: tuple, tmp_path: Path) -
     command = "; ".join([f"cp {a} {a}"] * 64 + [f"cp {a} {b}; cp {b} {a}"] * 32)
     flat, _ = run(f"{command}; cp {a} {other.as_posix()}/x.md", outside, session)
     assert flat[-1] == ("create", f"{other.as_posix()}/x.md", ABSENT, TEXT)
+
+
+def test_unknown_sources_keep_identified_destinations(repos: tuple) -> None:
+    """An unidentified source still writes unknown content to an identified destination.
+
+    Args:
+        repos: Workspace, other root and session repository.
+    """
+    ws, other, session = repos
+    target = f"{ws.as_posix()}/README.md"
+    assert run(f'cp -- "$SOURCE" {target}', other, session) == (
+        [("write", target, None, UNKNOWN)],
+        True,
+    )
+    assert run(f'mv -- "$SOURCE" {target}', other, session) == (
+        [("move-to", target, None, UNKNOWN)],
+        True,
+    )
+    # Into an existing directory, each identified source keeps its own effect.
+    assert run(f'cp -- "$SOURCE" logo.png {ws.as_posix()}/dir', other, session) == (
+        [("create", f"{ws.as_posix()}/dir/logo.png", None, UNKNOWN)],
+        True,
+    )
+    # Several sources need a directory, so nothing is written to a file destination.
+    assert run(f'cp -- "$SOURCE" logo.png {target}', other, session) == ([], True)

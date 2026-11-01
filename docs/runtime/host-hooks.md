@@ -647,11 +647,13 @@ stands alone: after
 `--` an expanded operand is unchecked while literal ones stay identified, but
 before `--` it could be an option, so the whole argument list is unchecked. A
 directory moved across the workspace boundary keeps only its workspace side. A
-move whose destination is unresolved still removes each identified source. Both
+move whose destination is unresolved still removes each identified source, and an
+unresolved source still writes unknown content to an identified destination. Both
 moved sides use one classification of the source, which is skipped when every
 affected side is in the workspace, and `>&!` always names a file. Known effects beside an unchecked command still apply:
 `python build.py && rm /other/README.md` still decides the delete. Line breaks,
-unquoted backslashes, backticks, `$(`, parentheses, brace groups, comments,
+unquoted backslashes, backticks, `$(`, parentheses, brace groups, `[[`
+conditional expressions, comments,
 here-documents, `<>`, a `<` inside a word or before `N-M>` (a zsh numeric glob)
 and malformed quoting make segmentation untrustworthy, so the
 whole command is unchecked.

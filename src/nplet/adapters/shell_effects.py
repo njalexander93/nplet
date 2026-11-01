@@ -83,8 +83,9 @@ def _tokens(command: str) -> list[Word | str] | None:
             False when the word is a bare brace that opens or closes a group.
         """
         nonlocal text, kind, quoted
-        # A bare brace word groups commands; otherwise record any word in progress.
-        if text in ("{", "}") and not quoted:
+        # A bare brace groups commands and ``[[`` opens a conditional expression whose
+        # ``>`` compares; otherwise record any word in progress.
+        if text in ("{", "}", "[[") and not quoted:
             return False
         if text is not None:
             tokens.append(Word(text, kind))
@@ -422,10 +423,10 @@ def shell_effects(
                     add("delete", location, path, None)
                     keep(path, frozenset({ABSENT}))
             continue
-        # A copy or move needs every operand identified; a move still removes each
-        # identified source, so only its unresolved operands stay unchecked.
+        # Without an identified destination a move still removes each identified source,
+        # so only its unresolved operands stay unchecked.
         known = [a is not None and (base is not None or os.path.isabs(a)) for a in arguments]
-        if not all(known):
+        if not known[-1]:
             opaque = True
             for source, ok in zip(arguments[:-1], known, strict=False):
                 if name == "mv" and source is not None and ok:
@@ -435,11 +436,22 @@ def shell_effects(
                         # The move may fail, so later reads keep the source's content.
                         add("move-from", source_location, source_path, None)
             continue
-        operands = [a for a in arguments if a is not None]
-        # A usable destination is required: an existing directory takes many sources.
-        sources, destination = operands[:-1], operands[-1]
+        # An unidentified source leaves the identified destination's effects in place.
+        destination = str(arguments[-1])
+        sources = [str(a) for a, ok in zip(arguments[:-1], known, strict=False) if ok]
         full = os.path.join(base or "", destination)
         into = os.path.isdir(full)
+        if not all(known):
+            opaque = True
+            # A single unknown source makes a file destination hold unknown content.
+            if not into and len(arguments) == 2 and not destination.endswith("/"):
+                location, path = locate(base, destination)
+                add(written(path) if name == "cp" else "move-to", location, path, UNKNOWN)
+                keep(path, frozenset({UNKNOWN}))
+                continue
+            if not into:
+                continue
+        # A usable destination is required: an existing directory takes many sources.
         names = [Path(source).name for source in sources]
         if (
             not sources

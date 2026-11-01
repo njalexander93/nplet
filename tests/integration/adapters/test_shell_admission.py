@@ -85,6 +85,9 @@ def test_unbound_binary_copy_is_free_but_replacing_text_is_protected(
     assert not (checkout / ".task").exists()
     replace = f"cp {repos.plain.as_posix()}/a.png {repos.c.as_posix()}/src/t.md"
     assert not allowed(host, shell(checkout, host, replace, "protected"))
+    unknown = f'cp -- "$SOURCE" {repos.c.as_posix()}/src/t.md'
+    assert not allowed(host, shell(checkout, host, unknown, "unknown-source"))
+    assert allowed(host, shell(checkout, host, f"[[ a > {repos.c.as_posix()}/src/t.md ]]", "test"))
     # Text written to the binary source earlier in the command is what gets copied.
     (repos.plain / "a.png").write_bytes(PNG)
     rewrite = (
