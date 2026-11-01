@@ -57,6 +57,8 @@ def run(
     flat = [(e.op, str(e.location.points[0].path), e.before, e.after) for e in shell.effects]
     # Every effect's target spelling is reported for the caller's control check.
     assert shell.targets == [target for _, target, _, _ in flat]
+    # Compare spellings with forward slashes so Windows paths match the commands' form.
+    flat = [(op, Path(target).as_posix(), before, after) for op, target, before, after in flat]
     return flat, shell.opaque
 
 
@@ -184,7 +186,9 @@ def test_literal_operands_yield_effects(
         expected: Operation, relative target, before and after per effect.
     """
     _, other, session = repos
-    want = [(op, str(other / target), before, after) for op, target, before, after in expected]
+    want = [
+        (op, (other / target).as_posix(), before, after) for op, target, before, after in expected
+    ]
     assert run(command, other, session) == (want, False)
 
 
@@ -196,29 +200,35 @@ def test_cross_repository_states_and_workspace_targets(repos: tuple) -> None:
     """
     ws, other, session = repos
     # A binary copy into another repository and a text replacement there.
-    assert run(f"cp {ws}/logo.png {other}/new.png", None, session) == (
-        [("create", f"{other}/new.png", ABSENT, BINARY)],
+    assert run(f"cp {ws.as_posix()}/logo.png {other.as_posix()}/new.png", None, session) == (
+        [("create", f"{other.as_posix()}/new.png", ABSENT, BINARY)],
         False,
     )
-    assert run(f"cp {ws}/README.md {other}/README.md", None, session) == (
-        [("write", f"{other}/README.md", TEXT, TEXT)],
+    assert run(f"cp {ws.as_posix()}/README.md {other.as_posix()}/README.md", None, session) == (
+        [("write", f"{other.as_posix()}/README.md", TEXT, TEXT)],
         False,
     )
     # Workspace targets have no before state, but a copied source is still classified.
-    assert run(f"rm {ws}/README.md {ws}/dir", None, session) == (
-        [("delete", f"{ws}/README.md", None, None), ("delete", f"{ws}/dir", None, None)],
+    assert run(f"rm {ws.as_posix()}/README.md {ws.as_posix()}/dir", None, session) == (
+        [
+            ("delete", f"{ws.as_posix()}/README.md", None, None),
+            ("delete", f"{ws.as_posix()}/dir", None, None),
+        ],
         False,
     )
-    assert run(f"cp {other}/logo.png {ws}/x.png", None, session) == (
-        [("create", f"{ws}/x.png", None, BINARY)],
+    assert run(f"cp {other.as_posix()}/logo.png {ws.as_posix()}/x.png", None, session) == (
+        [("create", f"{ws.as_posix()}/x.png", None, BINARY)],
         False,
     )
     # A directory moves only within the workspace.
-    assert run(f"mv {ws}/dir {ws}/moved", None, session) == (
-        [("move-from", f"{ws}/dir", None, None), ("move-to", f"{ws}/moved", None, UNKNOWN)],
+    assert run(f"mv {ws.as_posix()}/dir {ws.as_posix()}/moved", None, session) == (
+        [
+            ("move-from", f"{ws.as_posix()}/dir", None, None),
+            ("move-to", f"{ws.as_posix()}/moved", None, UNKNOWN),
+        ],
         False,
     )
-    assert run(f"mv {ws}/dir {other}/moved", None, session) == ([], True)
+    assert run(f"mv {ws.as_posix()}/dir {other.as_posix()}/moved", None, session) == ([], True)
 
 
 @pytest.mark.parametrize(
@@ -260,7 +270,9 @@ def test_redirections_write_their_literal_targets(
         opaque: Whether part of the command is unchecked.
     """
     _, other, session = repos
-    want = [(op, str(other / target), before, after) for op, target, before, after in expected]
+    want = [
+        (op, (other / target).as_posix(), before, after) for op, target, before, after in expected
+    ]
     assert run(command, other, session) == (want, opaque)
 
 
@@ -276,8 +288,8 @@ def test_every_segment_is_analyzed(repos: tuple, separator: str) -> None:
     command = f"rm README.md {separator} rm logo.png"
     assert run(command, other, session) == (
         [
-            ("delete", f"{other}/README.md", TEXT, None),
-            ("delete", f"{other}/logo.png", BINARY, None),
+            ("delete", f"{other.as_posix()}/README.md", TEXT, None),
+            ("delete", f"{other.as_posix()}/logo.png", BINARY, None),
         ],
         False,
     )
@@ -290,8 +302,8 @@ def test_unknown_programs_keep_later_effects(repos: tuple) -> None:
         repos: Workspace, other root and session repository.
     """
     ws, other, session = repos
-    assert run(f"python build.py && rm {other}/README.md", ws, session) == (
-        [("delete", f"{other}/README.md", TEXT, None)],
+    assert run(f"python build.py && rm {other.as_posix()}/README.md", ws, session) == (
+        [("delete", f"{other.as_posix()}/README.md", TEXT, None)],
         True,
     )
 
@@ -307,13 +319,13 @@ def test_directory_changes_and_missing_cwd_leave_relative_operands_unchecked(
     _, other, session = repos
     assert run("cd dir && rm README.md", other, session) == ([], True)
     assert run("pushd dir; echo x > out", other, session) == ([], True)
-    assert run(f"cd dir && rm {other}/README.md", other, session) == (
-        [("delete", f"{other}/README.md", TEXT, None)],
+    assert run(f"cd dir && rm {other.as_posix()}/README.md", other, session) == (
+        [("delete", f"{other.as_posix()}/README.md", TEXT, None)],
         False,
     )
     assert run("rm README.md", None, session) == ([], True)
-    assert run(f"rm {other}/README.md", None, session) == (
-        [("delete", f"{other}/README.md", TEXT, None)],
+    assert run(f"rm {other.as_posix()}/README.md", None, session) == (
+        [("delete", f"{other.as_posix()}/README.md", TEXT, None)],
         False,
     )
 
@@ -343,8 +355,8 @@ def test_zsh_forced_overwrite_names_its_target(repos: tuple, operator: str) -> N
         operator: Forced-overwrite redirection.
     """
     ws, other, session = repos
-    assert run(f"echo hi {operator} {other}/README.md", ws, session) == (
-        [("write", f"{other}/README.md", TEXT, TEXT)],
+    assert run(f"echo hi {operator} {other.as_posix()}/README.md", ws, session) == (
+        [("write", f"{other.as_posix()}/README.md", TEXT, TEXT)],
         False,
     )
 
@@ -358,4 +370,16 @@ def test_zsh_globs_and_command_paths_are_unchecked(repos: tuple, command: str) -
         command: Command template.
     """
     ws, other, session = repos
-    assert run(command.format(other=other), ws, session) == ([], True)
+    assert run(command.format(other=other.as_posix()), ws, session) == ([], True)
+
+
+@pytest.mark.parametrize("command", ["cp", "mv -f", "cp --", "rm -f"])
+def test_programs_without_operands_are_unchecked(repos: tuple, command: str) -> None:
+    """A program with no operands yields no effect instead of failing.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        command: Program and flags only.
+    """
+    ws, _, session = repos
+    assert run(command, ws, session) == ([], True)

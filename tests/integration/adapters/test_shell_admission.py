@@ -76,11 +76,14 @@ def test_unbound_binary_copy_is_free_but_replacing_text_is_protected(
     (repos.plain / "a.png").write_bytes(PNG)
     (repos.c / "src/t.md").write_text("text")
     for index, command in enumerate(
-        (f"cp {repos.plain}/a.png {repos.c}/src/b.png", f"mv {repos.plain}/a.png {repos.c}/src/")
+        (
+            f"cp {repos.plain.as_posix()}/a.png {repos.c.as_posix()}/src/b.png",
+            f"mv {repos.plain.as_posix()}/a.png {repos.c.as_posix()}/src/",
+        )
     ):
         assert allowed(host, shell(checkout, host, command, f"free-{index}"))
     assert not (checkout / ".task").exists()
-    replace = f"cp {repos.plain}/a.png {repos.c}/src/t.md"
+    replace = f"cp {repos.plain.as_posix()}/a.png {repos.c.as_posix()}/src/t.md"
     assert not allowed(host, shell(checkout, host, replace, "protected"))
 
 
@@ -107,7 +110,7 @@ def test_shell_effects_match_structured_edit_outcomes(
         Returns:
             The shell and structured native responses.
         """
-        command = f"rm -f {target.relative_to(root)}"
+        command = f"rm -f {target.relative_to(root).as_posix()}"
         return shell(root, host, command, call, bound=True), write(
             root, host, target, call + "-write", bound=True
         )
@@ -136,7 +139,7 @@ def test_shell_policy_and_control_targets_are_denied_under_whole_scope(
     root = case.root
     case.approve({root: ["./"], repos.policy.parent: ["./"]})
     before = task_store_snapshot(root)
-    response = shell(root, host, f"rm -f {repos.policy}", "policy", bound=True)
+    response = shell(root, host, f"rm -f {repos.policy.as_posix()}", "policy", bound=True)
     assert "POLICY_ADMINISTRATION" in str(response)
     for index, command in enumerate(("rm -f .task/x", "rm -f .git/config")):
         assert "NOT_OWNER" in str(shell(root, host, command, f"control-{index}", bound=True))
@@ -163,9 +166,9 @@ def test_unbound_shell_gates_only_recognized_protected_parts(
     # A recognized protected part is enforced whatever the rest of the command does.
     for index, command in enumerate(
         (
-            f"python build.py && rm {repos.c}/README.md",
+            f"python build.py && rm {repos.c.as_posix()}/README.md",
             "python gen.py > src/out.txt",
-            f"python gen.py > {repos.c}/README.md",
+            f"python gen.py > {repos.c.as_posix()}/README.md",
         )
     ):
         assert not allowed(host, shell(checkout, host, command, f"protected-{index}"))
@@ -183,7 +186,7 @@ def test_cursor_relative_operand_resolves_from_the_execution_directory(
     (checkout / "sub").mkdir()
     (checkout / "sub/logo.png").write_bytes(PNG)
     (checkout / "logo.png").write_text("text")
-    command = f"cp logo.png {repos.c}/src/logo.png"
+    command = f"cp logo.png {repos.c.as_posix()}/src/logo.png"
     # The binary source beside the execution directory makes the copy free.
     sub = str(checkout / "sub")
     assert allowed("cursor", shell(checkout, "cursor", command, "binary", directory=sub))
@@ -235,6 +238,8 @@ def test_altered_lifecycle_command_stays_behind_the_ticket_read(checkout: Path) 
     assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", command, "lifecycle"))
     quoted = "python -m nplet.life''cycle.task_workspace"
     assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", quoted, "quoted"))
+    escaped = "python -m nplet.life\\cycle.task_workspace"
+    assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", escaped, "escaped"))
     assert allowed("claude", shell(checkout, "claude", "python build.py", "free"))
 
 
@@ -255,7 +260,9 @@ def test_free_shell_preserves_stale_readiness_and_pending_records(
     # A scope change without a fresh read and acknowledgment leaves readiness stale.
     case.approve({root: ["./"]}, refresh=False)
     before = task_store_snapshot(root)
-    for index, command in enumerate([*UNCHECKED, f"cp {repos.plain}/a.png {repos.c}/src/b.png"]):
+    for index, command in enumerate(
+        [*UNCHECKED, f"cp {repos.plain.as_posix()}/a.png {repos.c.as_posix()}/src/b.png"]
+    ):
         assert allowed(host, shell(root, host, command, f"free-{index}", bound=True))
     assert task_store_snapshot(root) == before
     assert not allowed(host, shell(root, host, "rm -f src/x.py", "protected", bound=True))

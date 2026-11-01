@@ -348,7 +348,7 @@ def shell_effects(
             opaque = opaque or (bool(words) and program not in NO_EFFECT)
             continue
         operands = _operands(name, words[1:])
-        if operands is None or (base is None and not all(map(os.path.isabs, operands))):
+        if not operands or (base is None and not all(map(os.path.isabs, operands))):
             opaque = True
             continue
         # Each removed operand is deleted; a directory needs workspace membership.
