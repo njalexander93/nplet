@@ -146,6 +146,11 @@ def test_cursor_ready_session_external_mcp_records_nothing(
             assert cursor.handle(observed) == expected
         assert case.state() == before
         assert (case.root / ".task/TEST-1/events.jsonl").read_bytes() == events
+        # The same identity does reach the ready coordinator: ordinary Shell is recorded.
+        shell = event(case.root, "cursor", "Shell", {"command": "true", "cwd": "", "timeout": 1})
+        shell.update(session_id=case.base["session_id"], conversation_id=case.base["session_id"])
+        assert cursor.handle(shell) == {"permission": "allow"}
+        assert case.state()["participants"][case.base["coordinator"]]["pending"]
     finally:
         case.doCleanups()
 
