@@ -140,7 +140,7 @@ def test_cursor_generic_callback_keeps_linear_and_non_mcp_routes(checkout: Path)
 def test_cursor_shell_effect_carries_its_command_directory(
     checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pass an existing absolute Shell directory to effect recognition, else None.
+    """Pass the event directory to effect recognition, or None when Cursor overrides it.
 
     Args:
         checkout: Unregistered checkout used as the session directory.
@@ -150,8 +150,10 @@ def test_cursor_shell_effect_carries_its_command_directory(
     plain = tmp_path / "plain"
     plain.mkdir()
     cases = [
-        ({"working_directory": str(plain)}, str(plain)),
-        ({"cwd": str(plain), "timeout": 30000}, str(plain)),
+        # Installed Cursor ran commands outside a requested directory, so any override
+        # leaves the directory unknown.
+        ({"working_directory": str(plain)}, None),
+        ({"cwd": str(plain), "timeout": 30000}, None),
         ({"working_directory": "plain"}, None),
         ({"working_directory": str(tmp_path / "missing")}, None),
         ({"working_directory": ""}, None),
@@ -235,7 +237,7 @@ def test_cursor_shell_with_mirrored_directory_is_ordinary_work(
     subprocess.run(["git", "init", "-q", str(other)], check=True)
     plain = tmp_path / "plain"
     plain.mkdir()
-    for directory, known in ((str(other), True), (str(plain), True), ("../../other", False)):
+    for directory in (str(other), str(plain), "../../other"):
         args = {"command": "pwd", "cwd": directory, "timeout": 30000}
         calls = [
             (mirrored(checkout, args), {"permission": "allow"}),
@@ -256,7 +258,7 @@ def test_cursor_shell_with_mirrored_directory_is_ordinary_work(
         identity = common.native_identity(mirrored(checkout, args), "cursor")
         assert identity["cwd"] == str(checkout)
         effect = common.native_effect(identity, "cursor")
-        assert effect["command_cwd"] == (directory if known else None)
+        assert effect["command_cwd"] is None
         assert effect["repository"] == identity["repository"]
     assert not (checkout / ".task").exists()
 

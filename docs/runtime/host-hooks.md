@@ -601,15 +601,16 @@ that shares a Linear operation name is therefore denied. Non-MCP Cursor tools
 outside the supported set stay denied, and children get no MCP calls.
 
 The routes below record observed coverage; this inventory is not an allowlist.
-Cursor rows were observed on Cursor 3.27.22 (macOS 26.6.2) with a GitHub MCP read;
-Claude Code rows remain pending.
+Cursor rows were observed on Cursor 3.27.22 (macOS 26.6.2); Claude Code rows in a
+fresh unbound desktop session started in the worktree.
 
 | Host | Route | Adapter tests | Installed host |
 | --- | --- | --- | --- |
-| Claude Code | Browser (`mcp__claude-in-chrome__*`), computer use (`mcp__computer-use__*`), PDF/document MCP servers, other desktop app servers such as `ccd_sidebar`, and built-in tools such as `WebFetch`: unchecked by exact native `tool_name` | Covered, including unbound and unready parents | Pending |
-| Claude Code | `EnterWorktree`, `ExitWorktree`: readiness-gated pending work | Covered | Pending |
-| Claude Code | Kept-closed set above: denied for a ready parent | Covered | Pending |
-| Cursor | App/MCP servers other than Linear through the generic and MCP-specific callbacks | Covered | Observed: all four callbacks admitted, no task created; a Linear delete is denied at `beforeMCPExecution` |
+| Claude Code | Browser (`mcp__claude-in-chrome__*`), computer use (`mcp__computer-use__*`), PDF/document MCP servers, other desktop app servers such as `ccd_sidebar`, and built-in tools such as `WebFetch`: unchecked by exact native `tool_name` | Covered, including unbound and unready parents | Observed only for `WebFetch` (public font CSS) and `mcp__Claude_Browser__preview_start`: admitted with no task. Browser extension, computer use, PDF/document MCP and other app servers not observed |
+| Claude Code | Native `Read` and `Write` of files outside the repository (not unchecked routes; the structured-edit guard applies) | Covered | Observed admitted with no task: `Read` of an external PDF and `Write` of an external SVG. PDF rendering failed because the host lacks `pdftoppm` |
+| Claude Code | `EnterWorktree`, `ExitWorktree`: readiness-gated pending work | Covered | Not observed |
+| Claude Code | Kept-closed set above: denied for a ready parent | Covered | Not observed |
+| Cursor | App/MCP servers other than Linear through the generic and MCP-specific callbacks | Covered | Observed: all four callbacks admitted, no task created; a Linear delete, and GitHub's same-named `list_issues`, are denied at `beforeMCPExecution` |
 | Cursor | Browser, computer use and PDF/document routes: unchecked only when delivered as MCP calls; a non-MCP route stays denied | Covered through the generic MCP route | Not observed separately |
 
 #### Finite shell reads
@@ -631,12 +632,17 @@ and report `REPOSITORY_MISMATCH`; a redirected lifecycle command is denied rathe
 than admitted as ordinary Shell. Other fields remain unsupported.
 
 The canonical shell effect carries a top-level advisory `command_cwd` for
-shell-effect recognition: the event `cwd` when the command runs there (Claude Bash,
-or Cursor with no override or empty `cwd`), an existing absolute Cursor override, or
-null for a relative or nonexistent override, whose relative operands are then
-unchecked. It never replaces the event `cwd` or the session's recorded repository.
-Whether Claude Bash reports `cwd` after an in-shell `cd` is not yet verified on an
-installed host.
+shell-effect recognition: the event `cwd` for Claude Bash and for Cursor with no
+override or empty `cwd`, or null when Cursor supplies any override. Null means the
+directory is unknown; a recognized relative file effect must not become unchecked
+solely for that reason. Installed Cursor 3.27.22 (macOS 26.6.2) admitted overrides
+naming another repository, no repository and a relative path, and reported each one
+unchanged in both callback `cwd` fields, yet `pwd` printed the workspace root each
+time. A requested override therefore does not show where a command runs, and the
+base for a relative override is unobserved. `command_cwd` never replaces the event
+`cwd` or the session's recorded repository. Whether Claude Bash reports `cwd` after
+an in-shell `cd` is not verified: on an installed host the composed `cd` command was
+denied before execution, and a plain `pwd` reported the session directory.
 
 Metadata validation grants no readiness or synchronous completion guarantee.
 Only the finite reads below are task-free and create no pending lifecycle work.

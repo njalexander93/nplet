@@ -1637,9 +1637,9 @@ def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
         otherwise the original event, including all Codex input metadata. The effect
         carries a top-level ``command_cwd``: advisory input for shell-effect
         recognition, never a replacement for the event's ``cwd``
-        or repository. It is the event's ``cwd`` when the command runs there, a
-        Cursor directory override that names an existing absolute directory, or None
-        for a relative or nonexistent override, whose relative operands are unchecked.
+        or repository. It is the event's ``cwd`` when no Cursor directory override
+        is supplied, or None when one is: the directory is then unknown, and a
+        recognized relative file effect must not become unchecked solely for that.
 
     Raises:
         core.WorkspaceError: If Claude or Cursor native tool validation fails.
@@ -1656,11 +1656,10 @@ def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
             "tool_input": {"command": event["tool_input"]["command"]},
             "command_cwd": event.get("cwd"),
         }
-        # Only an existing absolute Cursor override says where relative operands resolve.
-        directory = cursor_shell_directory(event["tool_input"]) if host == "cursor" else None
-        if directory is not None:
-            known = os.path.isabs(directory) and os.path.isdir(directory)
-            effect["command_cwd"] = directory if known else None
+        # Installed Cursor reported overrides it did not run in, so an override leaves
+        # the command's directory unknown.
+        if host == "cursor" and cursor_shell_directory(event["tool_input"]) is not None:
+            effect["command_cwd"] = None
         return effect
     return event
 
