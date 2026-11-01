@@ -510,8 +510,9 @@ def test_earlier_writes_set_later_source_states(repos: tuple, tmp_path: Path) ->
     assert flat[-1] == ("create", dst, ABSENT, ABSENT)
     flat, _ = run(f"mv {src} {outside.as_posix()}/m.png; cp {src} {dst}", outside, session)
     assert flat[-1] == ("create", dst, ABSENT, ABSENT)
-    flat, _ = run(f'mv -- {src} "$DEST"; cp {src} {dst}', outside, session)
-    assert flat[-1] == ("create", dst, ABSENT, ABSENT)
+    # A move to an unresolved destination may fail, so known text is never erased.
+    flat, _ = run(f'echo hi > {src}; mv -- {src} "$DEST"; cp {src} {dst}', outside, session)
+    assert flat[-1] == ("create", dst, ABSENT, TEXT)
 
 
 def test_carried_copies_read_the_original_once(repos: tuple, tmp_path: Path) -> None:

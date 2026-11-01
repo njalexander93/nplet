@@ -420,8 +420,8 @@ def shell_effects(
                     source_location, source_path = locate(base, source)
                     # A directory is content-independent only inside the workspace.
                     if source_location.workspace or source_path is None or not source_path.is_dir():
+                        # The move may fail, so later reads keep the source's content.
                         add("move-from", source_location, source_path, None)
-                        contents[source_path] = ABSENT
             continue
         operands = [a for a in arguments if a is not None]
         # A usable destination is required: an existing directory takes many sources.
