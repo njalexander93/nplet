@@ -1455,14 +1455,19 @@ def _external_provider_call(tool: str, host: str) -> bool:
         host: Explicit adapter identity, Claude Code or Cursor.
 
     Returns:
-        False for a closed desktop app server, a Cursor Linear operation and every
-        operation on a Linear-named Claude server that is a delete or in the inventory.
+        False for a non-MCP tool name, a closed desktop app server, a Cursor Linear
+        operation and every operation on a Linear-named Claude server that is a delete
+        or in the inventory.
     """
     # Cursor's generic callback carries no server, so a Linear operation keeps its route
     # and the blocking beforeMCPExecution hook checks the server of every other call.
     if host == "cursor":
         return tool.startswith("MCP:") and tool[4:] not in LINEAR_PROVIDER_OPERATIONS
-    if tool.startswith(tuple(f"mcp__{s}__" for s in APP_CLOSED_SERVERS)):
+    # Only an MCP tool name is external; a native tool carrying server metadata keeps
+    # its own route and is denied here rather than escaping it.
+    if not tool.startswith("mcp__") or tool.startswith(
+        tuple(f"mcp__{s}__" for s in APP_CLOSED_SERVERS)
+    ):
         return False
     # A Linear-named server keeps its inventory route and denied deletes whatever its
     # provenance; that route checks provenance before granting Linear authority.

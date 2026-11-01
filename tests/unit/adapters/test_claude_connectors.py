@@ -228,6 +228,25 @@ def test_edit_shell_and_delegation_tools_are_never_unchecked(tool: str) -> None:
     assert not common.unchecked({"tool_name": tool, "tool_input": {}}, "claude-code")
 
 
+@pytest.mark.parametrize("tool", ["Write", "Bash", "Agent", "WebFetch"])
+def test_native_tool_with_server_metadata_keeps_its_guard(tool: str) -> None:
+    """Deny a native tool name that carries MCP server metadata instead of unchecking it.
+
+    Args:
+        tool: A native tool name with its own route, or none.
+    """
+    event: JsonObject = {
+        "tool_name": tool,
+        "tool_input": {"command": "true"},
+        "tool_use_id": "c",
+        "mcp_server": {"name": "other", "source": "user"},
+    }
+    assert not common.unchecked(event, "claude-code")
+    with pytest.raises(core.WorkspaceError) as failure:
+        common.native_tool(event, "claude-code")
+    assert failure.value.code == "HOST_UNSUPPORTED_PROVIDER"
+
+
 def test_codex_calls_are_never_unchecked() -> None:
     """Keep every Codex call on its own admission, whatever its tool name."""
     assert not common.unchecked({"tool_name": "mcp__browser__navigate", "tool_input": {}}, "codex")
