@@ -79,6 +79,8 @@ def run(
         "# rm README.md",
         "rm README.md <>f",
         "rm README.md >",
+        "rm README.md; {;",
+        "rm README.md; }>out",
     ],
 )
 def test_untrusted_syntax_yields_no_effects(repos: tuple, command: str) -> None:
