@@ -181,6 +181,8 @@ def test_native_pre_decides_shell_commands_by_recognized_effects(
         ("src/nplet/lifecycle/task_workspace.py --request-json '{}'", True),
         ("& 'C:\\nplet\\python.exe' 'C:\\nplet\\bootstrap.py'", True),
         ("python src/nplet/life\\cycle/task_workspace.py", True),
+        ("python -m pytest; python src/nplet/lifecycle/task_workspace.py", True),
+        ("python -c 'pass' && py -m nplet.lifecycle.task_workspace", True),
     ],
 )
 def test_lifecycle_invocation_matches_command_position(command: str, expected: bool) -> None:

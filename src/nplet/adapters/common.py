@@ -1630,10 +1630,12 @@ def lifecycle_invocation(command: str) -> bool:
         args = iter(words[start + 1 :] if start is not None else [])
         for word in args:
             # The first non-option names the script; ``-m`` and ``-c`` end the options.
-            if word == "-m":
-                return next(args, "").startswith("nplet.lifecycle")
-            if word == "-c":
-                return "nplet.lifecycle" in next(args, "")
+            if word in ("-m", "-c"):
+                target = next(args, "")
+                module = target.startswith("nplet.lifecycle")
+                if module if word == "-m" else "nplet.lifecycle" in target:
+                    return True
+                break
             if word in ("-X", "-W"):
                 next(args, "")
             elif not word.startswith("-"):
