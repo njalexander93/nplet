@@ -163,3 +163,31 @@ def test_native_pre_decides_shell_commands_by_recognized_effects(
     event = {**native_event("Shell", {"command": command}), "child": child}
     assert common.native_pre(event, "cursor") is None
     assert seen == calls
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("echo nplet.lifecycle", False),
+        ("python -m compileall src/nplet/lifecycle/task_workspace.py", False),
+        ("ruff check src/nplet/lifecycle/task_workspace.py", False),
+        ("python -c 'print(1)'", False),
+        ("python -X utf8 build.py task_workspace.py", False),
+        (".venv/bin/python src/nplet/lifecycle/task_workspace.py --request-json '{}'", True),
+        ("poetry run python3 -I src/nplet/lifecycle/task_work''space.py", True),
+        ("python -X utf8 src/nplet/adapters/bootstrap.py", True),
+        ("py -m nplet.lifecycle.task_workspace", True),
+        ("python -c 'import nplet.lifecycle'", True),
+        ("src/nplet/lifecycle/task_workspace.py --request-json '{}'", True),
+        ("& 'C:\\nplet\\python.exe' 'C:\\nplet\\bootstrap.py'", True),
+        ("python src/nplet/life\\cycle/task_workspace.py", True),
+    ],
+)
+def test_lifecycle_invocation_matches_command_position(command: str, expected: bool) -> None:
+    """Match entry points the command runs, not names given only as data.
+
+    Args:
+        command: Native shell command.
+        expected: Whether the command may run a lifecycle entry point.
+    """
+    assert common.lifecycle_invocation(command) is expected

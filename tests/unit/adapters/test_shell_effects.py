@@ -212,7 +212,7 @@ def test_cross_repository_states_and_workspace_targets(repos: tuple) -> None:
         [("write", f"{other.as_posix()}/README.md", TEXT, TEXT)],
         False,
     )
-    # Workspace targets have no before state, but a copied source is still classified.
+    # Workspace targets have no before state, and a copy into the workspace reads nothing.
     assert run(f"rm {ws.as_posix()}/README.md {ws.as_posix()}/dir", None, session) == (
         [
             ("delete", f"{ws.as_posix()}/README.md", None, None),
@@ -221,7 +221,7 @@ def test_cross_repository_states_and_workspace_targets(repos: tuple) -> None:
         False,
     )
     assert run(f"cp {other.as_posix()}/logo.png {ws.as_posix()}/x.png", None, session) == (
-        [("create", f"{ws.as_posix()}/x.png", None, BINARY)],
+        [("create", f"{ws.as_posix()}/x.png", None, UNKNOWN)],
         False,
     )
     # A directory moves only within the workspace.
@@ -453,4 +453,26 @@ def test_move_source_is_classified_once(repos: tuple) -> None:
     assert [(e.op, e.before, e.after) for e in shell.effects] == [
         ("move-from", TEXT, None),
         ("move-to", ABSENT, TEXT),
+    ]
+
+
+def test_workspace_only_copies_and_moves_leave_the_budget(repos: tuple) -> None:
+    """Content that cannot change protection is not read, so a later deletion stays known.
+
+    Args:
+        repos: Workspace, other root and session repository.
+    """
+    ws, other, session = repos
+    budget = Budget(remaining=(other / "README.md").stat().st_size)
+    command = (
+        f"cp {other.as_posix()}/README.md {ws.as_posix()}/a.md; "
+        f"mv {ws.as_posix()}/README.md {ws.as_posix()}/b.md; "
+        f"rm {other.as_posix()}/README.md"
+    )
+    shell = shell_effects(command, str(ws), session, budget)
+    assert [(e.op, e.before, e.after) for e in shell.effects] == [
+        ("create", None, UNKNOWN),
+        ("move-from", None, None),
+        ("move-to", None, UNKNOWN),
+        ("delete", TEXT, None),
     ]

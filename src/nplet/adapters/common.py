@@ -10,7 +10,7 @@ import shlex
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import NamedTuple
 
 from nplet.adapters import bootstrap as encoded_bootstrap
@@ -22,7 +22,7 @@ from nplet.adapters.session_repository import (
     session_repository,
     session_root,
 )
-from nplet.adapters.shell_effects import shell_effects
+from nplet.adapters.shell_effects import segment_words, shell_effects
 from nplet.lifecycle import task_workspace as core
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -1594,6 +1594,55 @@ def effect_gate(effects: list[task_boundary.Effect]) -> EditGate:
     return EditGate(decision, memo, exemptions, policy)
 
 
+def lifecycle_invocation(command: str) -> bool:
+    """Report whether a shell command may run a lifecycle entry point.
+
+    shortcut: an indirect invocation through another script or a name built by
+    substitution is not detected, upgrade if lifecycle commands gain a dedicated host route.
+
+    Args:
+        command: Native shell command text.
+
+    Returns:
+        Whether some segment runs a lifecycle script, either directly or as the script,
+        ``-m`` module or ``-c`` code of a Python interpreter anywhere in the segment;
+        for untrustworthy syntax, whether the unquoted text names an entry point.
+    """
+    names = (LIFECYCLE.name, WINDOWS_BOOTSTRAP.name)
+    segments = segment_words(command)
+    # Without trusted segmentation, any mention of an entry point counts.
+    if segments is None:
+        text = command.replace("'", "").replace('"', "").replace("\\", "")
+        return any(name in text for name in (*names, "nplet.lifecycle"))
+    for words in segments:
+        leaves = [PurePath(word.replace("\\", "/")).name for word in words]
+        if leaves[:1] and leaves[0] in names:
+            return True
+        # Wrappers such as ``poetry run`` or ``env`` may precede the interpreter.
+        start = next(
+            (
+                i
+                for i, leaf in enumerate(leaves)
+                if re.fullmatch(r"py|python[0-9.]*", leaf.removesuffix(".exe"))
+            ),
+            None,
+        )
+        args = iter(words[start + 1 :] if start is not None else [])
+        for word in args:
+            # The first non-option names the script; ``-m`` and ``-c`` end the options.
+            if word == "-m":
+                return next(args, "").startswith("nplet.lifecycle")
+            if word == "-c":
+                return "nplet.lifecycle" in next(args, "")
+            if word in ("-X", "-W"):
+                next(args, "")
+            elif not word.startswith("-"):
+                if PurePath(word.replace("\\", "/")).name in names:
+                    return True
+                break
+    return False
+
+
 def execution_directory(event: core.JSONObject, host: str) -> str | None:
     """Return the directory a validated native shell command runs in.
 
@@ -1689,12 +1738,7 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         )
         shell_gate = effect_gate(shell.effects)
         # A lifecycle invocation keeps its lifecycle-control route instead of running free.
-        # shortcut: an indirect invocation through another script or a name built by
-        # substitution is not detected, upgrade if lifecycle commands gain a dedicated host route.
-        unquoted = command.replace("'", "").replace('"', "").replace("\\", "")
-        lifecycle = any(
-            name in unquoted for name in (LIFECYCLE.name, WINDOWS_BOOTSTRAP.name, "nplet.lifecycle")
-        )
+        lifecycle = lifecycle_invocation(command)
         # A child's shell keeps its existing admission unless it has protected effects.
         if shell_gate.decision.protected or (event.get("child") is not True and not lifecycle):
             gate = shell_gate

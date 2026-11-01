@@ -643,7 +643,8 @@ and a missing trailing-slash destination. Each `rm` operand stands alone: after
 before `--` it could be an option, so the whole argument list is unchecked. A
 directory moved across the workspace boundary keeps only its workspace side. A
 move whose destination is unresolved still removes each identified source. Both
-moved sides use one classification of the source, and `>&!` always names a file. Known effects beside an unchecked command still apply:
+moved sides use one classification of the source, which is skipped when every
+affected side is in the workspace, and `>&!` always names a file. Known effects beside an unchecked command still apply:
 `python build.py && rm /other/README.md` still decides the delete. Line breaks,
 unquoted backslashes, backticks, `$(`, parentheses, brace groups, comments,
 here-documents, `<>`, a `<` inside a word or before `N-M>` (a zsh numeric glob)
@@ -659,8 +660,11 @@ unchecked while absolute ones stay identified. The session repository
 still comes from the hook's working directory.
 
 An effect on the exemption policy file is denied with `POLICY_ADMINISTRATION`, and
-one on a `.task` or `.git` control store with `NOT_OWNER`. A command naming the
-lifecycle entry points keeps its lifecycle-control route instead of running free.
+one on a `.task` or `.git` control store with `NOT_OWNER`. A command that runs a
+lifecycle entry point, directly or as a Python interpreter's script, `-m` module or
+`-c` code, keeps its lifecycle-control route instead of running free; a name given
+only as data does not count. With untrustworthy syntax, any mention of an entry
+point counts.
 A child's shell keeps its scoped admission unless it has a protected effect. One
 inspection budget covers every content read of a command. Task-free shell work
 leaves stale readiness, a pending ticket read and unrelated pending records

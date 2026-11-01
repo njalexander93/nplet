@@ -201,6 +201,20 @@ def _segments(tokens: list[Word | str]) -> list[tuple[list[Word], list[tuple[str
     return segments
 
 
+def segment_words(command: str) -> list[list[str]] | None:
+    """Return each segment's argument words after quote removal.
+
+    Args:
+        command: Native shell command text.
+
+    Returns:
+        Per segment, its word texts in order; None when segmentation is untrustworthy.
+    """
+    tokens = _tokens(command)
+    segments = None if tokens is None else _segments(tokens)
+    return None if segments is None else [[w.text for w in words] for words, _ in segments]
+
+
 def _operands(program: str, words: list[Word]) -> list[str | None] | None:
     """Collect a program's literal operands after its individually spelled flags.
 
@@ -415,8 +429,10 @@ def shell_effects(
                 if not inside:
                     opaque = True
                     continue
-            # The output carries the source's actual state; a move also removes the source.
-            after = state(source_path)
+            # The output carries the source's actual state, read only when some side's
+            # protection depends on content; a move also removes the source.
+            inside = location.workspace and (name == "cp" or source_location.workspace)
+            after = UNKNOWN if inside else state(source_path)
             if name == "mv":
                 add("move-from", source_location, source_path, None, after)
                 add("move-to", location, path, after)
