@@ -201,7 +201,7 @@ def _segments(tokens: list[Word | str]) -> list[tuple[list[Word], list[tuple[str
     return segments
 
 
-def _operands(program: str, words: list[Word]) -> list[str] | None:
+def _operands(program: str, words: list[Word]) -> list[str | None] | None:
     """Collect a program's literal operands after its individually spelled flags.
 
     Args:
@@ -209,15 +209,19 @@ def _operands(program: str, words: list[Word]) -> list[str] | None:
         words: The words after the program name.
 
     Returns:
-        The operands in order; None for a non-literal or empty word, an unsupported or
-        combined flag, or an operand starting with ``-`` before ``--``.
+        The operands in order, with None for a non-literal or empty operand after
+        ``--``; None overall for such a word before ``--``, an unsupported or combined
+        flag, or an operand starting with ``-`` before ``--``.
     """
-    operands: list[str] = []
+    operands: list[str | None] = []
     options = True
     for word in words:
-        # Only written-out words have a known meaning.
+        # Only written-out words have a known meaning; after ``--`` a word is an operand.
         if word.kind != LITERAL or not word.text:
-            return None
+            if options:
+                return None
+            operands.append(None)
+            continue
         # Before ``--``, a leading dash must be one supported flag.
         if options and word.text == "--":
             options = False
@@ -347,20 +351,30 @@ def shell_effects(
         if name is None:
             opaque = opaque or (bool(words) and program not in NO_EFFECT)
             continue
-        operands = _operands(name, words[1:])
-        if not operands or (base is None and not all(map(os.path.isabs, operands))):
+        arguments = _operands(name, words[1:])
+        if not arguments:
             opaque = True
             continue
-        # Each removed operand is deleted; a directory needs workspace membership.
+        # Each identifiable removed operand is deleted; a directory needs workspace membership.
         if name == "rm":
-            for operand in operands:
+            for operand in arguments:
+                if operand is None or (base is None and not os.path.isabs(operand)):
+                    opaque = True
+                    continue
                 location, path = locate(base, operand)
                 if path is not None and path.is_dir() and not location.workspace:
                     opaque = True
                 else:
                     add("delete", location, path, None)
             continue
-        # A copy or move needs a usable destination: an existing directory takes many sources.
+        # A copy or move needs every operand identified.
+        operands = [a for a in arguments if a is not None]
+        if len(operands) < len(arguments) or (
+            base is None and not all(map(os.path.isabs, operands))
+        ):
+            opaque = True
+            continue
+        # A usable destination is required: an existing directory takes many sources.
         sources, destination = operands[:-1], operands[-1]
         full = os.path.join(base or "", destination)
         into = os.path.isdir(full)
@@ -376,14 +390,18 @@ def shell_effects(
         for source, leaf in zip(sources, names, strict=True):
             source_location, source_path = locate(base, source)
             location, path = locate(base, os.path.join(destination, leaf) if into else destination)
-            # A directory source is content-independent only inside the workspace.
-            if (
-                source_path is not None
-                and source_path.is_dir()
-                and not (location.workspace and (name == "cp" or source_location.workspace))
-            ):
-                opaque = True
-                continue
+            # A directory is content-independent only inside the workspace, so each moved
+            # side there is kept and anything else is unchecked.
+            if source_path is not None and source_path.is_dir():
+                inside = location.workspace and (name == "cp" or source_location.workspace)
+                if name == "mv" and not inside:
+                    if source_location.workspace:
+                        add("move-from", source_location, source_path, None)
+                    if location.workspace:
+                        add("move-to", location, path, UNKNOWN)
+                if not inside:
+                    opaque = True
+                    continue
             # The output carries the source's actual state; a move also removes the source.
             after = state(source_path)
             if name == "mv":

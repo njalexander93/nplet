@@ -112,6 +112,8 @@ def test_untrusted_syntax_yields_no_effects(repos: tuple, command: str) -> None:
         "cp -r dir copy",
         "mv -p README.md moved.md",
         "cp README.md",
+        'cp -- README.md "$X"',
+        "cd dir; mv README.md moved.md",
         "cp README.md logo.png dir/missing",
         "cp README.md nowhere/",
         "rm dir",
@@ -230,7 +232,26 @@ def test_cross_repository_states_and_workspace_targets(repos: tuple) -> None:
         ],
         False,
     )
-    assert run(f"mv {ws.as_posix()}/dir {other.as_posix()}/moved", None, session) == ([], True)
+    # Across the boundary only the workspace side of a directory move is kept.
+    assert run(f"mv {ws.as_posix()}/dir {other.as_posix()}/moved", None, session) == (
+        [("move-from", f"{ws.as_posix()}/dir", None, None)],
+        True,
+    )
+    assert run(f"mv {other.as_posix()}/dir {ws.as_posix()}/moved", None, session) == (
+        [("move-to", f"{ws.as_posix()}/moved", None, UNKNOWN)],
+        True,
+    )
+    # An unidentifiable rm operand does not hide an identified one.
+    for command in (
+        f"cd /; rm -f missing {ws.as_posix()}/README.md",
+        f'rm -- {ws.as_posix()}/README.md "$OTHER"',
+    ):
+        assert run(command, other, session) == (
+            [("delete", f"{ws.as_posix()}/README.md", None, None)],
+            True,
+        )
+    # Before ``--`` an expanded word could be an option, so nothing is identified.
+    assert run(f'rm "$OTHER" {ws.as_posix()}/README.md', other, session) == ([], True)
 
 
 @pytest.mark.parametrize(
