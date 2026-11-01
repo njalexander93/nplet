@@ -1629,19 +1629,29 @@ def lifecycle_invocation(command: str) -> bool:
         )
         args = iter(words[start + 1 :] if start is not None else [])
         for word in args:
-            # The first non-option names the script; ``-m`` and ``-c`` end the options.
-            if word in ("-m", "-c"):
-                target = next(args, "")
-                module = target.startswith("nplet.lifecycle")
-                if module if word == "-m" else "nplet.lifecycle" in target:
+            # Long options and ``--`` take no argument here; ``-`` reads the script from stdin.
+            if word.startswith("--"):
+                continue
+            if word.startswith("-") and word != "-":
+                # Single-letter options cluster; ``m``, ``c``, ``X`` and ``W`` take the
+                # rest of the word or the next word, and ``m`` and ``c`` end the options.
+                flag = next((f for f in word[1:] if f in "mcXW"), "")
+                if not flag:
+                    continue
+                value = word[word.index(flag) + 1 :] or next(args, "")
+                if flag in "XW":
+                    continue
+                if (
+                    value.startswith("nplet.lifecycle")
+                    if flag == "m"
+                    else "nplet.lifecycle" in value
+                ):
                     return True
                 break
-            if word in ("-X", "-W"):
-                next(args, "")
-            elif not word.startswith("-"):
-                if PurePath(word.replace("\\", "/")).name in names:
-                    return True
-                break
+            # The first non-option names the script.
+            if PurePath(word.replace("\\", "/")).name in names:
+                return True
+            break
     return False
 
 

@@ -183,6 +183,12 @@ def test_native_pre_decides_shell_commands_by_recognized_effects(
         ("python src/nplet/life\\cycle/task_workspace.py", True),
         ("python -m pytest; python src/nplet/lifecycle/task_workspace.py", True),
         ("python -c 'pass' && py -m nplet.lifecycle.task_workspace", True),
+        ("python -mnplet.lifecycle.task_workspace --request-json '{}'", True),
+        ("python -Im nplet.lifecycle.task_workspace", True),
+        ("python -Bc 'import nplet.lifecycle'", True),
+        ("python -Xutf8 -u src/nplet/lifecycle/task_workspace.py", True),
+        ("python --version; python -Impytest", False),
+        ("python - task_workspace.py", False),
     ],
 )
 def test_lifecycle_invocation_matches_command_position(command: str, expected: bool) -> None:
