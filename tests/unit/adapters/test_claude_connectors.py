@@ -228,6 +228,33 @@ def test_edit_shell_and_delegation_tools_are_never_unchecked(tool: str) -> None:
     assert not common.unchecked({"tool_name": tool, "tool_input": {}}, "claude-code")
 
 
+def test_codex_calls_are_never_unchecked() -> None:
+    """Keep every Codex call on its own admission, whatever its tool name."""
+    assert not common.unchecked({"tool_name": "mcp__browser__navigate", "tool_input": {}}, "codex")
+
+
+def test_unchecked_parent_call_does_no_lifecycle_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip readiness, tool-start and settlement for an unchecked parent call.
+
+    Args:
+        monkeypatch: Scoped replacement of lifecycle entry points.
+    """
+    # Any lifecycle call or admission lookup would fail the test.
+    monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(common.core, "execute", lambda _request: pytest.fail("lifecycle call"))
+    monkeypatch.setattr(
+        common, "existing_admission", lambda *_args: pytest.fail("admission lookup")
+    )
+    event: JsonObject = {
+        "tool_name": "mcp__claude-in-chrome__navigate",
+        "tool_input": {"url": "https://example.test"},
+        "tool_use_id": "tool-1",
+        "repository": None,
+    }
+    assert common.native_pre(event, "claude-code") is None
+    assert common.native_post({**event, "tool_response": "ok"}, "claude-code", failed=False) is None
+
+
 def test_native_tool_routes_providers_and_no_effect_tools_by_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
