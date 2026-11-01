@@ -662,8 +662,8 @@ Relative operands resolve from the command's **execution directory**, not the ch
 or session directory: Cursor's validated nonempty `working_directory` or `cwd`,
 otherwise the hook's `cwd`. It must be an absolute existing directory; otherwise
 relative operands are unchecked. After any segment other than `cp`, `mv`, `rm`,
-`echo`, `pwd` or `cat`, which may change directory, later relative operands are
-unchecked while absolute ones stay identified. The session repository
+`echo`, `pwd`, `cat` or a program spelled as a path, which may change directory,
+later relative operands are unchecked while absolute ones stay identified. The session repository
 still comes from the hook's working directory.
 
 An effect on the exemption policy file is denied with `POLICY_ADMINISTRATION`, and

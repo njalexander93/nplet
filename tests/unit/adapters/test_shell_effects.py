@@ -373,7 +373,15 @@ def test_directory_changes_and_missing_cwd_leave_relative_operands_unchecked(
 
 
 @pytest.mark.parametrize(
-    "prefix", ["builtin cd dir; ", "command cd dir; ", "X=1 cd dir; ", "if cd dir; then :; fi; "]
+    "prefix",
+    [
+        "builtin cd dir; ",
+        "command cd dir; ",
+        "X=1 cd dir; ",
+        "X=a/b cd dir; ",
+        "if cd dir; then :; fi; ",
+        "true && ",
+    ],
 )
 def test_possible_directory_changes_leave_relative_operands_unchecked(
     repos: tuple, prefix: str
@@ -582,3 +590,17 @@ def test_unknown_sources_keep_identified_destinations(repos: tuple) -> None:
     )
     # Several sources need a directory, so nothing is written to a file destination.
     assert run(f'cp -- "$SOURCE" logo.png {target}', other, session) == ([], True)
+
+
+def test_path_spelled_programs_keep_the_execution_directory(repos: tuple) -> None:
+    """A program run by path cannot change the shell's directory.
+
+    Args:
+        repos: Workspace, other root and session repository.
+    """
+    _, other, session = repos
+    for program in ("/usr/bin/true", "./build.sh"):
+        assert run(f"{program} && rm README.md", other, session) == (
+            [("delete", f"{other.as_posix()}/README.md", TEXT, None)],
+            True,
+        )
