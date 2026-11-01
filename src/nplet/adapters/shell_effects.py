@@ -281,7 +281,7 @@ def shell_effects(
     opaque = False
     # Every content a path may hold after earlier recognized operations, any of which
     # may be skipped, declined or fail: states, or paths whose original content arrived.
-    contents: dict[Path | None, list[str | Path]] = {}
+    contents: dict[Path | None, frozenset[str | Path]] = {}
     # Each original file is classified at most once per command.
     originals: dict[Path, str] = {}
 
@@ -300,7 +300,7 @@ def shell_effects(
         point = location.points[-1]
         return location, None if point.error else point.path
 
-    def possible(path: Path | None) -> list[str | Path]:
+    def possible(path: Path | None) -> frozenset[str | Path]:
         """List what one resolved side may hold.
 
         Args:
@@ -309,7 +309,7 @@ def shell_effects(
         Returns:
             States and original paths; unknown without a path.
         """
-        return [UNKNOWN] if path is None else contents.get(path, [path])
+        return frozenset({UNKNOWN}) if path is None else contents.get(path, frozenset({path}))
 
     def state(path: Path | None) -> str:
         """Classify one resolved side by the most protective content it may hold.
@@ -327,14 +327,15 @@ def shell_effects(
             states.add(originals[known] if isinstance(known, Path) else known)
         return next((s for s in (TEXT, UNKNOWN, BINARY) if s in states), ABSENT)
 
-    def keep(path: Path | None, more: list[str | Path]) -> None:
+    def keep(path: Path | None, more: frozenset[str | Path]) -> None:
         """Add contents a path may now hold to what it may already hold.
 
         Args:
             path: Resolved path, or None when resolution failed.
             more: States or original paths the operation may leave there.
         """
-        contents[path] = possible(path) + more
+        # A union stays bounded by the command's distinct paths and states.
+        contents[path] = possible(path) | more
 
     def add(
         op: str,
@@ -394,7 +395,7 @@ def shell_effects(
             elif word.text != "/dev/null":
                 location, path = locate(base, word.text)
                 add(written(path), location, path, output)
-                keep(path, [output])
+                keep(path, frozenset({output}))
         name = PROGRAMS.get(program or "")
         # A program that may change directory (cd, a wrapper, a keyword or an unknown
         # program) makes later relative operands unchecked.
@@ -419,7 +420,7 @@ def shell_effects(
                     opaque = True
                 else:
                     add("delete", location, path, None)
-                    keep(path, [ABSENT])
+                    keep(path, frozenset({ABSENT}))
             continue
         # A copy or move needs every operand identified; a move still removes each
         # identified source, so only its unresolved operands stay unchecked.
@@ -474,5 +475,5 @@ def shell_effects(
                 add(written(path), location, path, after)
             keep(path, possible(source_path))
             if name == "mv":
-                keep(source_path, [ABSENT])
+                keep(source_path, frozenset({ABSENT}))
     return Shell(effects, targets, opaque)

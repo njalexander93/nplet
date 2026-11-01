@@ -536,3 +536,20 @@ def test_carried_copies_read_the_original_once(repos: tuple, tmp_path: Path) -> 
     command = f"cp {a} {b}; cp {b} {other.as_posix()}/x.md; cp {a} {other.as_posix()}/y.md"
     shell = shell_effects(command, str(outside), session, Budget(remaining=5))
     assert [e.after for e in shell.effects] == [TEXT, TEXT, TEXT]
+
+
+def test_repeated_and_cyclic_copies_stay_bounded(repos: tuple, tmp_path: Path) -> None:
+    """Self and cyclic copies merge possible contents instead of multiplying them.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        tmp_path: Disposable parent holding a non-repository directory.
+    """
+    _, other, session = repos
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.md").write_bytes(b"text\n")
+    a, b = f"{outside.as_posix()}/a.md", f"{outside.as_posix()}/b.md"
+    command = "; ".join([f"cp {a} {a}"] * 64 + [f"cp {a} {b}; cp {b} {a}"] * 32)
+    flat, _ = run(f"{command}; cp {a} {other.as_posix()}/x.md", outside, session)
+    assert flat[-1] == ("create", f"{other.as_posix()}/x.md", ABSENT, TEXT)
