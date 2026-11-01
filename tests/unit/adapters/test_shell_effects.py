@@ -379,6 +379,7 @@ def test_directory_changes_and_missing_cwd_leave_relative_operands_unchecked(
         "command cd dir; ",
         "X=1 cd dir; ",
         "X=a/b cd dir; ",
+        "X+=a/b cd dir; ",
         "if cd dir; then :; fi; ",
         "true && ",
     ],

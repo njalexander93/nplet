@@ -402,8 +402,8 @@ def shell_effects(
         name = PROGRAMS.get(program or "")
         # A program that may change directory (cd, a wrapper, a keyword or an unknown
         # program) makes later relative operands unchecked. A program spelled as a path
-        # runs as a child process, unless the word is a variable assignment.
-        external = program is not None and "/" in program and not re.match(r"\w+=", program)
+        # runs as a child process, unless the word may be an assignment such as ``X+=a/b``.
+        external = program is not None and "/" in program and "=" not in program
         if words and name is None and program not in ("echo", "pwd", "cat") and not external:
             base = None
         # Other programs' arguments are unchecked unless known to have no file effect.
