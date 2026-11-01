@@ -152,9 +152,9 @@ def _tokens(command: str) -> list[Word | str] | None:
             operator = {">>": ">", ">|": ">", ">&": ">&", "<&": "<"}.get(raw)
             if operator is None:
                 raw, operator = c, c
-            # zsh's forced-overwrite forms ``>!``, ``>>!`` and ``>&!`` name a file.
+            # zsh's forced-overwrite forms ``>!``, ``>>!`` and ``>&!`` always name a file.
             if c == ">" and command.startswith("!", i + len(raw)):
-                raw += "!"
+                raw, operator = raw + "!", ">"
             tokens.append(operator)
             i += len(raw)
             continue
@@ -292,7 +292,11 @@ def shell_effects(
         return UNKNOWN if path is None else classify(path, budget)
 
     def add(
-        op: str, location: repository_location.Location, path: Path | None, after: str | None
+        op: str,
+        location: repository_location.Location,
+        path: Path | None,
+        after: str | None,
+        before: str | None = None,
     ) -> None:
         """Record one effect, reading its existing side outside the workspace only.
 
@@ -301,9 +305,12 @@ def shell_effects(
             location: Target location.
             path: Resolved target path, or None when resolution failed.
             after: Output content state.
+            before: Already classified existing state, read once per path.
         """
         targets.append(str(location.points[0].path))
-        effects.append(Effect(op, location, None if location.workspace else state(path), after))
+        if not location.workspace and before is None:
+            before = state(path)
+        effects.append(Effect(op, location, None if location.workspace else before, after))
 
     def written(path: Path | None) -> str:
         """Choose between creating and overwriting one output target.
@@ -367,13 +374,19 @@ def shell_effects(
                 else:
                     add("delete", location, path, None)
             continue
-        # A copy or move needs every operand identified.
-        operands = [a for a in arguments if a is not None]
-        if len(operands) < len(arguments) or (
-            base is None and not all(map(os.path.isabs, operands))
-        ):
+        # A copy or move needs every operand identified; a move still removes each
+        # identified source, so only its unresolved operands stay unchecked.
+        known = [a is not None and (base is not None or os.path.isabs(a)) for a in arguments]
+        if not all(known):
             opaque = True
+            for source, ok in zip(arguments[:-1], known, strict=False):
+                if name == "mv" and source is not None and ok:
+                    source_location, source_path = locate(base, source)
+                    # A directory is content-independent only inside the workspace.
+                    if source_location.workspace or source_path is None or not source_path.is_dir():
+                        add("move-from", source_location, source_path, None)
             continue
+        operands = [a for a in arguments if a is not None]
         # A usable destination is required: an existing directory takes many sources.
         sources, destination = operands[:-1], operands[-1]
         full = os.path.join(base or "", destination)
@@ -405,7 +418,7 @@ def shell_effects(
             # The output carries the source's actual state; a move also removes the source.
             after = state(source_path)
             if name == "mv":
-                add("move-from", source_location, source_path, None)
+                add("move-from", source_location, source_path, None, after)
                 add("move-to", location, path, after)
             else:
                 add(written(path), location, path, after)

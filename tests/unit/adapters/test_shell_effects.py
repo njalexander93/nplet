@@ -250,6 +250,17 @@ def test_cross_repository_states_and_workspace_targets(repos: tuple) -> None:
             [("delete", f"{ws.as_posix()}/README.md", None, None)],
             True,
         )
+    # A move whose destination is unresolved still removes each identified source.
+    for command in (
+        f"cd /; mv {ws.as_posix()}/README.md renamed.md",
+        f'mv -- {ws.as_posix()}/README.md "$DEST"',
+    ):
+        assert run(command, other, session) == (
+            [("move-from", f"{ws.as_posix()}/README.md", None, None)],
+            True,
+        )
+    assert run(f"cd /; mv {other.as_posix()}/dir renamed", other, session) == ([], True)
+    assert run(f"cd /; cp {ws.as_posix()}/README.md copied.md", other, session) == ([], True)
     # Before ``--`` an expanded word could be an option, so nothing is identified.
     assert run(f'rm "$OTHER" {ws.as_posix()}/README.md', other, session) == ([], True)
 
@@ -406,3 +417,40 @@ def test_programs_without_operands_are_unchecked(repos: tuple, command: str) -> 
     """
     ws, _, session = repos
     assert run(command, ws, session) == ([], True)
+
+
+@pytest.mark.parametrize("target", ["1", "-", "out"])
+def test_zsh_forced_duplication_form_writes_a_file(repos: tuple, target: str) -> None:
+    """The ``>&!`` form names a file even when its target looks like a descriptor.
+
+    Args:
+        repos: Workspace, other root and session repository.
+        target: File name after the operator.
+    """
+    ws, _, session = repos
+    assert run(f"echo hi >&! {target}", ws, session) == (
+        [("create", f"{ws.as_posix()}/{target}", None, TEXT)],
+        False,
+    )
+
+
+def test_move_source_is_classified_once(repos: tuple) -> None:
+    """A budget covering one read keeps a moved text source's known state.
+
+    Args:
+        repos: Workspace, other root and session repository.
+    """
+    _, other, session = repos
+    outside = other.parent / "outside"
+    outside.mkdir()
+    size = (other / "README.md").stat().st_size
+    shell = shell_effects(
+        f"mv {other.as_posix()}/README.md {outside.as_posix()}/moved.md",
+        str(other),
+        session,
+        Budget(remaining=size),
+    )
+    assert [(e.op, e.before, e.after) for e in shell.effects] == [
+        ("move-from", TEXT, None),
+        ("move-to", ABSENT, TEXT),
+    ]
