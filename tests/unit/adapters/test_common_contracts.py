@@ -48,6 +48,31 @@ def test_native_identity_preserves_claude_session_and_cwd(
     assert normalized is not event
 
 
+def test_native_identity_keeps_cursor_session_when_shell_mirrors_its_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use the workspace root when Cursor copies a Shell override into the top-level cwd.
+
+    Args:
+        tmp_path: Disposable parent for the workspace root and the override directory.
+        monkeypatch: Replace repository discovery with a proven absence.
+    """
+    monkeypatch.setattr(common.core, "project_repository", lambda _path: None)
+    root, other = tmp_path / "root", tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    event = {
+        "conversation_id": "session",
+        "workspace_roots": [str(root)],
+        "cwd": str(other),
+        "tool_name": "Shell",
+        "tool_input": {"command": "pwd", "cwd": str(other)},
+        "tool_use_id": "one",
+    }
+    # The mirrored override names where the command runs, not the session.
+    assert common.native_identity(event, "cursor")["cwd"] == str(root)
+
+
 @pytest.mark.parametrize(
     ("extra", "code"),
     [
@@ -147,7 +172,7 @@ def test_native_tool_accepts_synchronous_file_tool(host: str, tool: str) -> None
 @pytest.mark.parametrize(
     ("event", "code"),
     [
-        (native_event("MCP:external"), "HOST_UNSUPPORTED_PROVIDER"),
+        ({**native_event("MCP:external"), "child": True}, "HOST_UNSUPPORTED_PROVIDER"),
         (native_event("Task"), "HOST_UNSUPPORTED_CHILD_IDENTITY"),
         (native_event("Unknown"), "HOST_UNSUPPORTED_TOOL"),
         (native_event("Read", {"async": True}), "HOST_UNSUPPORTED_ASYNC"),
@@ -163,7 +188,7 @@ def test_native_tool_rejects_uncorrelated_or_async_work(
         event: Hook event supplied to the adapter under test.
         code: Expected boundary diagnostic.
     """
-    # Unsupported provider, child, unknown, async, and uncorrelated calls all fail admission.
+    # Child provider, delegation, unknown, async, and uncorrelated calls all fail admission.
     with pytest.raises(core.WorkspaceError) as captured:
         common.native_tool(event, "cursor")
     assert captured.value.code == code

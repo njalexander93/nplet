@@ -93,7 +93,7 @@ def test_native_bootstrap_rejects_non_shell_or_extra_args_before_parser(
 def test_native_bootstrap_rejects_foreign_working_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reject a native directory override outside the observed repository.
+    """Deny a lifecycle command redirected outside the observed repository.
 
     Args:
         monkeypatch: Pytest fixture that isolates external state for this case.
@@ -101,8 +101,14 @@ def test_native_bootstrap_rejects_foreign_working_directory(
     monkeypatch.setattr(
         common.core, "repository", lambda path: common.core.Repository(Path(path), None, [])
     )
-    monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: pytest.fail("parsed"))
     altered = {**event(), "tool_input": {"command": "echo ok", "working_directory": str(OTHER)}}
+    # A lifecycle command is denied rather than falling through to ordinary Shell.
+    monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: True)
+    with pytest.raises(core.WorkspaceError) as captured:
+        common.native_bootstrap(altered, "cursor")
+    assert captured.value.code == "REPOSITORY_MISMATCH"
+    # Any other command is simply not a lifecycle invocation.
+    monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: False)
     assert common.native_bootstrap(altered, "cursor") is False
 
 
@@ -158,7 +164,13 @@ def test_native_bootstrap_rejects_background_and_repository_failure(
         lambda _path: (_ for _ in ()).throw(core.WorkspaceError("UNSAFE_PATH")),
     )
     cursor = {**event(), "tool_input": {"command": "echo ok", "working_directory": str(CHECKOUT)}}
+    monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: False)
     assert common.native_bootstrap(cursor, "cursor") is False
+    # A lifecycle command whose directory cannot be checked is denied.
+    monkeypatch.setattr(common, "canonical_bootstrap", lambda *_args: True)
+    with pytest.raises(core.WorkspaceError) as captured:
+        common.native_bootstrap(cursor, "cursor")
+    assert captured.value.code == "UNSAFE_PATH"
 
 
 def test_native_context_reports_readiness_or_bounded_recovery(
@@ -1054,7 +1066,6 @@ def test_native_pre_records_only_eligible_tool_after_readiness(
             ({"timeout": value}, False)
             for value in (True, False, 0, -1, 1.5, 2147483648, "30000", None)
         ],
-        ({"cwd": str(OTHER)}, False),
         ({"cwd": None}, False),
         ({"cwd": "", "working_directory": str(CHECKOUT)}, False),
         ({"background": True}, False),

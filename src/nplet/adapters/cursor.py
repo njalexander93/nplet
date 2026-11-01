@@ -151,17 +151,24 @@ def handle(event: core.JSONObject, *, deadline: float | None = None) -> core.JSO
                     "TICKET_READ_REQUIRED",
                 )
                 return {"permission": "allow"}
-            # Every ordinary MCP call also needs the configured server's blocking hook.
-            core.require(
-                observed.get("tool_name") in common.LINEAR_PROVIDER_OPERATIONS,
-                "HOST_UNSUPPORTED_PROVIDER",
-            )
-            core.require(
-                observed.get("mcp_server_name") in common.LINEAR_SERVER_NAMES
-                and observed.get("mcp_server_url", observed.get("url"))
-                in common.LINEAR_SERVER_URLS,
-                "HOST_UNSUPPORTED_PROVIDER",
-            )
+            # A Linear operation or a Linear-named server or URL needs the configured
+            # server's inventory and provenance, so deletes and spoofed servers stay denied.
+            url = observed.get("mcp_server_url", observed.get("url"))
+            if (
+                observed.get("tool_name") in common.LINEAR_PROVIDER_OPERATIONS
+                or observed.get("mcp_server_name") in common.LINEAR_SERVER_NAMES
+                or url in common.LINEAR_SERVER_URLS
+            ):
+                core.require(
+                    observed.get("tool_name") in common.LINEAR_PROVIDER_OPERATIONS,
+                    "HOST_UNSUPPORTED_PROVIDER",
+                )
+                core.require(
+                    observed.get("mcp_server_name") in common.LINEAR_SERVER_NAMES
+                    and url in common.LINEAR_SERVER_URLS,
+                    "HOST_UNSUPPORTED_PROVIDER",
+                )
+            # Every call, including another server's unchecked one, carries an object input.
             core.require(
                 isinstance(observed.get("tool_input"), str)
                 and isinstance(core.strict_json(observed["tool_input"]), dict),

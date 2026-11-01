@@ -98,18 +98,26 @@ def test_provider_admission_accepts_only_allowlisted_configured_operations(
 
 
 @pytest.mark.parametrize(
-    "operation", ["save_document", "get_document", "delete_comment", "get_issue_x"]
+    "operation",
+    [
+        "delete_comment",
+        "delete_customer",
+        "delete_customer_need",
+        "delete_diff_comment",
+        "delete_status_update",
+        "delete_attachment",
+    ],
 )
-def test_provider_admission_rejects_other_operations(
+def test_provider_admission_rejects_linear_deletes(
     monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
-    """Keep document, archive and unlisted operations outside the native route.
+    """Keep the configured connector's denied deletes outside every route.
 
     Args:
         monkeypatch: Scoped configuration for the verified Linear connector.
-        operation: An operation outside the allowlist.
+        operation: A denied delete operation.
     """
-    # Even the configured connector cannot run an unlisted operation.
+    # Even the configured connector cannot run a denied delete.
     monkeypatch.setenv("NPLET_CLAUDE_LINEAR_CONNECTOR_ID", CONNECTOR)
     event: JsonObject = {
         "tool_name": f"mcp__{CONNECTOR}__{operation}",
@@ -121,6 +129,149 @@ def test_provider_admission_rejects_other_operations(
     with pytest.raises(core.WorkspaceError) as failure:
         common.native_tool(event, "claude-code")
     assert failure.value.code == "HOST_UNSUPPORTED_PROVIDER"
+
+
+@pytest.mark.parametrize("operation", ["save_document", "get_document", "get_issue_x"])
+def test_unlisted_linear_operations_are_unchecked(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """Admit other configured-connector operations as unchecked, never as Linear authority.
+
+    Args:
+        monkeypatch: Scoped configuration for the verified Linear connector.
+        operation: An operation outside the inventory and denied sets.
+    """
+    # The connector's unlisted operation is unchecked for a parent and denied for a child.
+    monkeypatch.setenv("NPLET_CLAUDE_LINEAR_CONNECTOR_ID", CONNECTOR)
+    event: JsonObject = {
+        "tool_name": f"mcp__{CONNECTOR}__{operation}",
+        "mcp_server": {"name": CONNECTOR, "source": "sdk"},
+        "tool_input": {},
+        "tool_use_id": "native-call",
+    }
+    assert common._linear_provider_tool(event, "claude-code") is None
+    assert common.unchecked(event, "claude-code")
+    assert common.native_tool(event, "claude-code") == event["tool_name"]
+    with pytest.raises(core.WorkspaceError) as failure:
+        common.native_tool({**event, "child": True}, "claude-code")
+    assert failure.value.code == "HOST_UNSUPPORTED_PROVIDER"
+
+
+def test_linear_named_tool_without_provenance_gains_no_authority() -> None:
+    """Keep a Linear-named inventory call without provenance off the Linear route."""
+    # Without provenance the inventory route rejects it, and a delete stays denied.
+    for operation in ["save_issue", "delete_comment"]:
+        event: JsonObject = {
+            "tool_name": f"mcp__linear__{operation}",
+            "tool_input": {},
+            "tool_use_id": "c",
+        }
+        assert common._linear_provider_tool(event, "claude-code") is None
+        assert not common.unchecked(event, "claude-code")
+        with pytest.raises(core.WorkspaceError) as failure:
+            common.native_tool(event, "claude-code")
+        assert failure.value.code == "HOST_UNSUPPORTED_PROVIDER"
+
+
+@pytest.mark.parametrize(
+    ("tool", "code"),
+    [
+        ("mcp__claude-in-chrome__navigate", "HOST_UNSUPPORTED_PROVIDER"),
+        ("WebFetch", "HOST_UNSUPPORTED_TOOL"),
+        ("EnterWorktree", "HOST_UNSUPPORTED_TOOL"),
+    ],
+)
+def test_unknown_tools_are_unchecked_only_for_a_claude_parent(tool: str, code: str) -> None:
+    """Keep children and Cursor closed to tools that a Claude parent runs unchecked.
+
+    Args:
+        tool: A tool outside every child and Cursor route.
+        code: The child's existing denial diagnostic.
+    """
+    event: JsonObject = {"tool_name": tool, "tool_input": {}, "tool_use_id": "c"}
+    # A Claude parent's unknown tool is unchecked; worktree moves are gated instead.
+    assert common.unchecked(event, "claude-code") is (tool != "EnterWorktree")
+    assert common.native_tool(event, "claude-code") == tool
+    # A child and another host gain nothing.
+    assert not common.unchecked({**event, "child": True}, "claude-code")
+    assert not common.unchecked(event, "cursor")
+    with pytest.raises(core.WorkspaceError) as failure:
+        common.native_tool({**event, "child": True}, "claude-code")
+    assert failure.value.code == code
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "apply_patch",
+        "Bash",
+        "PowerShell",
+        "Monitor",
+        "Agent",
+        "Task",
+        "TaskOutput",
+        "TaskStop",
+        "SpawnAgent",
+        "Workflow",
+    ],
+)
+def test_edit_shell_and_delegation_tools_are_never_unchecked(tool: str) -> None:
+    """Keep edits, shells and delegation off the unchecked route.
+
+    Args:
+        tool: A tool with its own route or a closed shell or delegation tool.
+    """
+    assert not common.unchecked({"tool_name": tool, "tool_input": {}}, "claude-code")
+
+
+@pytest.mark.parametrize("tool", ["Write", "Bash", "Agent", "WebFetch"])
+def test_native_tool_with_server_metadata_keeps_its_guard(tool: str) -> None:
+    """Deny a native tool name that carries MCP server metadata instead of unchecking it.
+
+    Args:
+        tool: A native tool name with its own route, or none.
+    """
+    event: JsonObject = {
+        "tool_name": tool,
+        "tool_input": {"command": "true"},
+        "tool_use_id": "c",
+        "mcp_server": {"name": "other", "source": "user"},
+    }
+    assert not common.unchecked(event, "claude-code")
+    with pytest.raises(core.WorkspaceError) as failure:
+        common.native_tool(event, "claude-code")
+    assert failure.value.code == "HOST_UNSUPPORTED_PROVIDER"
+
+
+def test_codex_calls_are_never_unchecked() -> None:
+    """Keep every Codex call on its own admission, whatever its tool name."""
+    assert not common.unchecked({"tool_name": "mcp__browser__navigate", "tool_input": {}}, "codex")
+
+
+def test_unchecked_parent_call_does_no_lifecycle_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip readiness, tool-start and settlement for an unchecked parent call.
+
+    Args:
+        monkeypatch: Scoped replacement of lifecycle entry points.
+    """
+    # Any lifecycle call or admission lookup would fail the test.
+    monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(common.core, "execute", lambda _request: pytest.fail("lifecycle call"))
+    monkeypatch.setattr(
+        common, "existing_admission", lambda *_args: pytest.fail("admission lookup")
+    )
+    event: JsonObject = {
+        "tool_name": "mcp__claude-in-chrome__navigate",
+        "tool_input": {"url": "https://example.test"},
+        "tool_use_id": "tool-1",
+        "repository": None,
+    }
+    assert common.native_pre(event, "claude-code") is None
+    assert common.native_post({**event, "tool_response": "ok"}, "claude-code", failed=False) is None
 
 
 def test_native_tool_routes_providers_and_no_effect_tools_by_host(
@@ -323,7 +474,9 @@ def test_app_pr_monitor_admits_only_named_operations_for_a_parent(operation: str
         "mcp__ccd_session_mgmt__get_session",
         "mcp__ccd_settings__set_setting",
         "mcp__ccd_pr__get_status_x",
-        "mcp__other__get_status",
+        "mcp__ccd_settings__get_settings",
+        "mcp__ccd_session_mgmt__delete_session",
+        "mcp__ccd_turn__other",
     ],
 )
 def test_app_pr_monitor_denies_other_app_tools(name: str) -> None:
