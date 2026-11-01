@@ -483,7 +483,7 @@ def test_workspace_only_copies_and_moves_leave_the_budget(repos: tuple) -> None:
 
 
 def test_earlier_writes_set_later_source_states(repos: tuple, tmp_path: Path) -> None:
-    """A source overwritten, copied or removed earlier in the command keeps that state.
+    """A later source may hold anything an earlier recognized operation leaves there.
 
     Args:
         repos: Workspace, other root and session repository.
@@ -505,11 +505,17 @@ def test_earlier_writes_set_later_source_states(repos: tuple, tmp_path: Path) ->
         session,
     )
     assert flat[-1] == ("create", dst, ABSENT, BINARY)
-    # A removed or moved-away source is absent for later reads.
-    flat, _ = run(f"rm {src}; cp {src} {dst}", outside, session)
-    assert flat[-1] == ("create", dst, ABSENT, ABSENT)
+    # A removal or move may not run, so the source keeps its original content.
+    flat, _ = run(f"rm -i {src}; cp {src} {dst}", outside, session)
+    assert flat[-1] == ("create", dst, ABSENT, BINARY)
     flat, _ = run(f"mv {src} {outside.as_posix()}/m.png; cp {src} {dst}", outside, session)
-    assert flat[-1] == ("create", dst, ABSENT, ABSENT)
+    assert flat[-1] == ("create", dst, ABSENT, BINARY)
+    # Text that a no-clobber copy or a skipped removal may leave in place still counts.
+    (outside / "t.txt").write_text("text\n")
+    text = f"{outside.as_posix()}/t.txt"
+    for command in (f"cp -n {src} {text}", f"false && rm {text}"):
+        flat, _ = run(f"{command}; cp {text} {dst}", outside, session)
+        assert flat[-1] == ("create", dst, ABSENT, TEXT)
     # A move to an unresolved destination may fail, so known text is never erased.
     flat, _ = run(f'echo hi > {src}; mv -- {src} "$DEST"; cp {src} {dst}', outside, session)
     assert flat[-1] == ("create", dst, ABSENT, TEXT)

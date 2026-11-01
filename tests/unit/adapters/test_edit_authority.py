@@ -184,6 +184,7 @@ def test_native_pre_decides_shell_commands_by_recognized_effects(
         ("python -m pytest; python src/nplet/lifecycle/task_workspace.py", True),
         ("python -c 'pass' && py -m nplet.lifecycle.task_workspace", True),
         ("python -mnplet.lifecycle.task_workspace --request-json '{}'", True),
+        ("python -m nplet.adapters.bootstrap --request-base64 e30", True),
         ("python -Im nplet.lifecycle.task_workspace", True),
         ("python -Bc 'import nplet.lifecycle'", True),
         ("python -Xutf8 -u src/nplet/lifecycle/task_workspace.py", True),

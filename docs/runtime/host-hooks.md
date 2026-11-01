@@ -630,8 +630,10 @@ and receives the same decision, approval and scope checks as a structured edit.
 Segments split on unquoted `;`, `&&`, `||`, `|` and `&`; each is analyzed even when
 it may not run. An existing directory destination receives `destination/basename`;
 several sources need one. Descriptor duplication, moving and closing (`>&N`, `>&N-`,
-`>&-`) and `/dev/null` are not mutations. A later source reads the content an
-earlier recognized write, copy, move or removal in the same command leaves there. A workspace target is never content-inspected, so a workspace
+`>&-`) and `/dev/null` are not mutations. Because any step may be skipped,
+declined or fail, a later source counts every content an earlier recognized write,
+copy, move or removal in the same command may leave there, and the most protective
+one decides. A workspace target is never content-inspected, so a workspace
 redirection or copy is protected. Outside the workspace a binary copy is not text,
 while a text copy or `echo` redirection into another repository is protected.
 

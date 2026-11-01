@@ -67,6 +67,8 @@ COMMON_FIELDS = {
 }
 LIFECYCLE = ROOT / "src/nplet/lifecycle/task_workspace.py"
 WINDOWS_BOOTSTRAP = ROOT / "src/nplet/adapters/bootstrap.py"
+# Module spellings of the lifecycle entry points, matched as dotted prefixes.
+LIFECYCLE_MODULES = ("nplet.lifecycle", "nplet.adapters.bootstrap")
 PYTHON = str(ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
 
 
@@ -1613,7 +1615,7 @@ def lifecycle_invocation(command: str) -> bool:
     # Without trusted segmentation, any mention of an entry point counts.
     if segments is None:
         text = command.replace("'", "").replace('"', "").replace("\\", "")
-        return any(name in text for name in (*names, "nplet.lifecycle"))
+        return any(name in text for name in (*names, *LIFECYCLE_MODULES))
     for words in segments:
         leaves = [PurePath(word.replace("\\", "/")).name for word in words]
         if leaves[:1] and leaves[0] in names:
@@ -1642,9 +1644,9 @@ def lifecycle_invocation(command: str) -> bool:
                 if flag in "XW":
                     continue
                 if (
-                    value.startswith("nplet.lifecycle")
+                    value.startswith(LIFECYCLE_MODULES)
                     if flag == "m"
-                    else "nplet.lifecycle" in value
+                    else any(module in value for module in LIFECYCLE_MODULES)
                 ):
                     return True
                 break

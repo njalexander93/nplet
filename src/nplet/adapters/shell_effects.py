@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from nplet.adapters import repository_location
-from nplet.adapters.file_content import ABSENT, TEXT, UNKNOWN, Budget, classify
+from nplet.adapters.file_content import ABSENT, BINARY, TEXT, UNKNOWN, Budget, classify
 from nplet.adapters.task_boundary import Effect, root_test
 from nplet.lifecycle import task_workspace as core
 
@@ -279,9 +279,9 @@ def shell_effects(
     effects: list[Effect] = []
     targets: list[str] = []
     opaque = False
-    # Content an earlier recognized write leaves at a path: a state, or the path whose
-    # original content was copied or moved there.
-    contents: dict[Path | None, str | Path] = {}
+    # Every content a path may hold after earlier recognized operations, any of which
+    # may be skipped, declined or fail: states, or paths whose original content arrived.
+    contents: dict[Path | None, list[str | Path]] = {}
     # Each original file is classified at most once per command.
     originals: dict[Path, str] = {}
 
@@ -300,30 +300,41 @@ def shell_effects(
         point = location.points[-1]
         return location, None if point.error else point.path
 
-    def state(path: Path | None) -> str:
-        """Classify one resolved side as an earlier recognized write leaves it.
+    def possible(path: Path | None) -> list[str | Path]:
+        """List what one resolved side may hold.
 
         Args:
             path: Resolved path, or None when resolution failed.
 
         Returns:
-            The content state; unknown without a path.
+            States and original paths; unknown without a path.
         """
-        known = UNKNOWN if path is None else contents.get(path, path)
-        if isinstance(known, str):
-            return known
-        if known not in originals:
-            originals[known] = classify(known, budget)
-        return originals[known]
+        return [UNKNOWN] if path is None else contents.get(path, [path])
 
-    def carry(source: Path | None, path: Path | None) -> None:
-        """Record that a path now holds a source's content.
+    def state(path: Path | None) -> str:
+        """Classify one resolved side by the most protective content it may hold.
 
         Args:
-            source: Resolved source path, or None when resolution failed.
-            path: Resolved destination path, or None when resolution failed.
+            path: Resolved path, or None when resolution failed.
+
+        Returns:
+            Text if any possibility is text, then unknown, binary and absent.
         """
-        contents[path] = UNKNOWN if source is None else contents.get(source, source)
+        states = set()
+        for known in possible(path):
+            if isinstance(known, Path) and known not in originals:
+                originals[known] = classify(known, budget)
+            states.add(originals[known] if isinstance(known, Path) else known)
+        return next((s for s in (TEXT, UNKNOWN, BINARY) if s in states), ABSENT)
+
+    def keep(path: Path | None, more: list[str | Path]) -> None:
+        """Add contents a path may now hold to what it may already hold.
+
+        Args:
+            path: Resolved path, or None when resolution failed.
+            more: States or original paths the operation may leave there.
+        """
+        contents[path] = possible(path) + more
 
     def add(
         op: str,
@@ -383,7 +394,7 @@ def shell_effects(
             elif word.text != "/dev/null":
                 location, path = locate(base, word.text)
                 add(written(path), location, path, output)
-                contents[path] = output
+                keep(path, [output])
         name = PROGRAMS.get(program or "")
         # A program that may change directory (cd, a wrapper, a keyword or an unknown
         # program) makes later relative operands unchecked.
@@ -408,7 +419,7 @@ def shell_effects(
                     opaque = True
                 else:
                     add("delete", location, path, None)
-                    contents[path] = ABSENT
+                    keep(path, [ABSENT])
             continue
         # A copy or move needs every operand identified; a move still removes each
         # identified source, so only its unresolved operands stay unchecked.
@@ -461,7 +472,7 @@ def shell_effects(
                 add("move-to", location, path, after)
             else:
                 add(written(path), location, path, after)
-            carry(source_path, path)
+            keep(path, possible(source_path))
             if name == "mv":
-                contents[source_path] = ABSENT
+                keep(source_path, [ABSENT])
     return Shell(effects, targets, opaque)

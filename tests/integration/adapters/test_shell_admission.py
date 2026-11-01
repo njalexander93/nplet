@@ -92,6 +92,14 @@ def test_unbound_binary_copy_is_free_but_replacing_text_is_protected(
         f"cp {repos.plain.as_posix()}/a.png {repos.c.as_posix()}/src/new.txt"
     )
     assert not allowed(host, shell(checkout, host, rewrite, "rewritten"))
+    # A no-clobber copy or a skipped overwrite may leave text that is then copied.
+    (repos.plain / "t.txt").write_text("text")
+    plain = repos.plain.as_posix()
+    for index, step in enumerate(
+        (f"cp -n {plain}/a.png {plain}/t.txt", f"false && cp {plain}/a.png {plain}/t.txt")
+    ):
+        command = f"{step}; cp {plain}/t.txt {repos.c.as_posix()}/src/kept-{index}.txt"
+        assert not allowed(host, shell(checkout, host, command, f"kept-{index}"))
 
 
 @pytest.mark.parametrize("ready", SHELL_HOSTS, indirect=True)
@@ -246,6 +254,8 @@ def test_altered_lifecycle_command_stays_behind_the_ticket_read(checkout: Path) 
     quoted = "python -m nplet.life''cycle.task_workspace"
     assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", quoted, "quoted"))
     escaped = "python -m nplet.life\\cycle.task_workspace"
+    bootstrap = "python -m nplet.adapters.bootstrap --request-base64 e30"
+    assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", bootstrap, "bootstrap"))
     assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", escaped, "escaped"))
     assert allowed("claude", shell(checkout, "claude", "python build.py", "free"))
 
