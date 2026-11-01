@@ -328,7 +328,7 @@ def test_free_work_preserves_bound_pending_or_stale_state(
             case.root,
             host,
             "Shell" if host == "cursor" else "Bash",
-            {"command": "npm install package"},
+            {"command": "npm install package > install.log"},
         )
         package.update(session_id="coordinator", conversation_id="coordinator")
         assert not allowed(host, adapter.handle(package))
