@@ -525,7 +525,7 @@ def test_carried_copies_read_the_original_once(repos: tuple, tmp_path: Path) -> 
     _, other, session = repos
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "a.md").write_text("text\n")
+    (outside / "a.md").write_bytes(b"text\n")
     a, b = f"{outside.as_posix()}/a.md", f"{outside.as_posix()}/b.md"
     command = f"cp {a} {b}; cp {b} {other.as_posix()}/x.md; cp {a} {other.as_posix()}/y.md"
     shell = shell_effects(command, str(outside), session, Budget(remaining=5))
