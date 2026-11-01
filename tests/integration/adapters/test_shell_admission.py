@@ -259,6 +259,8 @@ def test_altered_lifecycle_command_stays_behind_the_ticket_read(checkout: Path) 
     escaped = "python -m nplet.life\\cycle.task_workspace"
     bootstrap = "python -m nplet.adapters.bootstrap --request-base64 e30"
     assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", bootstrap, "bootstrap"))
+    hashed = "python --check-hash-based-pycs always -m nplet.lifecycle.task_workspace"
+    assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", hashed, "hashed"))
     assert "TICKET_READ_REQUIRED" in str(shell(checkout, "claude", escaped, "escaped"))
     assert allowed("claude", shell(checkout, "claude", "python build.py", "free"))
 

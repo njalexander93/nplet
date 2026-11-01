@@ -1631,8 +1631,11 @@ def lifecycle_invocation(command: str) -> bool:
         )
         args = iter(words[start + 1 :] if start is not None else [])
         for word in args:
-            # Long options and ``--`` take no argument here; ``-`` reads the script from stdin.
+            # Only the hash-policy long option takes a separate value; ``-`` reads the
+            # script from stdin.
             if word.startswith("--"):
+                if word == "--check-hash-based-pycs":
+                    next(args, "")
                 continue
             if word.startswith("-") and word != "-":
                 # Single-letter options cluster; ``m``, ``c``, ``X`` and ``W`` take the

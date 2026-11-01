@@ -641,7 +641,7 @@ Everything else is **unchecked**: it yields no effect and never gates on its own
 This includes other programs (Git, package managers, `sed -i`, `touch`, `ln`,
 `printf` output), combined or other flags, recursive operations, globbed or
 expanded words (including zsh `=cmd`), directory operands outside the workspace,
-and a missing trailing-slash destination. A flag after an operand is unchecked, because BSD
+and a missing trailing-slash destination. A flag or `--` after an operand is unchecked, because BSD
 programs read it as an operand and GNU programs as an option. Each `rm` operand
 stands alone: after
 `--` an expanded operand is unchecked while literal ones stay identified, but

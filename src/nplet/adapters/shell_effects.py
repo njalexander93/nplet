@@ -237,12 +237,14 @@ def _operands(program: str, words: list[Word]) -> list[str | None] | None:
                 return None
             operands.append(None)
             continue
-        # Before ``--``, a leading dash must be one supported flag.
+        # Before ``--``, a leading dash must be one supported flag. After an operand,
+        # BSD treats a flag or ``--`` as an operand and GNU as an option.
+        if options and word.text.startswith("-") and operands:
+            return None
         if options and word.text == "--":
             options = False
         elif options and word.text.startswith("-"):
-            # After an operand, BSD treats a flag as an operand and GNU as an option.
-            if word.text not in FLAGS[program] or operands:
+            if word.text not in FLAGS[program]:
                 return None
         else:
             operands.append(word.text)
