@@ -637,12 +637,14 @@ override or empty `cwd`, or null when Cursor supplies any override. Null means t
 directory is unknown; a recognized relative file effect must not become unchecked
 solely for that reason. Installed Cursor 3.27.22 (macOS 26.6.2) admitted overrides
 naming another repository, no repository and a relative path, and reported each one
-unchanged in both callback `cwd` fields, yet `pwd` printed the workspace root each
-time. A requested override therefore does not show where a command runs, and the
-base for a relative override is unobserved. `command_cwd` never replaces the event
-`cwd` or the session's recorded repository. Whether Claude Bash reports `cwd` after
-an in-shell `cd` is not verified: on an installed host the composed `cd` command was
-denied before execution, and a plain `pwd` reported the session directory.
+unchanged in both callback `cwd` fields, yet `pwd` and Python `os.getcwd()` probes
+reported the workspace root each time. A requested override therefore does not show
+where a command runs, and the base for a relative override is unobserved.
+`command_cwd` never replaces the event `cwd` or the session's recorded repository.
+On installed Claude Desktop 4.4212.0, a ready session's `cd <dir> && <command>` ran
+that command in `<dir>`, while both callbacks reported the session directory as
+`cwd`. The host then reset the shell to the session directory, and the next
+independent Bash call ran there.
 
 Metadata validation grants no readiness or synchronous completion guarantee.
 Only the finite reads below are task-free and create no pending lifecycle work.
