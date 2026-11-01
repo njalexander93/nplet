@@ -2,6 +2,7 @@
 
 import copy
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -201,4 +202,95 @@ def test_cursor_lifecycle_shell_keeps_repository_match(checkout: Path, tmp_path:
         assert response == (
             {"permission": "allow"} if code is None else cursor.failure("preToolUse", code)
         )
+    assert not (checkout / ".task").exists()
+
+
+def mirrored(checkout: Path, args: dict, name: str = "preToolUse") -> dict:
+    """Build an installed Cursor Shell envelope, whose top-level cwd repeats the override.
+
+    Args:
+        checkout: Workspace root of the session.
+        args: Native Shell input carrying the directory override.
+        name: Native hook name.
+
+    Returns:
+        The Cursor envelope as Cursor 3.27 sends it.
+    """
+    observed = event(checkout, "cursor", "Shell", args, name=name)
+    observed["cwd"] = args.get("cwd", args.get("working_directory"))
+    return observed
+
+
+def test_cursor_shell_with_mirrored_directory_is_ordinary_work(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """Admit Shell in another repository, no repository or a relative directory.
+
+    Args:
+        checkout: Unregistered checkout used as the workspace root.
+        tmp_path: Disposable parent for directories outside the checkout.
+    """
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    for directory, known in ((str(other), True), (str(plain), True), ("../../other", False)):
+        args = {"command": "pwd", "cwd": directory, "timeout": 30000}
+        calls = [
+            (mirrored(checkout, args), {"permission": "allow"}),
+            ({**mirrored(checkout, args, "postToolUse"), "tool_output": directory}, {}),
+            (
+                {
+                    **mirrored(checkout, args, "postToolUseFailure"),
+                    "error_message": "failed",
+                    "failure_type": "error",
+                    "is_interrupt": False,
+                },
+                {},
+            ),
+        ]
+        for observed, expected in calls:
+            assert cursor.handle(observed) == expected
+        # The session keeps its workspace repository; only the command directory moves.
+        identity = common.native_identity(mirrored(checkout, args), "cursor")
+        assert identity["cwd"] == str(checkout)
+        effect = common.native_effect(identity, "cursor")
+        assert effect["command_cwd"] == (directory if known else None)
+        assert effect["repository"] == identity["repository"]
+    assert not (checkout / ".task").exists()
+
+
+def test_cursor_mirrored_directory_keeps_lifecycle_and_child_checks(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """Deny a redirected lifecycle command, child Shell or unrelated foreign cwd.
+
+    Args:
+        checkout: Unregistered checkout that the registration command names.
+        tmp_path: Disposable directory outside the checkout.
+    """
+    request = {
+        "schema_version": 1,
+        "operation": "register",
+        "request_id": "0b4f8a63-7c2e-4f0a-9d61-3e5b7a2c9f14",
+        "worktree": str(checkout),
+        "host": cursor.HOST,
+        "session_id": "fresh",
+    }
+    args = {"command": common.bootstrap_command(request, cursor.HOST), "cwd": str(tmp_path)}
+    assert cursor.handle(mirrored(checkout, args)) == cursor.failure(
+        "preToolUse", "REPOSITORY_MISMATCH"
+    )
+    # A child Shell keeps its same-repository override rule.
+    child = common.native_identity(
+        mirrored(checkout, {"command": "pwd", "working_directory": str(tmp_path)}), "cursor"
+    )
+    with pytest.raises(core.WorkspaceError, match="REPOSITORY_MISMATCH"):
+        common.native_tool({**child, "child": True}, "cursor")
+    # A top-level cwd that the Shell input does not repeat still names the session.
+    foreign = mirrored(checkout, {"command": "pwd", "cwd": str(checkout)})
+    foreign["cwd"] = str(tmp_path)
+    with pytest.raises(core.WorkspaceError, match="REPOSITORY_MISMATCH"):
+        common.native_identity(foreign, "cursor")
     assert not (checkout / ".task").exists()

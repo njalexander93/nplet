@@ -1266,6 +1266,15 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
             raise core.WorkspaceError("HOST_UNSUPPORTED_WORKSPACE")
         cwd = event.get("cwd", roots[0])
         core.require(isinstance(cwd, str), "REPOSITORY_MISMATCH")
+        # Cursor mirrors a Shell directory override into the top-level cwd; that names
+        # where the command runs, not the session, which stays in its workspace root.
+        args = event.get("tool_input")
+        if (
+            event.get("tool_name") == "Shell"
+            and isinstance(args, dict)
+            and cwd in (args.get("cwd"), args.get("working_directory"))
+        ):
+            cwd = roots[0]
         # Resolve the session repository once; the workspace root must share it, or both
         # must lie outside every repository.
         normalized["cwd"] = cwd

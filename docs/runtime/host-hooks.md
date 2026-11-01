@@ -601,15 +601,16 @@ that shares a Linear operation name is therefore denied. Non-MCP Cursor tools
 outside the supported set stay denied, and children get no MCP calls.
 
 The routes below record observed coverage; this inventory is not an allowlist.
-Installed-host evidence for unchecked routes is pending.
+Cursor rows were observed on Cursor 3.27.22 (macOS 26.6.2) with a GitHub MCP read;
+Claude Code rows remain pending.
 
 | Host | Route | Adapter tests | Installed host |
 | --- | --- | --- | --- |
 | Claude Code | Browser (`mcp__claude-in-chrome__*`), computer use (`mcp__computer-use__*`), PDF/document MCP servers, other desktop app servers such as `ccd_sidebar`, and built-in tools such as `WebFetch`: unchecked by exact native `tool_name` | Covered, including unbound and unready parents | Pending |
 | Claude Code | `EnterWorktree`, `ExitWorktree`: readiness-gated pending work | Covered | Pending |
 | Claude Code | Kept-closed set above: denied for a ready parent | Covered | Pending |
-| Cursor | App/MCP servers other than Linear through the generic and MCP-specific callbacks | Covered | Pending |
-| Cursor | Browser, computer use and PDF/document routes: unchecked only when delivered as MCP calls; a non-MCP route stays denied | Covered through the generic MCP route | Pending |
+| Cursor | App/MCP servers other than Linear through the generic and MCP-specific callbacks | Covered | Observed: all four callbacks admitted, no task created; a Linear delete is denied at `beforeMCPExecution` |
+| Cursor | Browser, computer use and PDF/document routes: unchecked only when delivered as MCP calls; a non-MCP route stays denied | Covered through the generic MCP route | Not observed separately |
 
 #### Finite shell reads
 
@@ -621,7 +622,9 @@ process handle. Its existing `write_stdin` correlation checks remain in force.
 Claude requires foreground Bash and inherited background-disable configuration.
 Cursor parent `Shell` accepts a string `command` plus native `cwd`,
 `working_directory` and integer `timeout` metadata from 1 through 2147483647.
-Supply at most one directory field. Empty `cwd` means no override. An ordinary
+Supply at most one directory field. Empty `cwd` means no override. Cursor also
+copies the override into the event's top-level `cwd`; the session's repository
+still comes from its workspace root. An ordinary
 command's directory may lie in another repository or in none. Canonical lifecycle,
 bootstrap, reconciliation and child Shell commands still require the same repository
 and report `REPOSITORY_MISMATCH`; a redirected lifecycle command is denied rather
