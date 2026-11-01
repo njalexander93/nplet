@@ -380,6 +380,7 @@ def test_directory_changes_and_missing_cwd_leave_relative_operands_unchecked(
         "X=1 cd dir; ",
         "X=a/b cd dir; ",
         "X+=a/b cd dir; ",
+        "a[1]=x/y cd dir; ",
         "if cd dir; then :; fi; ",
         "true && ",
     ],
@@ -600,7 +601,7 @@ def test_path_spelled_programs_keep_the_execution_directory(repos: tuple) -> Non
         repos: Workspace, other root and session repository.
     """
     _, other, session = repos
-    for program in ("/usr/bin/true", "./build.sh"):
+    for program in ("/usr/bin/true", "./build.sh", "/opt/a=b/tool"):
         assert run(f"{program} && rm README.md", other, session) == (
             [("delete", f"{other.as_posix()}/README.md", TEXT, None)],
             True,
