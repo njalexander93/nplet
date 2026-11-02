@@ -185,6 +185,12 @@ def test_cursor_shell_override_admits_other_directories_and_gates_protected_effe
             "working_directory": str(directory),
         }
         assert "REGISTRATION_REQUIRED" in str(cursor.handle(observed))
+    # A wrapped lifecycle invocation keeps the session's repository.
+    observed["tool_input"] = {
+        "command": "env python src/nplet/lifecycle/task_workspace.py --request-json '{}'",
+        "working_directory": str(foreign),
+    }
+    assert "REPOSITORY_MISMATCH" in str(cursor.handle(observed))
     assert not (checkout / ".task").exists()
     assert not (foreign / ".task").exists()
 

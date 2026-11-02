@@ -1582,8 +1582,12 @@ def _route(event: core.JSONObject, host: str) -> bool:
             and set(args) <= {"command", "working_directory", "cwd", "timeout"}
             and isinstance(args.get("command"), str)
         ):
-            # An ordinary command may run in any directory; shell-effect recognition checks it.
-            cursor_shell_directory(args)
+            # An ordinary command may run in any directory; shell-effect recognition checks
+            # it. A lifecycle invocation, canonical or wrapped, keeps the session's repository.
+            if lifecycle_invocation(args["command"]):
+                cursor_lifecycle_shell(event, args)
+            else:
+                cursor_shell_directory(args)
             return False
         # Children and unsupported inputs retain their existing narrower contract.
         core.require(

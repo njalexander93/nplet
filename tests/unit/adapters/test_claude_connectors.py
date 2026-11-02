@@ -219,13 +219,20 @@ def test_unknown_tools_are_unchecked_only_for_a_claude_parent(tool: str, code: s
         "Workflow",
     ],
 )
-def test_edit_shell_and_delegation_tools_are_never_unchecked(tool: str) -> None:
+def test_edit_shell_and_delegation_tools_are_never_unchecked(
+    tool: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Keep edits, shells and delegation off the unchecked route.
 
     Args:
         tool: A tool with its own route or a closed shell or delegation tool.
+        monkeypatch: Scoped host configuration.
     """
-    assert not common.unchecked({"tool_name": tool, "tool_input": {}}, "claude-code")
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
+    # A valid call identity reaches routing; an unrouted tool there is unchecked.
+    event: JsonObject = {"tool_name": "WebFetch", "tool_input": {}, "tool_use_id": "c"}
+    assert common.unchecked(event, "claude-code")
+    assert not common.unchecked({**event, "tool_name": tool}, "claude-code")
 
 
 @pytest.mark.parametrize("tool", ["Write", "Bash", "Agent", "WebFetch"])
