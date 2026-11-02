@@ -236,7 +236,7 @@ stale packet and unresolved task work.
 
 Protected implementation covers file edits and shell commands by their effects.
 Structured edits (`Write`, `Edit`, `apply_patch` and Claude `NotebookEdit`) and the
-[recognized shell mutations](host-hooks.md#recognized-shell-mutations) of Claude
+[recognized shell mutations](shell-effects.md) of Claude
 `Bash` and Cursor parent `Shell` use the effect decision below. Unrecognized shell
 work is unchecked rather than protected. Other tool admission and Codex Desktop keep
 their current routes; later work covers them. A call to one of these edit tools with an unknown or malformed
