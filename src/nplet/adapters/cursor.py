@@ -144,6 +144,8 @@ def handle(event: core.JSONObject, *, deadline: float | None = None) -> core.JSO
             return {"permission": "allow"}  # Only this validated and recorded tool call passes.
         # Verify the configured Linear server through the MCP-specific callback.
         if name == "beforeMCPExecution":
+            # Only a valid operation name may reach Linear or unchecked admission.
+            common.native_token(observed.get("tool_name"))
             # Ticket bootstrap requires both generic and specific prehook facts.
             if observed.get("tool_name") == "get_issue" and common.selected_lookup(observed, HOST):
                 core.require(
