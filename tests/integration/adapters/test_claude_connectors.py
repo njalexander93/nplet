@@ -195,11 +195,11 @@ def test_preparation_reads_precede_ticket_without_lifecycle_effect(
                 )
                 == {}
             )
-        # Wrong paths, shell composition, other selections and providers stay denied.
+        # Shell composition with a protected workspace effect stays denied.
         denied = [
-            ("Bash", {"command": f"cat {quoted_procedure} | head"}),
-            ("Bash", {"command": f"cat {quoted_procedure}; true"}),
-            ("Bash", {"command": f"cat -n {quoted_procedure}"}),
+            ("Bash", {"command": f"cat {quoted_procedure} | head > notes.md"}),
+            ("Bash", {"command": f"cat {quoted_procedure}; rm -f notes.md"}),
+            ("Bash", {"command": f"cat -n {quoted_procedure} > notes.md"}),
             ("Bash", {"command": f"cat {quoted_agents}", "run_in_background": True}),
         ]
         # Each rejected call is denied with the ticket-read diagnostic.

@@ -91,7 +91,7 @@ def native_event(host: NativeHost, case: Fixture, name: str, **fields: JsonValue
         "tool_input": (
             {"file_path": str(case.root / "src/protected.py"), "content": "protected"}
             if host == "claude"
-            else {"command": "true", "cwd": "", "timeout": 30000}
+            else {"command": "rm -f src/protected.py", "cwd": "", "timeout": 30000}
         ),
     }
     # Use Claude's session identifier and native Bash arguments.
@@ -639,11 +639,12 @@ def test_cursor_shell_exit_callback_retains_pending_work(
     host, case = native
     case.create()
     case.ready()
+    case.approve()
     observed = native_event(
         host,
         case,
         "PreToolUse",
-        tool_input={"command": "sleep 2", "cwd": "", "timeout": 1000},
+        tool_input={"command": "rm -f src/protected.py", "cwd": "", "timeout": 1000},
     )
     assert dispatch(host, observed) == {"permission": "allow"}
     pending = case.state()["participants"][case.base["coordinator"]]["pending"]
@@ -717,6 +718,7 @@ def test_cursor_ambiguous_result_strings_retain_work(response: str) -> None:
         # Admit the actual native Shell operation before delivering ambiguous result data.
         case.create()
         case.ready()
+        case.approve()
         dispatch("cursor", native_event("cursor", case, "PreToolUse"))
         dispatch("cursor", native_event("cursor", case, "PostToolUse", tool_output=response))
         assert (
@@ -900,6 +902,7 @@ def test_cursor_imported_claude_hook_does_not_duplicate_writes(
     try:
         case.create()
         case.ready()
+        case.approve()
         before = case.state()
         monkeypatch.setenv("CURSOR_VERSION", "fixture")
         # Invoke the imported Claude translator and require a strict no-op.
@@ -1126,8 +1129,13 @@ def test_claude_foreground_shell_retains_ambiguous_results_then_settles(
         # Admit foreground Bash with only its native command arguments.
         case.create()
         case.ready()
+        case.approve()
         event = native_event(
-            "claude", case, "PreToolUse", tool_name="Bash", tool_input={"command": "true"}
+            "claude",
+            case,
+            "PreToolUse",
+            tool_name="Bash",
+            tool_input={"command": "rm -f src/protected.py"},
         )
         assert_decision("claude", claude.handle(event), True)
         # Reject missing certainty, interruption and explicit background handles.
