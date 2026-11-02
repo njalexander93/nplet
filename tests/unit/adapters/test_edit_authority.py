@@ -165,6 +165,34 @@ def test_native_pre_decides_shell_commands_by_recognized_effects(
     assert seen == calls
 
 
+def test_native_pre_denies_a_control_store_in_the_target_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Deny an unprotected shell effect inside another repository's control store.
+
+    Args:
+        monkeypatch: Replaces repository, recognizer and lifecycle boundaries.
+        tmp_path: Root of the target's own repository.
+    """
+    other = SimpleNamespace(repository=SimpleNamespace(trees=[tmp_path]))
+    points = [
+        SimpleNamespace(path=tmp_path / ".task/x", repository=other),
+        SimpleNamespace(path=tmp_path / ".task/x", repository=None),
+    ]
+    shell = SimpleNamespace(effects=[SimpleNamespace(location=SimpleNamespace(points=points))])
+    shell.targets = []
+    gate = common.EditGate(SimpleNamespace(protected=False), {}, Mock(), Path("p.json"))
+    effect = {"tool_name": "Bash", "tool_input": {"command": "rm -f x"}}
+    monkeypatch.setattr(common, "native_bootstrap", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(common, "native_effect", lambda *_args: effect)
+    monkeypatch.setattr(common, "edit_gate", lambda *_args: None)
+    monkeypatch.setattr(common.task_boundary, "task_free", lambda *_args: False)
+    monkeypatch.setattr(common, "shell_effects", lambda *_args: shell)
+    monkeypatch.setattr(common, "effect_gate", lambda _effects: gate)
+    with pytest.raises(core.WorkspaceError, match="NOT_OWNER"):
+        common.native_pre(native_event("Shell", {"command": "rm -f x"}), "cursor")
+
+
 @pytest.mark.parametrize(
     ("command", "expected"),
     [

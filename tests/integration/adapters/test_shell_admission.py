@@ -156,11 +156,23 @@ def test_shell_policy_and_control_targets_are_denied_under_whole_scope(
     """
     host, case = ready
     root = case.root
-    case.approve({root: ["./"], repos.policy.parent: ["./"]})
+    case.approve({root: ["./"], repos.policy.parent: ["./"], repos.c: ["./"]})
     before = task_store_snapshot(root)
     response = shell(root, host, f"rm -f {repos.policy.as_posix()}", "policy", bound=True)
     assert "POLICY_ADMINISTRATION" in str(response)
-    for index, command in enumerate(("rm -f .task/x", "rm -f .git/config")):
+    # Another repository's control store is denied too, even for binary content.
+    (repos.c / ".task/T").mkdir(parents=True)
+    (repos.c / ".task/T/roadmap.md").write_text("text")
+    (repos.plain / "a.png").write_bytes(PNG)
+    other = repos.c.as_posix()
+    for index, command in enumerate(
+        (
+            "rm -f .task/x",
+            "rm -f .git/config",
+            f"rm -f {other}/.task/T/roadmap.md",
+            f"cp {repos.plain.as_posix()}/a.png {other}/.task/T/a.png",
+        )
+    ):
         assert "NOT_OWNER" in str(shell(root, host, command, f"control-{index}", bound=True))
     assert task_store_snapshot(root) == before
 

@@ -1761,10 +1761,23 @@ def native_pre(event: core.JSONObject, host: str) -> None:
             gate = shell_gate
         is_root = task_boundary.root_test([] if repository is None else repository.trees)
         roles += [task_boundary.target_role("/", target, is_root) for target in shell.targets]
+        # A target's own repository marks its control stores too, not only the session's.
+        roles += [
+            task_boundary.target_role(
+                "/", str(point.path), task_boundary.root_test(point.repository.repository.trees)
+            )
+            for shell_effect in shell.effects
+            for point in shell_effect.location.points
+            if point.repository is not None
+        ]
     # A parent edit or shell command without protected effects needs no task; a child's
     # call keeps its scoped admission.
     if gate is not None:
-        free = not gate.decision.protected and event.get("child") is not True
+        free = (
+            not gate.decision.protected
+            and event.get("child") is not True
+            and "control" not in roles
+        )
     else:
         free = task_boundary.task_free(effect, host, operation, roles)
     # Validated parent reads, planning and task-free effects need no lifecycle admission.

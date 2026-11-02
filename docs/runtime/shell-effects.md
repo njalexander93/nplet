@@ -65,7 +65,8 @@ still comes from the hook's working directory.
 ## Denials and lifecycle commands
 
 An effect on the exemption policy file is denied with `POLICY_ADMINISTRATION`, and
-one on a `.task` or `.git` control store with `NOT_OWNER`. A command that runs a
+one on a control store such as `.task` or `.git` with `NOT_OWNER`, in the session's
+repository or the target's own, whatever the content. A command that runs a
 lifecycle entry point, directly or as a Python interpreter's script, `-m` module or
 `-c` code, keeps its lifecycle-control route instead of running free; a name given
 only as data does not count. With untrustworthy syntax, any mention of an entry
