@@ -648,9 +648,10 @@ that command in `<dir>`, while both callbacks reported the session directory as
 independent Bash call ran there.
 
 Metadata validation grants no readiness or synchronous completion guarantee.
-Only the finite reads below are task-free and create no pending lifecycle work.
-Other commands require current readiness and are recorded as pending before
-execution. Timeout can background execution. Every admitted parent Shell call
+The finite reads below and commands without a protected
+[recognized shell mutation](#recognized-shell-mutations) are task-free and create
+no pending lifecycle work. A command with a protected effect requires current
+readiness and is recorded as pending before execution. Timeout can background execution. Every admitted parent Shell call
 remains pending after native success or failure callbacks, including callbacks
 with integer `exitCode` and no async markers. Settlement requires independent
 verification of the original process termination followed by explicit lifecycle
@@ -677,8 +678,18 @@ described below.
 | `git --no-pager -c core.fsmonitor=false show` or `log` | Requires `--no-ext-diff --no-textconv`; optional `--stat`, `--name-only`, `--oneline` and literal operands |
 
 The Git forms also admit `--` before operands. They disable pager, filesystem
-monitor, external diff and text conversion behavior where applicable. General
-shell commands and package install/remove/update commands remain protected.
+monitor, external diff and text conversion behavior where applicable. On Codex,
+other commands remain readiness-gated. On Claude `Bash` and Cursor parent `Shell`,
+other commands follow the [recognized shell mutations](shell-effects.md).
+
+#### Recognized shell mutations
+
+Claude `Bash` and Cursor parent `Shell` commands other than the finite reads are
+gated by the file effects the adapter identifies in the command text: output
+redirections and plain `rm`, `cp` and `mv`. Each effect receives the same decision
+as a structured edit; everything else is unchecked and runs without a task. The
+[shell mutation contract](shell-effects.md) gives the recognized forms, the
+unchecked syntax, execution-directory resolution and the lifecycle-command route.
 
 #### Claude GitHub review fallback
 

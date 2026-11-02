@@ -10,7 +10,7 @@ import shlex
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import NamedTuple
 
 from nplet.adapters import bootstrap as encoded_bootstrap
@@ -22,6 +22,7 @@ from nplet.adapters.session_repository import (
     session_repository,
     session_root,
 )
+from nplet.adapters.shell_effects import segment_words, shell_effects
 from nplet.lifecycle import task_workspace as core
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -66,6 +67,8 @@ COMMON_FIELDS = {
 }
 LIFECYCLE = ROOT / "src/nplet/lifecycle/task_workspace.py"
 WINDOWS_BOOTSTRAP = ROOT / "src/nplet/adapters/bootstrap.py"
+# Module spellings of the lifecycle entry points, matched as dotted prefixes.
+LIFECYCLE_MODULES = ("nplet.lifecycle", "nplet.adapters.bootstrap")
 PYTHON = str(ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
 
 
@@ -1732,6 +1735,21 @@ def edit_gate(event: core.JSONObject, repository: core.Repository | None) -> Edi
         # An edit whose targets cannot be read must not fall back to readiness alone.
         core.require(event["tool_name"] not in task_boundary.EDIT_TOOLS, "INVALID_REQUEST")
         return None
+    return effect_gate(effects)
+
+
+def effect_gate(effects: list[task_boundary.Effect]) -> EditGate:
+    """Classify known file effects and refuse exemption policy administration.
+
+    Args:
+        effects: File effects of one structured edit or shell command.
+
+    Returns:
+        The effects' admission evidence.
+
+    Raises:
+        core.WorkspaceError: ``POLICY_ADMINISTRATION`` if an effect targets the policy file.
+    """
     # Read the policy path at call time so a relocated policy is honored.
     policy = repository_exemptions.POLICY
     memo: repository_location.Memo = {}
@@ -1740,6 +1758,99 @@ def edit_gate(event: core.JSONObject, repository: core.Repository | None) -> Edi
     # Agents never edit the policy that exempts their own repositories.
     core.require(not decision.policy, "POLICY_ADMINISTRATION")
     return EditGate(decision, memo, exemptions, policy)
+
+
+def lifecycle_invocation(command: str) -> bool:
+    """Report whether a shell command may run a lifecycle entry point.
+
+    shortcut: an indirect invocation through another script or a name built by
+    substitution is not detected, upgrade if lifecycle commands gain a dedicated host route.
+
+    Args:
+        command: Native shell command text.
+
+    Returns:
+        Whether some segment runs a lifecycle script, either directly or as the script,
+        ``-m`` module or ``-c`` code of a Python interpreter anywhere in the segment;
+        for untrustworthy syntax, whether the unquoted text names an entry point.
+    """
+    names = (LIFECYCLE.name, WINDOWS_BOOTSTRAP.name)
+    segments = segment_words(command)
+    # Without trusted segmentation, any mention of an entry point counts.
+    if segments is None:
+        text = command.replace("'", "").replace('"', "").replace("\\", "")
+        return any(name in text for name in (*names, *LIFECYCLE_MODULES))
+    for words in segments:
+        leaves = [PurePath(word.replace("\\", "/")).name for word in words]
+        if leaves[:1] and leaves[0] in names:
+            return True
+        # Wrappers such as ``poetry run`` or ``env`` may precede the interpreter.
+        start = next(
+            (
+                i
+                for i, leaf in enumerate(leaves)
+                if re.fullmatch(r"py|python[0-9.]*", leaf.removesuffix(".exe"))
+            ),
+            None,
+        )
+        args = iter(words[start + 1 :] if start is not None else [])
+        for word in args:
+            # Only the hash-policy long option takes a separate value; ``-`` reads the
+            # script from stdin.
+            if word.startswith("--"):
+                if word == "--check-hash-based-pycs":
+                    next(args, "")
+                continue
+            if word.startswith("-") and word != "-":
+                # Single-letter options cluster; ``m``, ``c``, ``X`` and ``W`` take the
+                # rest of the word or the next word, and ``m`` and ``c`` end the options.
+                flag = next((f for f in word[1:] if f in "mcXW"), "")
+                if not flag:
+                    continue
+                value = word[word.index(flag) + 1 :] or next(args, "")
+                if flag in "XW":
+                    continue
+                if (
+                    value.startswith(LIFECYCLE_MODULES)
+                    if flag == "m"
+                    else any(module in value for module in LIFECYCLE_MODULES)
+                ):
+                    return True
+                break
+            # The first non-option names the script.
+            if PurePath(word.replace("\\", "/")).name in names:
+                return True
+            break
+    return False
+
+
+def execution_directories(event: core.JSONObject, host: str) -> list[str]:
+    """Return every directory a validated native shell command may run in.
+
+    This is separate from the session repository, which always comes from the event's
+    validated working directory.
+
+    Args:
+        event: Validated Claude Bash or Cursor Shell envelope.
+        host: Explicit adapter identity.
+
+    Returns:
+        The event's working directory and, for Cursor, its nonempty native override,
+        each kept only when it is an absolute path to an existing directory. Installed
+        Cursor reported overrides it did not run in, so a relative effect is resolved
+        from both.
+    """
+    args = event["tool_input"]
+    candidates = [event.get("cwd")]
+    if host == "cursor":
+        candidates.append(args.get("working_directory") or args.get("cwd"))
+    return list(
+        dict.fromkeys(
+            directory
+            for directory in candidates
+            if isinstance(directory, str) and os.path.isabs(directory) and os.path.isdir(directory)
+        )
+    )
 
 
 def edit_authority(
@@ -1803,10 +1914,50 @@ def native_pre(event: core.JSONObject, host: str) -> None:
     repository = session_repository(event)
     roles = task_boundary.edit_roles(event, repository)
     gate = edit_gate(event, repository)
-    # A structured parent edit without protected effects needs no task; a child's
-    # edit keeps its scoped admission.
+    # A shell command other than a finite read is gated by its recognized file effects;
+    # unrecognized parts are unchecked and never gate on their own.
+    if (
+        gate is None
+        and effect["tool_name"] == "Bash"
+        and not task_boundary.task_free(effect, host, operation, roles)
+    ):
+        command = effect["tool_input"]["command"]
+        budget = task_boundary.Budget()
+        # With no known directory, relative operands stay unchecked.
+        directories: list[str | None] = [*execution_directories(event, host)] or [None]
+        shells = [
+            shell_effects(command, directory, repository, budget) for directory in directories
+        ]
+        effects = [item for each in shells for item in each.effects]
+        shell_gate = effect_gate(effects)
+        # A lifecycle invocation keeps its lifecycle-control route instead of running free.
+        lifecycle = lifecycle_invocation(command)
+        # A child's shell keeps its existing admission unless it has protected effects.
+        if shell_gate.decision.protected or (event.get("child") is not True and not lifecycle):
+            gate = shell_gate
+        is_root = task_boundary.root_test([] if repository is None else repository.trees)
+        roles += [
+            task_boundary.target_role("/", target, is_root)
+            for each in shells
+            for target in each.targets
+        ]
+        # A target's own repository marks its control stores too, not only the session's.
+        roles += [
+            task_boundary.target_role(
+                "/", str(point.path), task_boundary.root_test(point.repository.repository.trees)
+            )
+            for shell_effect in effects
+            for point in shell_effect.location.points
+            if point.repository is not None
+        ]
+    # A parent edit or shell command without protected effects needs no task; a child's
+    # call keeps its scoped admission.
     if gate is not None:
-        free = not gate.decision.protected and event.get("child") is not True
+        free = (
+            not gate.decision.protected
+            and event.get("child") is not True
+            and "control" not in roles
+        )
     else:
         free = task_boundary.task_free(effect, host, operation, roles)
     # Validated parent reads, planning and task-free effects need no lifecycle admission.
@@ -1823,7 +1974,7 @@ def native_pre(event: core.JSONObject, host: str) -> None:
     request = request_for(event, "ready", host)
     result = core.execute(request)
     core.require(result["ok"], result["code"])
-    # A protected structured edit also needs the roadmap's approval and scope.
+    # A protected edit or shell effect also needs the roadmap's approval and scope.
     if gate is not None:
         edit_authority(gate, result, repository)
     # Native permission approval remains separate from recording pending work.

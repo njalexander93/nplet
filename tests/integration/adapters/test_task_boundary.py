@@ -51,13 +51,15 @@ def test_cursor_same_checkout_shell_override_remains_task_free(checkout: Path) -
         assert not (checkout / ".task").exists()
 
 
-@pytest.mark.parametrize("command", ["npm install package", "git rev-parse HEAD", "pwd && touch x"])
+@pytest.mark.parametrize(
+    "command", ["npm install package > x", "git rev-parse HEAD > x", "pwd && rm -f x"]
+)
 def test_cursor_shell_metadata_requires_readiness(checkout: Path, command: str) -> None:
     """Keep native timeout metadata from bypassing protected-work readiness.
 
     Args:
         checkout: Unregistered repository whose lifecycle storage must remain absent.
-        command: Mutation or command outside the existing finite read grammar.
+        command: Command with a recognized protected workspace effect.
     """
     # Use the same native metadata as the installed Cursor pwd callback.
     observed = event(checkout, "cursor", "Shell", {"command": command, "cwd": "", "timeout": 30000})
@@ -72,8 +74,8 @@ def test_cursor_shell_metadata_requires_readiness(checkout: Path, command: str) 
 @pytest.mark.parametrize(
     ("command", "failure_type", "error_message"),
     [
-        ("true", "timeout", "Timed out"),
-        ("exit 7", "error", "Command failed with exit code 7"),
+        ("rm -f x", "timeout", "Timed out"),
+        ("rm -f x; exit 7", "error", "Command failed with exit code 7"),
     ],
 )
 def test_cursor_read_metadata_preserves_existing_pending_work(
@@ -108,6 +110,7 @@ def test_cursor_read_metadata_preserves_existing_pending_work(
         assert "NOT_READY" in str(response)
         assert case.state() == unready
         case.ready()
+        case.approve()
         assert cursor.handle(protected) == {"permission": "allow"}
         before = copy.deepcopy(case.state())
         pending = before["participants"][case.base["coordinator"]]["pending"]
@@ -153,10 +156,10 @@ def test_cursor_read_metadata_preserves_existing_pending_work(
         case.doCleanups()
 
 
-def test_cursor_shell_override_admits_other_directories_and_gates_unknown_effect(
+def test_cursor_shell_override_admits_other_directories_and_gates_protected_effect(
     checkout: Path, tmp_path: Path
 ) -> None:
-    """Admit a read in another repository or none; keep readiness for unknown commands.
+    """Admit a read in another repository or none; keep readiness for a protected effect.
 
     Args:
         checkout: Unregistered native checkout.
@@ -174,10 +177,11 @@ def test_cursor_shell_override_admits_other_directories_and_gates_unknown_effect
     ):
         observed = event(checkout, "cursor", "Shell", args)
         assert cursor.handle(observed) == {"permission": "allow"}
-    # Neither directory nor checkout identity grants task-free authority to an unknown command.
+    # Neither an override nor checkout identity frees a protected relative effect, which
+    # installed Cursor may run in the workspace root despite a foreign override.
     for directory in (checkout, foreign):
         observed["tool_input"] = {
-            "command": "npm install package",
+            "command": "npm install package > x",
             "working_directory": str(directory),
         }
         assert "REGISTRATION_REQUIRED" in str(cursor.handle(observed))
@@ -381,7 +385,7 @@ def test_native_package_mutation_denial_preserves_manifest_and_absent_task(
         checkout,
         host,
         "Shell" if host == "cursor" else "Bash",
-        {"command": "npm install package"},
+        {"command": "npm install package > install.log"},
     )
     result = subprocess.run(
         [sys.executable, "-m", "nplet.adapters." + host],
