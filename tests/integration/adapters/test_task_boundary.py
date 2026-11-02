@@ -156,36 +156,41 @@ def test_cursor_read_metadata_preserves_existing_pending_work(
         case.doCleanups()
 
 
-def test_cursor_shell_override_rejects_foreign_checkout_and_unknown_effect(
+def test_cursor_shell_override_admits_other_directories_and_gates_protected_effect(
     checkout: Path, tmp_path: Path
 ) -> None:
-    """Retain foreign checkout denial and readiness for mutation-capable commands.
+    """Admit a read in another repository or none; keep readiness for a protected effect.
 
     Args:
         checkout: Unregistered native checkout.
         tmp_path: Disposable parent for an unrelated Git repository.
     """
-    # Native identity validation must reject an override before effect normalization.
+    # An ordinary parent command may run in another repository or outside every one.
     foreign = tmp_path / "foreign"
     subprocess.run(["git", "init", "-q", str(foreign)], check=True)
-    observed = event(
-        checkout, "cursor", "Shell", {"command": "pwd", "working_directory": str(foreign)}
-    )
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    for args in (
+        {"command": "pwd", "working_directory": str(foreign)},
+        {"command": "pwd", "cwd": str(foreign), "timeout": 30000},
+        {"command": "pwd", "working_directory": str(plain)},
+    ):
+        observed = event(checkout, "cursor", "Shell", args)
+        assert cursor.handle(observed) == {"permission": "allow"}
+    # Neither an override nor checkout identity frees a protected relative effect, which
+    # installed Cursor may run in the workspace root despite a foreign override.
+    for directory in (checkout, foreign):
+        observed["tool_input"] = {
+            "command": "npm install package > x",
+            "working_directory": str(directory),
+        }
+        assert "REGISTRATION_REQUIRED" in str(cursor.handle(observed))
+    # A wrapped lifecycle invocation keeps the session's repository.
+    observed["tool_input"] = {
+        "command": "env python src/nplet/lifecycle/task_workspace.py --request-json '{}'",
+        "working_directory": str(foreign),
+    }
     assert "REPOSITORY_MISMATCH" in str(cursor.handle(observed))
-    observed["tool_input"] = {
-        "command": "pwd",
-        "cwd": str(foreign),
-        "timeout": 30000,
-    }
-    response = cursor.handle(observed)
-    assert response["permission"] == "deny"
-    assert "REPOSITORY_MISMATCH" in str(response)
-    # Same-checkout identity alone grants no task-free authority to a protected effect.
-    observed["tool_input"] = {
-        "command": "npm install package > x",
-        "working_directory": str(checkout),
-    }
-    assert "REGISTRATION_REQUIRED" in str(cursor.handle(observed))
     assert not (checkout / ".task").exists()
     assert not (foreign / ".task").exists()
 

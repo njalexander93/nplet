@@ -39,10 +39,10 @@ def test_native_identity_requires_single_cursor_root(
 
 
 @pytest.mark.parametrize("child", [False, True])
-def test_native_tool_cursor_shell_rejects_foreign_directory(
+def test_native_tool_cursor_shell_directory_in_another_repository(
     monkeypatch: pytest.MonkeyPatch, child: bool
 ) -> None:
-    """Parent and child Cursor shells cannot redirect to an unbound repository.
+    """Admit a parent Shell in another repository; a child cannot redirect there.
 
     Args:
         monkeypatch: Replaces repository or lifecycle boundaries for the case.
@@ -61,10 +61,13 @@ def test_native_tool_cursor_shell_rejects_foreign_directory(
             "child": child,
         }
     )
-    # Tool-supplied working directory cannot redirect to another checkout.
-    with pytest.raises(core.WorkspaceError) as captured:
-        common.native_tool(native, "cursor")
-    assert captured.value.code == "REPOSITORY_MISMATCH"
+    # An ordinary parent command may run anywhere; a child stays in its checkout.
+    if child:
+        with pytest.raises(core.WorkspaceError) as captured:
+            common.native_tool(native, "cursor")
+        assert captured.value.code == "REPOSITORY_MISMATCH"
+    else:
+        assert common.native_tool(native, "cursor") == "Shell"
     # An explicit bound root and an omitted override both retain Shell admission.
     native["tool_input"] = {"command": "echo ok", "working_directory": str(checkout)}
     assert common.native_tool(native, "cursor") == "Shell"
@@ -110,7 +113,7 @@ def test_cursor_shell_metadata_outside_every_repository_stays_admissible(
     assert common.native_tool(native, "cursor") == "Shell"
     # Lifecycle-command metadata follows the same rule.
     common.cursor_lifecycle_shell(native, {"command": "pwd", "cwd": str(plain)})
-    # A session outside any repository cannot redirect into one.
+    # An ordinary command may run in a repository, but a lifecycle command cannot.
     monkeypatch.setattr(
         common.core,
         "project_repository",
@@ -119,8 +122,9 @@ def test_cursor_shell_metadata_outside_every_repository_stays_admissible(
         ),
     )
     native["tool_input"] = {"command": "pwd", "working_directory": str(tmp_path / "repo")}
+    assert common.native_tool(native, "cursor") == "Shell"
     with pytest.raises(core.WorkspaceError) as captured:
-        common.native_tool(native, "cursor")
+        common.cursor_lifecycle_shell(native, native["tool_input"])
     assert captured.value.code == "REPOSITORY_MISMATCH"
 
 

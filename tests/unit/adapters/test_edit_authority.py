@@ -89,25 +89,28 @@ def test_native_pre_decides_structured_edits_by_their_effects(
 @pytest.mark.parametrize(
     ("host", "args", "cwd", "expected"),
     [
-        ("claude-code", {}, "dir", "dir"),
-        ("cursor", {"working_directory": "sub"}, "dir", "sub"),
-        ("cursor", {"cwd": "sub"}, "dir", "sub"),
-        ("cursor", {"cwd": ""}, "dir", "dir"),
-        ("claude-code", {}, "missing", None),
-        ("claude-code", {}, "relative", None),
+        ("claude-code", {}, "dir", ["dir"]),
+        ("claude-code", {"working_directory": "sub"}, "dir", ["dir"]),
+        ("cursor", {"working_directory": "sub"}, "dir", ["dir", "sub"]),
+        ("cursor", {"cwd": "sub"}, "dir", ["dir", "sub"]),
+        ("cursor", {"cwd": "dir"}, "dir", ["dir"]),
+        ("cursor", {"cwd": ""}, "dir", ["dir"]),
+        ("cursor", {"cwd": "sub"}, "missing", ["sub"]),
+        ("claude-code", {}, "missing", []),
+        ("claude-code", {}, "relative", []),
     ],
 )
-def test_execution_directory_is_an_existing_absolute_native_directory(
-    tmp_path: Path, host: str, args: dict[str, str], cwd: str, expected: str | None
+def test_execution_directories_are_existing_absolute_native_directories(
+    tmp_path: Path, host: str, args: dict[str, str], cwd: str, expected: list[str]
 ) -> None:
-    """Use Cursor's nonempty override, else the hook directory, only when it exists.
+    """Use the hook directory and Cursor's nonempty override, each only when it exists.
 
     Args:
         tmp_path: Disposable parent of the directories.
         host: Adapter identity.
         args: Native tool input.
         cwd: Hook working directory name.
-        expected: Expected directory name, or None.
+        expected: Expected directory names, in order.
     """
     (tmp_path / "dir").mkdir()
     (tmp_path / "sub").mkdir()
@@ -115,7 +118,7 @@ def test_execution_directory_is_an_existing_absolute_native_directory(
     place["relative"] = "dir"
     args = {key: place.get(value, value) for key, value in args.items()}
     event = {**native_event("Shell", args), "cwd": place[cwd]}
-    assert common.execution_directory(event, host) == (expected and place[expected])
+    assert common.execution_directories(event, host) == [place[name] for name in expected]
 
 
 @pytest.mark.parametrize(

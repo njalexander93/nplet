@@ -55,9 +55,11 @@ whole command is unchecked.
 ## Execution directory
 
 Relative operands resolve from the command's **execution directory**, not the chat
-or session directory: Cursor's validated nonempty `working_directory` or `cwd`,
-otherwise the hook's `cwd`. It must be an absolute existing directory; otherwise
-relative operands are unchecked. After any segment other than `cp`, `mv`, `rm`,
+or session directory: the hook's `cwd`. A Cursor nonempty `working_directory` or
+`cwd` override is a second execution directory, because installed Cursor reported
+overrides it did not run in (see [Finite shell reads](host-hooks.md#finite-shell-reads)); an
+operand is protected if it is protected from either. Each must be an absolute
+existing directory; with none, relative operands are unchecked. After any segment other than `cp`, `mv`, `rm`,
 `echo`, `pwd`, `cat` or a program spelled as a path, which may change directory,
 later relative operands are unchecked while absolute ones stay identified. The session repository
 still comes from the hook's working directory.

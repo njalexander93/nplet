@@ -205,10 +205,12 @@ def test_unbound_shell_gates_only_recognized_protected_parts(
         assert not allowed(host, shell(checkout, host, command, f"protected-{index}"))
 
 
-def test_cursor_relative_operand_resolves_from_the_execution_directory(
+def test_cursor_relative_operand_resolves_from_both_possible_directories(
     checkout: Path, repos: Repos
 ) -> None:
-    """Resolve a relative copy source from Cursor's working directory, not the chat's.
+    """Resolve a relative copy source from Cursor's override and the chat directory.
+
+    Installed Cursor reported overrides it did not run in, so either source may be copied.
 
     Args:
         checkout: Unregistered session workspace.
@@ -218,11 +220,12 @@ def test_cursor_relative_operand_resolves_from_the_execution_directory(
     (checkout / "sub/logo.png").write_bytes(PNG)
     (checkout / "logo.png").write_text("text")
     command = f"cp logo.png {repos.c.as_posix()}/src/logo.png"
-    # The binary source beside the execution directory makes the copy free.
     sub = str(checkout / "sub")
+    # The chat directory's text source of the same name makes it protected despite the override.
+    assert not allowed("cursor", shell(checkout, "cursor", command, "text", directory=sub))
+    # Binary sources in both places make the copy free.
+    (checkout / "logo.png").write_bytes(PNG)
     assert allowed("cursor", shell(checkout, "cursor", command, "binary", directory=sub))
-    # The chat directory's text source of the same name makes it protected.
-    assert not allowed("cursor", shell(checkout, "cursor", command, "text"))
 
 
 def test_free_shell_preserves_pending_ticket_read(checkout: Path, repos: Repos) -> None:

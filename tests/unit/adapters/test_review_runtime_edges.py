@@ -193,6 +193,14 @@ def cursor_specific(**changes: object) -> dict[str, Any]:
     return base
 
 
+# An unconfigured external server, whose calls are unchecked once validated.
+GITHUB = {
+    "tool_name": "search_repositories",
+    "mcp_server_name": "github",
+    "mcp_server_url": "https://api.githubcopilot.com/mcp/",
+}
+
+
 @pytest.mark.parametrize(
     "changes,expected_code",
     [
@@ -209,6 +217,10 @@ def cursor_specific(**changes: object) -> dict[str, Any]:
         ({"tool_input": {}}, "INVALID_REQUEST"),
         ({"tool_input": "[]"}, "INVALID_REQUEST"),
         ({"tool_input": "{"}, "INVALID_REQUEST"),
+        ({**GITHUB}, None),
+        ({**GITHUB, "tool_name": None}, "INVALID_REQUEST"),
+        ({**GITHUB, "tool_name": ""}, "INVALID_REQUEST"),
+        ({**GITHUB, "tool_name": 7}, "INVALID_REQUEST"),
     ],
 )
 def test_cursor_ordinary_provider_specific_hook_validates_provenance_and_object_input(

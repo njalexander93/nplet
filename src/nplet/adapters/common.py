@@ -1269,6 +1269,15 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
             raise core.WorkspaceError("HOST_UNSUPPORTED_WORKSPACE")
         cwd = event.get("cwd", roots[0])
         core.require(isinstance(cwd, str), "REPOSITORY_MISMATCH")
+        # Cursor mirrors a Shell directory override into the top-level cwd; that names
+        # where the command runs, not the session, which stays in its workspace root.
+        args = event.get("tool_input")
+        if (
+            event.get("tool_name") == "Shell"
+            and isinstance(args, dict)
+            and cwd in (args.get("cwd"), args.get("working_directory"))
+        ):
+            cwd = roots[0]
         # Resolve the session repository once; the workspace root must share it, or both
         # must lie outside every repository.
         normalized["cwd"] = cwd
@@ -1302,18 +1311,22 @@ def native_identity(event: core.JSONObject, host: str) -> core.JSONObject:
     return normalized
 
 
-def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> None:
+def cursor_shell_directory(args: core.JSONObject) -> str | None:
     """Validate native Shell metadata without authorizing the command.
 
     This validates transport fields only; timeout can background execution and
-    supplies no synchronous completion evidence.
+    supplies no synchronous completion evidence. The directory is not compared with
+    the session's repository; lifecycle callers use ``cursor_lifecycle_shell``.
 
     Args:
-        event: Identity-validated Cursor event with its observed repository.
         args: Native Shell input whose command authority the caller checks separately.
 
+    Returns:
+        The supplied ``cwd`` or ``working_directory`` text, or None when neither is
+        supplied or ``cwd`` is empty, so Shell runs in the event's own directory.
+
     Raises:
-        core.WorkspaceError: Fields, aliases, timeout or repository override are invalid.
+        core.WorkspaceError: Fields, aliases, timeout or directory type are invalid.
     """
     # Metadata alone grants neither command authority nor lifecycle settlement.
     core.require(
@@ -1325,14 +1338,32 @@ def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> Non
     if "timeout" in args:
         timeout = args["timeout"]
         core.require(type(timeout) is int and 1 <= timeout <= 2147483647, "HOST_UNSUPPORTED_TOOL")
-    # Empty native cwd supplies no override; a supplied directory must share the session's
-    # repository, or both must lie outside every repository.
+    # At most one directory field is present; empty native cwd supplies no override.
     key = "cwd" if "cwd" in args else "working_directory"
-    if key in args:
-        directory = args[key]
-        core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
-        if key == "cwd" and directory == "":
-            return
+    if key not in args:
+        return None
+    directory = args[key]
+    core.require(isinstance(directory, str), "REPOSITORY_MISMATCH")
+    return None if key == "cwd" and directory == "" else directory
+
+
+def cursor_lifecycle_shell(event: core.JSONObject, args: core.JSONObject) -> None:
+    """Validate Shell metadata for a lifecycle, reconciliation or child command.
+
+    These commands act on the session's own store, so a directory override must not
+    move them into another repository.
+
+    Args:
+        event: Identity-validated Cursor event with its observed repository.
+        args: Native Shell input whose command authority the caller checks separately.
+
+    Raises:
+        core.WorkspaceError: Fields, aliases, timeout or repository override are invalid.
+    """
+    # A supplied directory must share the session's repository, or both must lie
+    # outside every repository.
+    directory = cursor_shell_directory(args)
+    if directory is not None:
         core.require(project_root(directory) == session_project_root(event), "REPOSITORY_MISMATCH")
 
 
@@ -1346,6 +1377,10 @@ def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> 
 
     Returns:
         Whether this exact native tool call is a scoped lifecycle invocation.
+
+    Raises:
+        core.WorkspaceError: ``REPOSITORY_MISMATCH`` when a Cursor lifecycle command's
+            directory override lies in another repository.
     """
     # Native shells do not expose Codex's login/shell fields; accept only documented inputs.
     shell = "Bash" if host == "claude-code" else "Shell"
@@ -1364,15 +1399,19 @@ def native_bootstrap(event: core.JSONObject, host: str, ready: bool = False) -> 
     # Disallow background bootstrap commands.
     if args.get("run_in_background", False) is not False:
         return False
-    # A native working-directory override cannot redirect the bootstrap to another repository.
-    try:
-        # Reject working-directory redirects to another repository.
-        if host == "cursor":
-            cursor_lifecycle_shell(event, args)
-        return canonical_bootstrap(event, args.get("command"), host, ready)
     # Unverifiable shell details cannot establish canonical bootstrap.
+    try:
+        if host == "cursor":
+            cursor_shell_directory(args)
+        if not canonical_bootstrap(event, args.get("command"), host, ready):
+            return False
     except (core.WorkspaceError, OSError, ValueError, KeyError, TypeError):
         return False
+    # A lifecycle command cannot be redirected to another repository; it is denied
+    # rather than falling through to ordinary Shell admission.
+    if host == "cursor":
+        cursor_lifecycle_shell(event, args)
+    return True
 
 
 CLAUDE_SYNC_TOOLS = frozenset({"Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit"})
@@ -1383,18 +1422,82 @@ CLAUDE_NO_EFFECT_TOOLS = frozenset({"ToolSearch", "Skill", "SendMessage", "AskUs
 # A subagent's report to its parent changes nothing either; only a child identity may
 # use it, so a parent cannot impersonate a hand-back.
 CLAUDE_CHILD_REPORT_TOOLS = frozenset({"SubagentHandback"})
+# Delegation tools start or steer other agents; only a parent's foreground Agent call
+# has a verified child route. Workflow runs a script that spawns agents.
+CLAUDE_DELEGATION_TOOLS = frozenset(
+    {"Agent", "Task", "TaskOutput", "TaskStop", "SpawnAgent", "Workflow"}
+)
+# Moving the session into or out of a worktree changes its checkout, so a parent
+# needs readiness and records it as ordinary pending work.
+CLAUDE_PARENT_GATED_TOOLS = frozenset({"EnterWorktree", "ExitWorktree"})
+# These run shell commands outside the Bash policy, so they stay closed until shell
+# admission covers them.
+CLAUDE_CLOSED_TOOLS = frozenset({"Monitor", "PowerShell"})
+# Claude's retired multi-edit tool has no supported edit shape, so it stays denied rather
+# than bypassing the edit guard as an unknown tool.
+CLAUDE_UNSUPPORTED_EDIT_TOOLS = frozenset({"MultiEdit"})
+# Claude tools that never become unchecked when no route admits them: closed shells,
+# unsupported edits, a parent's hand-back and every structured edit tool.
+CLAUDE_DENIED_TOOLS = (
+    CLAUDE_CLOSED_TOOLS
+    | CLAUDE_UNSUPPORTED_EDIT_TOOLS
+    | CLAUDE_CHILD_REPORT_TOOLS
+    | task_boundary.EDIT_TOOLS
+)
+# Desktop app servers that keep their own route or stay denied: PR delivery, session
+# management, settings and the turn plan.
+APP_CLOSED_SERVERS = ("ccd_pr", "ccd_session_mgmt", "ccd_settings", "ccd_turn")
 CURSOR_SYNC_TOOLS = frozenset({"Read", "Write", "Edit", "Grep", "Delete"})
 
 
-def native_tool(event: core.JSONObject, host: str) -> str:
-    """Validate task-free inputs or tools with correlated synchronous completion.
+def _external_provider_call(tool: str, host: str) -> bool:
+    """Decide whether a parent MCP call with no provider route is unchecked or closed.
+
+    Args:
+        tool: Native tool name.
+        host: Explicit adapter identity, Claude Code or Cursor.
+
+    Returns:
+        False for a non-MCP tool name, a closed desktop app server, a Cursor Linear
+        operation and every operation on a Linear-named Claude server that is a delete
+        or in the inventory.
+    """
+    # Cursor's generic callback carries no server, so a Linear operation keeps its route
+    # and the blocking beforeMCPExecution hook checks the server of every other call.
+    if host == "cursor":
+        return tool.startswith("MCP:") and tool[4:] not in LINEAR_PROVIDER_OPERATIONS
+    # Only an MCP tool name is external; a native tool carrying server metadata keeps
+    # its own route and is denied here rather than escaping it.
+    if not tool.startswith("mcp__") or tool.startswith(
+        tuple(f"mcp__{s}__" for s in APP_CLOSED_SERVERS)
+    ):
+        return False
+    # A Linear-named server keeps its inventory route and denied deletes whatever its
+    # provenance; that route checks provenance before granting Linear authority.
+    for provider in _claude_linear_providers():
+        prefix = f"mcp__{provider}__"
+        if tool.startswith(prefix):
+            operation = tool[len(prefix) :]
+            # Every delete_ operation stays closed; other unlisted operations are unchecked
+            # external work that grants no ticket or lifecycle evidence.
+            return operation not in LINEAR_PROVIDER_OPERATIONS and not operation.startswith(
+                "delete_"
+            )
+    return True
+
+
+def _route(event: core.JSONObject, host: str) -> bool:
+    """Validate a native tool call against every route and report unchecked admission.
+
+    Known routes and denials run first; unchecked admission is the final fallback, so a
+    new route here can never be bypassed by it.
 
     Args:
         event: Native envelope carrying the actual tool-use identifier.
         host: Explicit adapter identity.
 
     Returns:
-        The native tool name after validating its supported input shape.
+        True for a valid parent call that no route names; False for a routed call.
 
     Raises:
         core.WorkspaceError: If the tool, child, provider, or async path is unsupported.
@@ -1406,13 +1509,15 @@ def native_tool(event: core.JSONObject, host: str) -> str:
     # Require a structured native tool input for supported synchronous work.
     if not isinstance(args, dict):
         raise core.WorkspaceError("INVALID_REQUEST")
+    # Only a Claude or Cursor parent can make an unchecked call.
+    parent = event.get("child") is not True and host in {"claude-code", "cursor"}
     # Validate configured provider provenance and exact named parent operations before effects.
     # Existing child restrictions remain narrower than the parent's task-free contracts.
     if tool.startswith(("mcp__", "MCP:")) or event.get("mcp_server") is not None:
         # A parent may read and arm the app's PR monitor; delivery stays with the parent.
         if _app_pr_monitor_tool(event, host) is not None:
             core.require(event.get("child") is not True, "HOST_UNSUPPORTED_PROVIDER")
-            return tool
+            return False
         if host == "claude-code" and tool in {
             "mcp__ccd_turn__update_plan",
             "mcp__ccd_turn__wrap_up",
@@ -1428,7 +1533,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
                 else {"recap", "ask", "blocked", "actions"}
             )
             core.require(bool(args) and set(args) <= allowed, "INVALID_REQUEST")
-            return tool
+            return False
         operation = (
             tool[4:]
             if host == "cursor"
@@ -1436,16 +1541,19 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             and tool[4:] in LINEAR_PROVIDER_OPERATIONS
             else _linear_provider_tool(event, host)
         )
+        # A parent call that no provider route names is unchecked unless it is closed.
+        if operation is None and parent and _external_provider_call(tool, host):
+            return True
         core.require(operation is not None, "HOST_UNSUPPORTED_PROVIDER")
         # A child subagent gets no provider writes; issue delivery stays with the parent.
         core.require(
             event.get("child") is not True or operation in LINEAR_CHILD_OPERATIONS,
             "HOST_UNSUPPORTED_PROVIDER",
         )
-        return tool
+        return False
     # Child and delegation tools require their own verified identity. Only a Claude
     # parent's foreground Agent call has one: SubagentStart joins its child.
-    if tool in {"Agent", "Task", "TaskOutput", "TaskStop", "SpawnAgent"}:
+    if tool in CLAUDE_DELEGATION_TOOLS:
         core.require(
             host == "claude-code" and tool == "Agent" and event.get("child") is not True,
             "HOST_UNSUPPORTED_CHILD_IDENTITY",
@@ -1454,7 +1562,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         core.require(args.get("run_in_background", False) is False, "HOST_UNSUPPORTED_BACKGROUND")
         # An isolated child runs in another worktree that this binding does not cover.
         core.require(args.get("isolation") is None, "HOST_UNSUPPORTED_CHILD_IDENTITY")
-        return tool
+        return False
     # The project disables Claude auto-backgrounding; never assume an unconfigured host did so.
     if host == "claude-code" and tool == "Bash":
         core.require(
@@ -1466,7 +1574,7 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             and args.get("run_in_background", False) is False,
             "HOST_UNSUPPORTED_ASYNC",
         )
-        return tool
+        return False
     # Parent Shell metadata grants neither readiness nor terminal completion evidence.
     if host == "cursor" and tool == "Shell":
         if (
@@ -1474,8 +1582,13 @@ def native_tool(event: core.JSONObject, host: str) -> str:
             and set(args) <= {"command", "working_directory", "cwd", "timeout"}
             and isinstance(args.get("command"), str)
         ):
-            cursor_lifecycle_shell(event, args)
-            return tool
+            # An ordinary command may run in any directory; shell-effect recognition checks
+            # it. A lifecycle invocation, canonical or wrapped, keeps the session's repository.
+            if lifecycle_invocation(args["command"]):
+                cursor_lifecycle_shell(event, args)
+            else:
+                cursor_shell_directory(args)
+            return False
         # Children and unsupported inputs retain their existing narrower contract.
         core.require(
             set(args) <= {"command", "working_directory"} and isinstance(args.get("command"), str),
@@ -1488,15 +1601,20 @@ def native_tool(event: core.JSONObject, host: str) -> str:
                 project_root(args["working_directory"]) == session_project_root(event),
                 "REPOSITORY_MISMATCH",
             )
-        return tool
-    # A child may also hand its report back; every other host keeps its own set.
+        return False
+    # A child may also hand its report back and only a parent moves worktrees; every
+    # other host keeps its own set.
     supported = (
         CLAUDE_SYNC_TOOLS
         | CLAUDE_NO_EFFECT_TOOLS
-        | (CLAUDE_CHILD_REPORT_TOOLS if event.get("child") is True else frozenset())
+        | (CLAUDE_CHILD_REPORT_TOOLS if event.get("child") is True else CLAUDE_PARENT_GATED_TOOLS)
         if host == "claude-code"
         else CURSOR_SYNC_TOOLS
     )
+    # Every route above runs first, so only a Claude parent tool that none of them
+    # names, and that is not closed, falls through to unchecked admission.
+    if host == "claude-code" and parent and tool not in supported | CLAUDE_DENIED_TOOLS:
+        return True
     core.require(tool in supported, "HOST_UNSUPPORTED_TOOL")
     core.require(
         not any(
@@ -1504,7 +1622,46 @@ def native_tool(event: core.JSONObject, host: str) -> str:
         ),
         "HOST_UNSUPPORTED_ASYNC",
     )
-    return tool
+    return False
+
+
+def unchecked(event: core.JSONObject, host: str) -> bool:
+    """Decide whether a Claude or Cursor parent call is unchecked external work.
+
+    An unchecked call is admitted with no lifecycle work: no readiness, ticket-read,
+    tool-start or settlement. The decision is ``native_tool``'s own routing, so every
+    tool with its own route, every edit and shell tool, the delegation tools, closed
+    provider operations, child calls and Codex calls stay outside it.
+
+    Args:
+        event: Native envelope carrying the host's tool name and child flag.
+        host: Explicit adapter identity; Claude Code and Cursor have unchecked calls.
+
+    Returns:
+        True only for a valid parent tool that no existing route names.
+    """
+    # A denied or malformed call is never unchecked; its admission reports the denial.
+    try:
+        return _route(event, host)
+    except core.WorkspaceError:
+        return False
+
+
+def native_tool(event: core.JSONObject, host: str) -> str:
+    """Validate task-free inputs or tools with correlated synchronous completion.
+
+    Args:
+        event: Native envelope carrying the actual tool-use identifier.
+        host: Explicit adapter identity.
+
+    Returns:
+        The native tool name after validating its supported input shape.
+
+    Raises:
+        core.WorkspaceError: If the tool, child, provider, or async path is unsupported.
+    """
+    _route(event, host)
+    return native_token(event["tool_name"])
 
 
 def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
@@ -1516,7 +1673,12 @@ def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
 
     Returns:
         A copied canonical Bash effect for validated Claude Bash or Cursor Shell;
-        otherwise the original event, including all Codex input metadata.
+        otherwise the original event, including all Codex input metadata. The effect
+        carries a top-level ``command_cwd``: advisory input for shell-effect
+        recognition, never a replacement for the event's ``cwd``
+        or repository. It is the event's ``cwd`` when no Cursor directory override
+        is supplied, or None when one is: the directory is then unknown, and a
+        recognized relative file effect must not become unchecked solely for that.
 
     Raises:
         core.WorkspaceError: If Claude or Cursor native tool validation fails.
@@ -1527,11 +1689,17 @@ def native_effect(event: core.JSONObject, host: str) -> core.JSONObject:
     tool = native_tool(event, host)
     # Normalize validated shell effects; read metadata does not prove foreground completion.
     if (host, tool) in {("claude-code", "Bash"), ("cursor", "Shell")}:
-        return {
+        effect = {
             **event,
             "tool_name": "Bash",
             "tool_input": {"command": event["tool_input"]["command"]},
+            "command_cwd": event.get("cwd"),
         }
+        # Installed Cursor reported overrides it did not run in, so an override leaves
+        # the command's directory unknown.
+        if host == "cursor" and cursor_shell_directory(event["tool_input"]) is not None:
+            effect["command_cwd"] = None
+        return effect
     return event
 
 
@@ -1660,8 +1828,8 @@ def lifecycle_invocation(command: str) -> bool:
     return False
 
 
-def execution_directory(event: core.JSONObject, host: str) -> str | None:
-    """Return the directory a validated native shell command runs in.
+def execution_directories(event: core.JSONObject, host: str) -> list[str]:
+    """Return every directory a validated native shell command may run in.
 
     This is separate from the session repository, which always comes from the event's
     validated working directory.
@@ -1671,17 +1839,22 @@ def execution_directory(event: core.JSONObject, host: str) -> str | None:
         host: Explicit adapter identity.
 
     Returns:
-        Cursor's nonempty native directory override or else the event's working
-        directory, when that is an absolute path to an existing directory; otherwise None.
+        The event's working directory and, for Cursor, its nonempty native override,
+        each kept only when it is an absolute path to an existing directory. Installed
+        Cursor reported overrides it did not run in, so a relative effect is resolved
+        from both.
     """
     args = event["tool_input"]
-    directory = event.get("cwd")
-    # Cursor's override was validated against the session repository by native_tool.
+    candidates = [event.get("cwd")]
     if host == "cursor":
-        directory = args.get("working_directory") or args.get("cwd") or directory
-    if isinstance(directory, str) and os.path.isabs(directory) and os.path.isdir(directory):
-        return directory
-    return None
+        candidates.append(args.get("working_directory") or args.get("cwd"))
+    return list(
+        dict.fromkeys(
+            directory
+            for directory in candidates
+            if isinstance(directory, str) and os.path.isabs(directory) and os.path.isdir(directory)
+        )
+    )
 
 
 def edit_authority(
@@ -1731,6 +1904,9 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         core.require(result["ok"], result["code"])
         return
     effect = native_effect(event, host)
+    # An unchecked parent call does no lifecycle work, not even a readiness check.
+    if unchecked(event, host):
+        return
     tool = event["tool_name"]
     # Select the provider operation and classify edit targets against the carried
     # session repository's worktrees.
@@ -1750,23 +1926,31 @@ def native_pre(event: core.JSONObject, host: str) -> None:
         and not task_boundary.task_free(effect, host, operation, roles)
     ):
         command = effect["tool_input"]["command"]
-        shell = shell_effects(
-            command, execution_directory(event, host), repository, task_boundary.Budget()
-        )
-        shell_gate = effect_gate(shell.effects)
+        budget = task_boundary.Budget()
+        # With no known directory, relative operands stay unchecked.
+        directories: list[str | None] = [*execution_directories(event, host)] or [None]
+        shells = [
+            shell_effects(command, directory, repository, budget) for directory in directories
+        ]
+        effects = [item for each in shells for item in each.effects]
+        shell_gate = effect_gate(effects)
         # A lifecycle invocation keeps its lifecycle-control route instead of running free.
         lifecycle = lifecycle_invocation(command)
         # A child's shell keeps its existing admission unless it has protected effects.
         if shell_gate.decision.protected or (event.get("child") is not True and not lifecycle):
             gate = shell_gate
         is_root = task_boundary.root_test([] if repository is None else repository.trees)
-        roles += [task_boundary.target_role("/", target, is_root) for target in shell.targets]
+        roles += [
+            task_boundary.target_role("/", target, is_root)
+            for each in shells
+            for target in each.targets
+        ]
         # A target's own repository marks its control stores too, not only the session's.
         roles += [
             task_boundary.target_role(
                 "/", str(point.path), task_boundary.root_test(point.repository.repository.trees)
             )
-            for shell_effect in shell.effects
+            for shell_effect in effects
             for point in shell_effect.location.points
             if point.repository is not None
         ]
@@ -1833,6 +2017,9 @@ def native_post(event: core.JSONObject, host: str, failed: bool) -> None:
     if native_bootstrap(event, host, ready=True):
         return
     tool = native_tool(event, host)
+    # An unchecked parent call was never admitted, so it has nothing to settle.
+    if unchecked(event, host):
+        return
     request = existing_admission(event, host)
     if request is None:
         return
@@ -2404,7 +2591,8 @@ def _recovery_route(code: str, host: str) -> str:
             )
         tools = (
             "Read, Write, Edit, Glob, Grep, NotebookEdit, foreground Bash, ToolSearch, Skill, "
-            "SendMessage or AskUserQuestion (a subagent also has SubagentHandback)"
+            "SendMessage or AskUserQuestion (a parent also has EnterWorktree and ExitWorktree, "
+            "a subagent SubagentHandback)"
             if host == "claude-code"
             else "Read, Write, Edit, Grep, Delete or foreground Shell"
         )
@@ -2426,8 +2614,8 @@ def _recovery_route(code: str, host: str) -> str:
                 "Child or delegation work cannot reuse the parent binding. Only a foreground "
                 "Agent call without isolation from a ready parent session is admitted; its "
                 "subagent receives its own reader binding at SubagentStart. Nested Agent "
-                "calls, Task, TaskOutput, TaskStop, SpawnAgent and children of an unready "
-                "parent stay unsupported; perform that step in the parent session."
+                "calls, Task, TaskOutput, TaskStop, SpawnAgent, Workflow and children of an "
+                "unready parent stay unsupported; perform that step in the parent session."
             )
         return (
             "Child or delegation work has no verified child identity on this host and cannot "

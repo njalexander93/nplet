@@ -49,8 +49,9 @@ def test_desktop_connector_requires_mapping_and_exact_correlated_read(
                 tool_name=f"mcp__{CONNECTOR}__get_issue",
                 mcp_server={"name": CONNECTOR, "source": source},
             )
-        # A UUID alone grants no exception, even when the host reports a known source.
-        assert "HOST_UNSUPPORTED_PROVIDER" in str(claude.handle(before[0]))
+        # An unmapped UUID is unchecked external work that grants no ticket read.
+        assert claude.handle(before[0]) == {}
+        assert not (case.root / ".task/TEST-1").exists()
         monkeypatch.setenv("NPLET_CLAUDE_LINEAR_CONNECTOR_ID", CONNECTOR)
         # Wrong issues remain denied and must not create a workspace.
         wrong = {**before[0], "tool_input": {"id": "TEST-2"}}
@@ -314,15 +315,22 @@ def test_configured_parent_provider_operations_leave_task_state_unchanged(
         )
         assert claude.handle(failure) == {}
         assert pending() == {}
-        # Unconfigured servers, other operations and wrong provenance stay denied.
+        # Unconfigured servers and unlisted operations are unchecked; neither changes state.
         before = case.state()
         for event in (
             {**provider("PreToolUse", "save_document", "doc"), "tool_input": {}},
             {**provider("PreToolUse", "get_issue", "other"), "tool_name": "mcp__other__get_issue"},
+        ):
+            assert claude.handle(event) == {}
+            done = {**event, "hook_event_name": "PostToolUse", "tool_response": "ok"}
+            assert claude.handle(done) == {}
+        # Wrong provenance and denied deletes stay denied.
+        for event in (
             {
                 **provider("PreToolUse", "get_issue", "local"),
                 "mcp_server": {"name": CONNECTOR, "source": "user"},
             },
+            provider("PreToolUse", "delete_comment", "delete"),
         ):
             # Each rejected provider call leaves lifecycle state unchanged.
             assert _denied(claude.handle(event), "HOST_UNSUPPORTED_PROVIDER")
